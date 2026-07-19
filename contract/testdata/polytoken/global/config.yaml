@@ -1,0 +1,16 @@
+# Synthetic, non-personal global Polytoken config layer for staging contract
+# tests. Declares two providers/models with a synthetic auth key, a default, and
+# no environment expansion.
+providers:
+  codex:
+    api_key: synthetic-codex-key-do-not-use
+    base_url: https://api.codex.test
+  zai:
+    api_key: synthetic-zai-key-do-not-use
+models:
+  codex/gpt:
+    enabled: true
+  zai/glm:
+    enabled: true
+defaults:
+  full: zai/glm
