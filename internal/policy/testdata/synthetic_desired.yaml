@@ -1,0 +1,41 @@
+# Synthetic desired-policy example — NOT a built-in default.
+#
+# This fixture illustrates the explicit CodexBar→Polytoken provider mapping with
+# exact concrete base-model enumeration. It is consumed by the policy graph tests
+# to prove deterministic, offline resolution. These provider/model names are
+# synthetic examples, not real or shipped defaults.
+version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    polytoken_providers: [codex]
+    models:
+      - codex/gpt-5.6-sol
+      - codex/gpt-5.6-luna
+  zai:
+    codexbar_providers: [z.ai]
+    polytoken_providers: [zai]
+    models:
+      - zai/glm-5.2
+global:
+  id: global
+  root: /home/user/.config/polytoken
+  full: [codex/gpt-5.6-sol, zai/glm-5.2]
+  mini: [codex/gpt-5.6-luna]
+  nano: [codex/gpt-5.6-luna]
+  classifier: [codex/gpt-5.6-sol]
+  definitions:
+    - path: agents/research.md
+      chain: [codex/gpt-5.6-sol(medium), zai/glm-5.2]
+projects:
+  - id: demo
+    root: /home/user/workspace/demo
+    full: [codex/gpt-5.6-sol]
+    definitions:
+      - path: .polytoken/agents/helper.md
+        chain: [zai/glm-5.2]
+operational:
+  validation_timeout: 30s
+  lock_wait: 10s
+  recovered_retention: 168h
+  backup_count: 5
