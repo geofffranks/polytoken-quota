@@ -128,6 +128,12 @@ func (d *doc) setBool(raw []byte, path []string, v bool) ([]byte, error) {
 		}
 		return d.insertKey(raw, path, []byte(rep))
 	}
+	// Guard against a nil value node before valueSpan dereferences it.
+	// resolveValue never returns exists=true with a nil value today, but this
+	// mirrors setScalar's guard and protects against a future refactor.
+	if val == nil {
+		return nil, newError("document: %q has no value node", strings.Join(path, "."))
+	}
 	if val == nil || val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
 		// Allow editing a bool that happens to be untyped-tagged; still replace
 		// the span. But refuse sequences/mappings.
@@ -164,6 +170,12 @@ func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, er
 	}
 	if val.Kind != yaml.SequenceNode {
 		return nil, newError("document: %q is not a sequence", strings.Join(path, "."))
+	}
+	// A flow-style sequence (`k: [a, b]`) shares the key's line, so a block-style
+	// rewrite would overwrite the key and emit invalid YAML. Editing flow style
+	// in place is not supported; fail closed rather than corrupt the output.
+	if val.Style&yaml.FlowStyle != 0 {
+		return nil, newError("document: %q is a flow-style sequence (not editable; use block style)", strings.Join(path, "."))
 	}
 	start, end := d.sequenceSpan(val)
 	// The existing list items occupy whole lines; preserve that layout by

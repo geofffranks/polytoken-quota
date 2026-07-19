@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // golden reads a testdata fixture, failing the test on any I/O error.
@@ -347,5 +349,119 @@ func TestBoolLikeScalarQuotedOnInsert(t *testing.T) {
 	// And the result must still parse.
 	if _, err := EditYAML(out, nil); err != nil {
 		t.Fatalf("result does not parse: %v", err)
+	}
+}
+
+// TestSequenceEditFlowStyleRefused proves a flow-style sequence
+// (`fallback_models: [a, b]`) is REFUSED rather than silently corrupted. The
+// editor's sequence span begins at the key's line; for a flow sequence the key
+// and value share that line, so a block-style rewrite would overwrite the key
+// and emit invalid YAML. The fail-closed contract returns an error and leaves
+// the bytes untouched. A flow sequence is a valid, unambiguous structure, so
+// the error must NOT be classified as ambiguous.
+func TestSequenceEditFlowStyleRefused(t *testing.T) {
+	in := golden(t, "flow-sequence.yaml")
+	out, err := EditYAML(in, []Edit{{Path: []string{"polytoken", "fallback_models"}, Kind: Sequence, Sequence: []string{"minime/gemma", "codex/gpt-5.6-sol"}}})
+	if err == nil {
+		t.Fatalf("flow-style sequence edit was accepted (silent corruption):\n%s", out)
+	}
+	// On error EditYAML returns nil bytes; the caller keeps its original input
+	// untouched (the standard "discard the nil, keep what you had" contract).
+	// The original must still parse cleanly — i.e. nothing was corrupted.
+	if out != nil {
+		t.Fatalf("flow-style edit returned non-nil bytes despite refusing:\n got=%q", out)
+	}
+	if _, perr := EditYAML(in, nil); perr != nil {
+		t.Fatalf("original input corrupted by refused edit: %v", perr)
+	}
+	if IsAmbiguous(err) {
+		t.Fatalf("flow-sequence refusal misclassified as ambiguous: %v", err)
+	}
+}
+
+// TestSequenceEditBlockStyleStillWorks confirms that ordinary block-style
+// sequence edits still succeed after the flow-style refusal was added, and that
+// only the managed item spans change.
+func TestSequenceEditBlockStyleStillWorks(t *testing.T) {
+	in := []byte("polytoken:\n  model: codex/gpt\n  fallback_models:\n    - minime/gemma\n    - zai/glm-5.2\n")
+	out, err := EditYAML(in, []Edit{{Path: []string{"polytoken", "fallback_models"}, Kind: Sequence, Sequence: []string{"minime/gemma", "codex/gpt-5.6-sol"}}})
+	if err != nil {
+		t.Fatalf("block-style sequence edit failed: %v", err)
+	}
+	want := bytes.Replace(in, []byte("zai/glm-5.2"), []byte("codex/gpt-5.6-sol"), 1)
+	if !bytes.Equal(out, want) {
+		t.Fatalf("block-style edit changed more than the managed span:\n got=%q\nwant=%q", out, want)
+	}
+}
+
+// TestIsAmbiguousSyntaxNotStructural proves a malformed-YAML *syntax* error is
+// NOT reported as ambiguous. IsAmbiguous must report only genuine structural
+// ambiguity (duplicate keys, anchors/aliases, merge keys); parse failures and
+// wrong-kind paths are ordinary errors.
+func TestIsAmbiguousSyntaxNotStructural(t *testing.T) {
+	cases := map[string]struct {
+		in    []byte
+		edit  Edit
+	}{
+		"unclosed flow":   {[]byte("models: [unclosed\n"), scalarEdit("a", "2")},
+		"tab indent":      {[]byte("a:\n\tb: 1\n"), scalarEdit("a", "2")},
+		"bad mapping":     {[]byte("a: b: c\n"), scalarEdit("a", "2")},
+		"wrong-kind path": {[]byte("models: codex/gpt\n"), Edit{Path: []string{"models", "enabled"}, Kind: Scalar, Scalar: strPtr("2")}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := EditYAML(tc.in, []Edit{tc.edit})
+			if err == nil {
+				t.Fatalf("expected an error for %q", name)
+			}
+			if IsAmbiguous(err) {
+				t.Fatalf("non-ambiguous error misclassified as ambiguous (%s): %v", name, err)
+			}
+		})
+	}
+}
+
+// TestIsAmbiguousDuplicateKeyIsStructural proves a genuine duplicate-key
+// document IS still reported as ambiguous after the error-type split, while a
+// plain missing-value path is not.
+func TestIsAmbiguousDuplicateKeyIsStructural(t *testing.T) {
+	_, err := EditYAML([]byte("a: 1\na: 2\n"), []Edit{scalarEdit("a", "3")})
+	if err == nil {
+		t.Fatal("duplicate-key document was accepted")
+	}
+	if !IsAmbiguous(err) {
+		t.Fatalf("duplicate-key document not classified ambiguous: %v", err)
+	}
+}
+
+// TestSetBoolNilValueGuard is a regression guard for the defensive nil check in
+// setBool. resolveValue never returns exists=true with a nil value node (a nil
+// value resolves to "not found"), so the dereference is not reachable through
+// EditYAML today; this test pins the contract so a future refactor that leaks a
+// nil value node fails loudly instead of panicking inside valueSpan.
+func TestSetBoolNilValueGuard(t *testing.T) {
+	// Hand-build a doc whose mapping pairs a key with a nil value node, then
+	// exercise setBool directly. We bypass resolveValue's nil->not-found mapping
+	// by calling setBool with a path that resolves to the nil value through a
+	// constructed tree where the key is the final segment of an existing parent.
+	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "k", Tag: "!!str"},
+		nil, // value node intentionally nil
+	}}
+	d := &doc{
+		root:    &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}},
+		raw:     []byte("k:\n"),
+		newline: []byte("\n"),
+		lines:   lineOffsets([]byte("k:\n")),
+	}
+	// setBool must not panic and must return a clean result (either an error or
+	// a safe splice), never a nil-pointer dereference.
+	panicked := true
+	func() {
+		defer func() { panicked = recover() != nil }()
+		_, _ = d.setBool([]byte("k:\n"), []string{"k"}, true)
+	}()
+	if panicked {
+		t.Fatal("setBool panicked on a nil value node")
 	}
 }

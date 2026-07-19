@@ -1,0 +1,4 @@
+polytoken:
+  model: codex/gpt
+  fallback_models: [minime/gemma, zai/glm-5.2]
+  other: keep

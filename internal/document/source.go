@@ -63,7 +63,11 @@ type Source struct {
 	FrontmatterEnd   int    // byte offset just past the closing "---" line
 }
 
-// editError is a typed error for unmanageable or structurally ambiguous input.
+// editError is a typed error for ordinary editor failures: parse errors,
+// missing values, wrong-kind paths, and refused (but structurally valid) edits
+// such as flow-style sequences. It is NOT structural ambiguity; use
+// IsAmbiguous to distinguish genuine ambiguity (duplicate keys, anchors/aliases,
+// merge keys), which is reported as *ambiguousError.
 type editError struct{ msg string }
 
 func (e *editError) Error() string { return e.msg }
@@ -73,13 +77,27 @@ func newError(format string, args ...any) error {
 	return &editError{msg: fmt.Sprintf(format, args...)}
 }
 
+// ambiguousError marks a structurally ambiguous document that the editor refused
+// to touch: duplicate keys, anchors/aliases, or merge keys.
+type ambiguousError struct{ msg string }
+
+func (e *ambiguousError) Error() string { return e.msg }
+
+// newAmbiguousError returns an error classifying the document as structurally
+// ambiguous.
+func newAmbiguousError(format string, args ...any) error {
+	return &ambiguousError{msg: fmt.Sprintf(format, args...)}
+}
+
 // IsAmbiguous reports whether err indicates a structurally ambiguous document
 // (duplicate keys, anchors/aliases, or merge keys) that the editor refused to
-// touch. Callers use this to surface a policy/source error rather than
-// silently round-tripping.
+// touch. Ordinary failures — parse errors, missing values, wrong-kind paths,
+// and refused-but-valid structures such as flow-style sequences — are NOT
+// ambiguous and return false here. Callers use this to surface a policy/source
+// error rather than silently round-tripping.
 func IsAmbiguous(err error) bool {
-	var ee *editError
-	return errors.As(err, &ee)
+	var ae *ambiguousError
+	return errors.As(err, &ae)
 }
 
 // doc is the parsed representation of a YAML byte slice: the yaml.v3 node tree
@@ -167,10 +185,10 @@ func (d *doc) validate(n *yaml.Node) error {
 	}
 	switch n.Kind {
 	case yaml.AliasNode:
-		return newError("document: alias node (*%s) is ambiguous", aliasName(d.raw, n))
+		return newAmbiguousError("document: alias node (*%s) is ambiguous", aliasName(d.raw, n))
 	}
 	if n.Anchor != "" {
-		return newError("document: anchor &%s is ambiguous", n.Anchor)
+		return newAmbiguousError("document: anchor &%s is ambiguous", n.Anchor)
 	}
 	if n.Kind == yaml.MappingNode {
 		if err := checkDuplicateKeys(n); err != nil {
@@ -238,15 +256,15 @@ func checkDuplicateKeys(m *yaml.Node) error {
 			continue
 		}
 		if key.Value == "<<" {
-			return newError("document: merge key (<<) is ambiguous")
+			return newAmbiguousError("document: merge key (<<) is ambiguous")
 		}
 		// yaml.v3 retains duplicate keys as successive Content pairs rather than
 		// erroring, so detect textual duplicates explicitly.
 		if _, dup := seen[key.Value]; dup {
-			return newError("document: duplicate key %q", key.Value)
+			return newAmbiguousError("document: duplicate key %q", key.Value)
 		}
 		if val != nil && val.Kind == yaml.AliasNode {
-			return newError("document: alias value for key %q is ambiguous", key.Value)
+			return newAmbiguousError("document: alias value for key %q is ambiguous", key.Value)
 		}
 		seen[key.Value] = i
 	}
