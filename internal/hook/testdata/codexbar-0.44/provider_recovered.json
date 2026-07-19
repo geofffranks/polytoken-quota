@@ -1,0 +1,7 @@
+{
+  "event": "provider_recovered",
+  "provider": "gemini",
+  "account": "demo-tenant-9",
+  "status": "ok",
+  "timestamp": "2026-07-19T12:00:00Z"
+}

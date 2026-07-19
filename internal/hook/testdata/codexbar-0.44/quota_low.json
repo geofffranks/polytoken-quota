@@ -1,0 +1,11 @@
+{
+  "event": "quota_low",
+  "provider": "codex",
+  "account": "demo-tenant-7",
+  "window": "session",
+  "usagePercent": 0.92,
+  "used": 92000,
+  "limit": 100000,
+  "resetAt": "2026-07-20T00:00:00Z",
+  "timestamp": "2026-07-19T12:00:00Z"
+}

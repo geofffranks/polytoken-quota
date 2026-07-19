@@ -1,0 +1,7 @@
+{
+  "event": "quota_reset",
+  "provider": "codex",
+  "account": "demo-tenant-7",
+  "window": "session",
+  "timestamp": "2026-07-19T12:00:00Z"
+}

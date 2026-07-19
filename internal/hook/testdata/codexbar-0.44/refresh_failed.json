@@ -1,0 +1,7 @@
+{
+  "event": "refresh_failed",
+  "provider": "claude",
+  "account": "demo-tenant-3",
+  "status": "error",
+  "timestamp": "2026-07-19T12:00:00Z"
+}
