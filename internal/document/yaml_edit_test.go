@@ -11,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // golden reads a testdata fixture, failing the test on any I/O error.
@@ -431,37 +429,5 @@ func TestIsAmbiguousDuplicateKeyIsStructural(t *testing.T) {
 	}
 	if !IsAmbiguous(err) {
 		t.Fatalf("duplicate-key document not classified ambiguous: %v", err)
-	}
-}
-
-// TestSetBoolNilValueGuard is a regression guard for the defensive nil check in
-// setBool. resolveValue never returns exists=true with a nil value node (a nil
-// value resolves to "not found"), so the dereference is not reachable through
-// EditYAML today; this test pins the contract so a future refactor that leaks a
-// nil value node fails loudly instead of panicking inside valueSpan.
-func TestSetBoolNilValueGuard(t *testing.T) {
-	// Hand-build a doc whose mapping pairs a key with a nil value node, then
-	// exercise setBool directly. We bypass resolveValue's nil->not-found mapping
-	// by calling setBool with a path that resolves to the nil value through a
-	// constructed tree where the key is the final segment of an existing parent.
-	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-		{Kind: yaml.ScalarNode, Value: "k", Tag: "!!str"},
-		nil, // value node intentionally nil
-	}}
-	d := &doc{
-		root:    &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}},
-		raw:     []byte("k:\n"),
-		newline: []byte("\n"),
-		lines:   lineOffsets([]byte("k:\n")),
-	}
-	// setBool must not panic and must return a clean result (either an error or
-	// a safe splice), never a nil-pointer dereference.
-	panicked := true
-	func() {
-		defer func() { panicked = recover() != nil }()
-		_, _ = d.setBool([]byte("k:\n"), []string{"k"}, true)
-	}()
-	if panicked {
-		t.Fatal("setBool panicked on a nil value node")
 	}
 }

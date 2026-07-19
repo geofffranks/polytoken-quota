@@ -129,8 +129,10 @@ func (d *doc) setBool(raw []byte, path []string, v bool) ([]byte, error) {
 		return d.insertKey(raw, path, []byte(rep))
 	}
 	// Guard against a nil value node before valueSpan dereferences it.
-	// resolveValue never returns exists=true with a nil value today, but this
-	// mirrors setScalar's guard and protects against a future refactor.
+	// resolveValue maps a nil value node to not-found (exists=false), so this
+	// guard is unreachable through the normal edit path today; it mirrors
+	// setScalar's guard and protects against a future refactor that changes
+	// that mapping.
 	if val == nil {
 		return nil, newError("document: %q has no value node", strings.Join(path, "."))
 	}
