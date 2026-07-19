@@ -1,0 +1,8 @@
+# Synthetic golden fixture (CRLF line endings) for byte-preserving editor
+# tests. The line terminator of every line is CRLF. Only the
+# models.codex/gpt.enabled span is managed; compare every other byte.
+models:
+  codex/gpt:
+    enabled: true # keep
+    reasoning: high
+defaults: {full: 'codex/gpt'}

@@ -1,0 +1,4 @@
+models:
+  codex/gpt:
+    enabled: true
+    reasoning: high

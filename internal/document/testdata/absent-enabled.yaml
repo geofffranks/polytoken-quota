@@ -1,0 +1,7 @@
+# Synthetic golden fixture: a model with NO enabled key in the baseline.
+# Used by the disable->restore identity test. Disabling inserts a transient
+# "enabled: false" key; restoring must REMOVE that transient key (not set it
+# true) so the file is byte-identical to this baseline.
+models:
+  codex/gpt:
+    reasoning: high

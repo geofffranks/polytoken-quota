@@ -1,0 +1,3 @@
+﻿models:
+  codex/gpt:
+    enabled: true

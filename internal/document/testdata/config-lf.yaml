@@ -1,0 +1,9 @@
+# Synthetic golden fixture (LF line endings) for byte-preserving editor tests.
+# Covers: top comment, nested map, block scalar enable flag with trailing
+# comment, a sibling key, a flow-style mapping, and key ordering. Only the
+# models.codex/gpt.enabled span is managed.
+models:
+  codex/gpt:
+    enabled: true # keep this comment
+    reasoning: high
+defaults: {full: 'codex/gpt'}
