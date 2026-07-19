@@ -104,11 +104,11 @@ type ImportReport struct {
 }
 
 // Writer durably writes desired.yaml. CreateAtomic is a strict exclusive create
-// that refuses an existing file; ReplaceTargetedAtomic performs a same-filesystem
+// that refuses an existing file; ReplaceAtomic performs a same-filesystem
 // atomic replacement of the policy.
 type Writer interface {
 	CreateAtomic(context.Context, Desired) error
-	ReplaceTargetedAtomic(context.Context, Desired) error
+	ReplaceAtomic(context.Context, Desired) error
 }
 
 // --- proposal core ----------------------------------------------------------
@@ -390,13 +390,17 @@ func (w *fileWriter) CreateAtomic(_ context.Context, d Desired) error {
 	return syncDir(filepath.Dir(w.path))
 }
 
-// ReplaceTargetedAtomic replaces desired.yaml with a same-filesystem atomic
-// rename: the serialized policy is written to a temp file in the target's
-// directory (mode 0600), fsynced, renamed over the target, and the directory is
-// fsynced. Field-level byte preservation of an existing desired.yaml is the
-// document editor's responsibility; here the policy is serialized and replaced
-// atomically so a crash cannot leave a partially written file.
-func (w *fileWriter) ReplaceTargetedAtomic(_ context.Context, d Desired) error {
+// ReplaceAtomic replaces the entire desired.yaml file with the new policy
+// content using an atomic rename. This is a whole-file replacement, not
+// field-level targeted editing — existing comments, key ordering, and
+// unmanaged policy content are NOT preserved. The sync use case replaces the
+// entire desired policy, so full reserialization is correct. For
+// byte-preserving edits to live Polytoken files, use the document package.
+//
+// The serialized policy is written to a temp file in the target's directory
+// (mode 0600), fsynced, renamed over the target, and the directory is fsynced,
+// so a crash cannot leave a partially written file.
+func (w *fileWriter) ReplaceAtomic(_ context.Context, d Desired) error {
 	data, err := marshalDesired(d)
 	if err != nil {
 		return err
