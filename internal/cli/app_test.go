@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"reflect"
@@ -146,5 +147,36 @@ func TestExitCodeRouting(t *testing.T) {
 	}
 	if got := DiagnosticExitCode(DoctorCommand, false); got != ExitOK {
 		t.Fatalf("healthy doctor=%d", got)
+	}
+}
+
+// TestInitOutputContract proves a successful create-only init prints setup
+// guidance that names an absolute executable, all six CodExBar events, the
+// CodExBar 0.44.0 minimum, direct shell-free invocation, no automatic CodExBar
+// edit, and no overwrite option. The spy returns a successful Outcome, so this
+// also guards that Task 2's spy contract stays intact.
+func TestInitOutputContract(t *testing.T) {
+	spy := newDepsSpy()
+	var stdout bytes.Buffer
+	code := Run(context.Background(), []string{"init"}, strings.NewReader(""), &stdout, io.Discard, spy.Dependencies())
+	if code != ExitOK {
+		t.Fatalf("exit=%d want %d", code, ExitOK)
+	}
+	if spy.Mutations != 1 {
+		t.Fatalf("init invoked %d times, want 1", spy.Mutations)
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"/usr/local/bin/polytoken-quota", // an absolute executable path
+		"0.44.0",                         // CodExBar minimum version
+		"without a shell",                // direct, shell-free invocation
+		"no automatic CodExBar edit",     // never modifies CodExBar
+		"not overwrite",                  // strict create-only, no overwrite option
+		"quota_low", "quota_reached", "quota_reset",
+		"provider_unavailable", "provider_recovered", "refresh_failed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("init output missing %q\n--- output ---\n%s", want, out)
+		}
 	}
 }

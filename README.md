@@ -68,6 +68,30 @@ $ polytoken-quota init
 To refresh an existing `desired.yaml`, use `sync --from-polytoken` (add `--force` to overwrite local
 changes).
 
+### What `init` proposes
+
+`init` discovers the current global managed references and baseline model enablement and writes a
+starter `desired.yaml`. It:
+
+- proposes **only** definition files that already contain `polytoken.model` or
+  `polytoken.fallback_models`; a file with a `polytoken` block but no model field is skipped;
+- materializes **exact concrete model enumeration** verbatim from the live provider mappings — there
+  is no implicit runtime model mapping;
+- reports any model-bearing definition whose chain does not resolve against a provider mapping as an
+  uncovered reference (a `doctor` finding) rather than silently proposing an unresolved chain;
+- prints CodExBar setup instructions (the six events, the 0.44.0 minimum, and direct shell-free
+  invocation) and **never** edits CodExBar for you.
+
+### `sync --from-polytoken` is guarded
+
+`sync` adopts the current managed fields as desired intent, but refuses while any provider is degraded
+or when managed drift is ambiguous, unless `--force` is given:
+
+- a managed definition that references a model outside the provider graph is **ambiguous drift**: it is
+  reported, never silently adopted;
+- unmanaged live edits remain valid and are preserved;
+- forced sync emits a warning that the **temporary ordering may become durable intent**.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -160,7 +160,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintln(stderr, "init takes no arguments")
 			return ExitRejected
 		}
-		return MutationExitCode(deps.Mutator.Init(ctx))
+		out := deps.Mutator.Init(ctx)
+		code := MutationExitCode(out)
+		if out.Accepted && out.PendingCount() == 0 {
+			writeInitInstructions(stdout)
+		}
+		return code
 	case "hook":
 		if len(args) > 1 {
 			fmt.Fprintln(stderr, "hook takes no arguments")
@@ -367,4 +372,43 @@ func writeDoctor(w io.Writer, r doctor.Report, jsonOut bool) {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
 	fmt.Fprintln(w, "commands: init, hook, status, reconcile, sync, state, doctor")
+}
+
+// codexbarHookEvents are the six stable CodexBar 0.44.0+ hook event names.
+var codexbarHookEvents = []string{
+	"quota_low",
+	"quota_reached",
+	"quota_reset",
+	"provider_unavailable",
+	"provider_recovered",
+	"refresh_failed",
+}
+
+// exampleExecutablePath is an absolute example path shown in setup guidance. It
+// is illustrative; the user should replace it with their installed binary path.
+const exampleExecutablePath = "/usr/local/bin/polytoken-quota"
+
+// writeInitInstructions prints setup guidance after a successful create-only
+// init. It performs no automatic CodExBar edit: it only tells the user how to
+// wire CodExBar's six supported hook events to invoke this tool directly, without
+// a shell, via an absolute executable path. init is strict create-only and has
+// no overwrite option — to refresh an existing desired.yaml the user must run
+// `sync --from-polytoken`.
+func writeInitInstructions(w io.Writer) {
+	fmt.Fprintln(w, "desired.yaml created.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Next, configure CodExBar (0.44.0 or later) to run this tool directly,")
+	fmt.Fprintln(w, "without a shell, for each of its six supported hook events using an absolute")
+	fmt.Fprintf(w, "executable path such as: %s hook\n", exampleExecutablePath)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "CodExBar events to register (all six):")
+	for _, e := range codexbarHookEvents {
+		fmt.Fprintf(w, "  - %s\n", e)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "This tool performs no automatic CodExBar edit; add the hooks manually in")
+	fmt.Fprintln(w, "CodExBar settings.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "init is strict create-only: it will not overwrite an existing desired.yaml. To")
+	fmt.Fprintln(w, "refresh an existing policy, run: polytoken-quota sync --from-polytoken")
 }
