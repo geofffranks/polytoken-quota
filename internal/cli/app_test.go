@@ -128,9 +128,15 @@ func TestStateAdaptersPassTypedValues(t *testing.T) {
 }
 
 func TestExitCodeRouting(t *testing.T) {
+	if got := MutationExitCode(service.Outcome{Accepted: true}); got != ExitOK {
+		t.Fatalf("accepted mutation=%d want %d", got, ExitOK)
+	}
+	if got := MutationExitCode(service.Outcome{Accepted: false}); got != ExitRejected {
+		t.Fatalf("rejected mutation=%d want %d", got, ExitRejected)
+	}
 	pending := service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{Pending: &state.ApplyFailure{}}}}
 	if got := MutationExitCode(pending); got != ExitPending {
-		t.Fatalf("mutation=%d", got)
+		t.Fatalf("pending mutation=%d want %d", got, ExitPending)
 	}
 	if got := DiagnosticExitCode(StatusCommand, true); got != ExitOK {
 		t.Fatalf("status=%d", got)
