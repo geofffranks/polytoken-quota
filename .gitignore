@@ -1,0 +1,18 @@
+# Local setup decisions (non-secret) and tooling state — never committed.
+.setup/
+.tickets/
+.superpowers/
+.worktrees/
+.polytoken/
+.bash-guard
+
+# Approved planning / design artifacts — kept outside commits per artifact policy
+# (canonical home: /home/dev/workspace/codexbar-hooks/docs/superpowers).
+docs/superpowers/
+
+# Temporary research / validation scratch directories — do not track and do not delete.
+.codexbar-source-review/
+.candidate-validation.*/
+.complete-candidate.*/
+.config-relocation.*/
+.neutral-validation.*/
