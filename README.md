@@ -103,6 +103,37 @@ or when managed drift is ambiguous, unless `--force` is given:
 `status` is always informational and exits `0` regardless of drift. `doctor` exits `1` only when its
 findings are actionable.
 
+### Diagnostics: `status` and `doctor`
+
+`status [--json]` reports per-provider quota, availability, effective mode, and last event; the
+current state revision; per-target last attempted/applied revisions; concise pending failures and
+drift; and an unconditional advisory that already-running sessions may retain pre-reconciliation
+choices until the user restarts or reloads them. The utility does not inspect or control running
+processes.
+
+`doctor [--json]` runs static and live checks and exits nonzero while any target is pending or
+currently invalid. It reports:
+
+- policy/schema errors;
+- unknown, ambiguous, or uncovered provider/model mappings;
+- exact enumeration staleness or new live references versus the policy;
+- managed-field drift;
+- empty current chains;
+- desired chains that cannot survive each mapped provider's loss;
+- current `polytoken config validate` and startup-equivalent `polytoken doctor` results;
+- incomplete apply journals and backup/permission problems;
+- symlink/path problems in managed definition files;
+- every recorded pending target error, with last successful and latest attempted
+  revision/timestamp, failure stage (`render`, `config_validate`, `doctor`, `backup`, `publish`),
+  affected chain/file, sanitized command error, current reproducibility, live status
+  (`last-known-good`, `drifted`, `partially-recovered`), and remediation;
+- bounded recently recovered errors.
+
+Resolved errors remain visible as recovered for the configured retention period
+(`operational.recovered_retention`, default 7 days) and then age out. Recovered-only history is
+informational: if no target is pending/invalid and no other actionable finding exists, `doctor`
+exits `0`.
+
 ## Validation and benchmark budgets
 
 Candidate validation runs `polytoken config validate` then `polytoken doctor` against a complete,
