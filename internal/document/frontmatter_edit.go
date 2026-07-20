@@ -30,10 +30,10 @@ func EditFrontmatter(raw []byte, edits []Edit) ([]byte, error) {
 	}
 	// Reassemble: opening delimiter + body-of-edits + closing delimiter + body.
 	var b bytes.Buffer
-	b.Write(raw[:fmStart])     // BOM (if any) + opening "---\n"
-	b.Write(out)               // edited YAML block (ends with a newline)
+	b.Write(raw[:fmStart])        // BOM (if any) + opening "---\n"
+	b.Write(out)                  // edited YAML block (ends with a newline)
 	b.Write(raw[fmEnd:bodyStart]) // closing "---\n"
-	b.Write(raw[bodyStart:])   // untouched Markdown body
+	b.Write(raw[bodyStart:])      // untouched Markdown body
 	return b.Bytes(), nil
 }
 

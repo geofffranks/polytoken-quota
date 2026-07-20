@@ -398,8 +398,8 @@ func TestSequenceEditBlockStyleStillWorks(t *testing.T) {
 // wrong-kind paths are ordinary errors.
 func TestIsAmbiguousSyntaxNotStructural(t *testing.T) {
 	cases := map[string]struct {
-		in    []byte
-		edit  Edit
+		in   []byte
+		edit Edit
 	}{
 		"unclosed flow":   {[]byte("models: [unclosed\n"), scalarEdit("a", "2")},
 		"tab indent":      {[]byte("a:\n\tb: 1\n"), scalarEdit("a", "2")},

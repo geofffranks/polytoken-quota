@@ -249,8 +249,13 @@ func (w *boundedWriter) bytes() []byte { return w.buf.Bytes() }
 func DefaultSanitize(b []byte) string {
 	s := string(b)
 	s = reEmail.ReplaceAllString(s, "<account>")
-	s = reCredAssign.ReplaceAllString(s, "${1}=<redacted>")
+	// Redact bearer tokens BEFORE credential assignments: a header like
+	// "Authorization: Bearer <token>" is matched by reCredAssign first (it
+	// treats "Authorization" as the key and "Bearer" as its value), which would
+	// consume the "Bearer" word and leave the secret token bare for reBearer.
+	// Running reBearer first redacts the whole "Bearer <token>" span.
 	s = reBearer.ReplaceAllString(s, "${1} <redacted>")
+	s = reCredAssign.ReplaceAllString(s, "${1}=<redacted>")
 	s = reHome.ReplaceAllString(s, "<home>")
 	s = reTemp.ReplaceAllString(s, "<tmp>")
 	s = reBlob.ReplaceAllString(s, "<redacted>")

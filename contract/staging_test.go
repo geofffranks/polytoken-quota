@@ -80,9 +80,9 @@ func TestContractStagingFoldsLayers(t *testing.T) {
 	globalDir, _ := filepath.Abs(fixtureDir(t, "global"))
 	projectDir, _ := filepath.Abs(fixtureDir(t, "project", ".polytoken"))
 	res := target.Resolved{
-		ID:             "project",
-		CanonicalRoot:  projectDir,
-		Global:         false,
+		ID:              "project",
+		CanonicalRoot:   projectDir,
+		Global:          false,
 		DefinitionFiles: []string{filepath.Join(projectDir, "subagents", "project.md")},
 	}
 	plan := reconcile.Plan{TargetID: "project"}
@@ -134,9 +134,9 @@ func TestContractStagingConflictingLiveIsolation(t *testing.T) {
 	projectDir, _ := filepath.Abs(fixtureDir(t, "project", ".polytoken"))
 	conflictingRoot, _ := filepath.Abs(fixtureDir(t, "conflicting-live"))
 	res := target.Resolved{
-		ID:             "project",
-		CanonicalRoot:  projectDir,
-		Global:         false,
+		ID:              "project",
+		CanonicalRoot:   projectDir,
+		Global:          false,
 		DefinitionFiles: []string{filepath.Join(projectDir, "subagents", "project.md")},
 	}
 	b := staging.Builder{

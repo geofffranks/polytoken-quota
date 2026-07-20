@@ -45,7 +45,7 @@ func TestFrontmatterLFGolden(t *testing.T) {
 		t.Fatalf("body changed:\n got=%q\nwant=%q", markdownBody(out), bodyBefore)
 	}
 	// The body's embedded YAML-like "model: minime/gemma" must be untouched.
-	if bytes.Count(out, []byte("codex/gpt-5.6-luna"), ) != 1 {
+	if bytes.Count(out, []byte("codex/gpt-5.6-luna")) != 1 {
 		t.Fatalf("expected exactly one edited model occurrence:\n%s", out)
 	}
 }

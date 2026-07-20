@@ -160,3 +160,19 @@ go test ./internal/service -run '^$' -bench BenchmarkHookReconcile -benchmem
 The opt-in contract suite against a supported Polytoken binary is run by
 `POLYTOKEN_CONTRACT_BIN="$POLYTOKEN_BIN" ./scripts/test-contract.sh`.
 
+### Optional CodExBar `hooks test` smoke
+
+After wiring the six hook events in CodExBar, you can verify the end-to-end hook
+delivery with CodExBar's own smoke command (requires CodExBar 0.44.0 or later):
+
+```sh
+codexbar hooks test
+```
+
+This delivers a synthetic provider/event through the configured hooks without
+touching any live account or provider credentials. The reconciler's own guarded
+smoke test (`contract.TestCodexBarHooksTestSmoke`) runs this command only when
+`CODEXBAR_TEST_BIN` explicitly names a supported binary, and skips otherwise, so
+the default `go test ./...` suite never invokes a live CodExBar installation.
+
+

@@ -60,10 +60,10 @@ func fixtureSources(names ...string) staticReader {
 	}
 	return staticReader{
 		global: SourceSet{
-			ID:     "global",
-			Root:   "/home/user/.config/polytoken",
-			Global: true,
-			Config: SourceConfig{Providers: []SourceMapping{globalMapping(true)}},
+			ID:          "global",
+			Root:        "/home/user/.config/polytoken",
+			Global:      true,
+			Config:      SourceConfig{Providers: []SourceMapping{globalMapping(true)}},
 			Definitions: defs,
 		},
 	}

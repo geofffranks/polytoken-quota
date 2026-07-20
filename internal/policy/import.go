@@ -530,11 +530,11 @@ func (m modelOut) MarshalYAML() (interface{}, error) {
 }
 
 type outDoc struct {
-	Version     int                    `yaml:"version"`
-	Providers   map[string]outMapping  `yaml:"providers,omitempty"`
-	Global      *outTarget             `yaml:"global,omitempty"`
-	Projects    []outTarget            `yaml:"projects,omitempty"`
-	Operational *outOperational        `yaml:"operational,omitempty"`
+	Version     int                   `yaml:"version"`
+	Providers   map[string]outMapping `yaml:"providers,omitempty"`
+	Global      *outTarget            `yaml:"global,omitempty"`
+	Projects    []outTarget           `yaml:"projects,omitempty"`
+	Operational *outOperational       `yaml:"operational,omitempty"`
 }
 
 type outMapping struct {

@@ -51,7 +51,7 @@ type Finding struct {
 // and recovered-adjacent diagnostic; Recovered holds aged recovered-error
 // history within the retention window.
 type Report struct {
-	Findings  []Finding           `json:"findings"`
+	Findings  []Finding            `json:"findings"`
 	Recovered []state.ApplyFailure `json:"recovered"`
 }
 

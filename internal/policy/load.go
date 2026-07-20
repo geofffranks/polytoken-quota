@@ -277,11 +277,11 @@ func parseDur(field, s string, def time.Duration) (time.Duration, error) {
 // docWire is the on-disk shape of desired.yaml. It differs from the in-memory
 // Desired only where custom parsing is needed (model enumeration and durations).
 type docWire struct {
-	Version     int                  `yaml:"version"`
+	Version     int                    `yaml:"version"`
 	Providers   map[string]mappingWire `yaml:"providers"`
-	Global      *targetWire          `yaml:"global"`
-	Projects    []targetWire         `yaml:"projects"`
-	Operational *operationalWire     `yaml:"operational"`
+	Global      *targetWire            `yaml:"global"`
+	Projects    []targetWire           `yaml:"projects"`
+	Operational *operationalWire       `yaml:"operational"`
 }
 
 type mappingWire struct {

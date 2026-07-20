@@ -56,9 +56,9 @@ type Edit struct {
 // produced by staging when materializing a candidate file and is consumed when
 // applying edits; the editors here also accept raw bytes directly.
 type Source struct {
-	Bytes           []byte
-	Mode            fs.FileMode
-	Newline         []byte // "\n", "\r\n", or "\n" when unknown
+	Bytes            []byte
+	Mode             fs.FileMode
+	Newline          []byte // "\n", "\r\n", or "\n" when unknown
 	FrontmatterStart int    // byte offset of the opening "---" line, inclusive
 	FrontmatterEnd   int    // byte offset just past the closing "---" line
 }
