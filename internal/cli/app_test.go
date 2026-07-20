@@ -14,10 +14,12 @@ import (
 	"github.com/geofffranks/codexbar-hooks/internal/state"
 )
 
-// NOTE: the production binding assertion
-//   var _ Mutator = (*service.Coordinator)(nil)
-// is deferred to Task 12, which introduces service.Coordinator. The Task 2
-// command-tree and adapter tests use the local spy below.
+// NOTE: the production binding assertion below pins that service.Coordinator
+// satisfies the Mutator interface at compile time. Task 12 introduces
+// service.Coordinator.
+
+// Compile-time proof that the production Coordinator implements Mutator.
+var _ Mutator = (*service.Coordinator)(nil)
 
 // depsSpy is a test double that records Mutator/Diagnoser invocations. It
 // satisfies both Mutator and Diagnoser.

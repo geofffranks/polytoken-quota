@@ -1,0 +1,5 @@
+# Synthetic, non-personal deliberately conflicting live project. Its values
+# must NEVER affect candidate validation because the staging builder uses a
+# neutral working directory and folds layers only inside the staging root.
+polytoken:
+  model: conflicting/evil

@@ -1,0 +1,36 @@
+# Synthetic disabled-fallback fixture: zai/glm is disabled but the global agent
+# still lists it as a fallback. This reproduces the real-world startup failure:
+# `config validate` passes (syntactically valid), but `doctor` fails because the
+# subagent registry references a disabled/unknown model.
+providers:
+  codex:
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.codex.test
+    auth:
+      type: no_auth
+  zai:
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.zai.test
+    auth:
+      type: no_auth
+models:
+  sol:
+    provider: codex
+    provider_name: sol-1
+    class: full
+    variant: openai
+    context_window: 200000
+    max_tokens: 100000
+    enabled: true
+  glm:
+    provider: zai
+    provider_name: glm-1
+    class: full
+    variant: openai
+    context_window: 200000
+    max_tokens: 100000
+    enabled: false
+defaults:
+  full: sol

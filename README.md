@@ -102,3 +102,30 @@ or when managed drift is ambiguous, unless `--force` is given:
 
 `status` is always informational and exits `0` regardless of drift. `doctor` exits `1` only when its
 findings are actionable.
+
+## Validation and benchmark budgets
+
+Candidate validation runs `polytoken config validate` then `polytoken doctor` against a complete,
+isolated staging root (never partially written live files). The validation timeout defaults to 30s
+and is configurable via `desired.yaml` (`operational.validation_timeout`); doctor validation is
+never weakened to meet a short timeout — a target that cannot validate in budget is left pending so
+a manual `reconcile` can run with a longer budget.
+
+The staging builder uses **inert auth** (`AuthInert`): a supported Polytoken binary resolves
+providers/models and runs startup-equivalent `doctor` loading fully offline with `no_auth`
+placeholder providers, so no source secret is ever present in staging. If a future Polytoken
+version requires functional auth/network for validation, staging falls back to
+`AuthTransientSource` (source values retained under restrictive permissions with guaranteed
+cleanup). Support is gated by a contract test proving the complete-root invocation resolves
+providers/models and candidate-local definitions.
+
+The per-hook transaction orchestration cost (excluding real filesystem and Polytoken subprocess
+latency) is benchmarked by `BenchmarkHookReconcile` in `internal/service`; run it with:
+
+```
+go test ./internal/service -run '^$' -bench BenchmarkHookReconcile -benchmem
+```
+
+The opt-in contract suite against a supported Polytoken binary is run by
+`POLYTOKEN_CONTRACT_BIN="$POLYTOKEN_BIN" ./scripts/test-contract.sh`.
+

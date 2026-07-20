@@ -1,0 +1,5 @@
+# Synthetic, non-personal registered project override layer. Project wins on
+# merge: it switches the global agent's primary model to sol. Auth comes from
+# the global layer (no_auth, inert).
+polytoken:
+  model: sol

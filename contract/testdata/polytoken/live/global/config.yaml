@@ -1,0 +1,36 @@
+# Synthetic, non-personal global Polytoken config layer for the Task 12 contract
+# tests. Uses custom OpenAI-compatible providers with no_auth so validation and
+# startup-equivalent doctor loading run fully offline with inert auth. This
+# proves the reconciler's AuthInert staging mode needs no functional auth.
+providers:
+  codex:
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.codex.test
+    auth:
+      type: no_auth
+  zai:
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.zai.test
+    auth:
+      type: no_auth
+models:
+  sol:
+    provider: codex
+    provider_name: sol-1
+    class: full
+    variant: openai
+    context_window: 200000
+    max_tokens: 100000
+    enabled: true
+  glm:
+    provider: zai
+    provider_name: glm-1
+    class: full
+    variant: openai
+    context_window: 200000
+    max_tokens: 100000
+    enabled: true
+defaults:
+  full: glm
