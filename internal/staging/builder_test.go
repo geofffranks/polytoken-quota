@@ -272,56 +272,110 @@ func TestCleanupRemovesRootAndIsIdempotent(t *testing.T) {
 }
 
 // TestCleanupOnEveryExit proves no staging root leaks after success, a render
-// (edit) error, cancellation, or timeout.
+// (edit) error, cancellation, or timeout. Each stage builds with a Builder whose
+// TempRoot is known and captured, predicts the staging root from that exact
+// TempRoot (so the assertGone check observes a path the build actually created),
+// and — for cancel/timeout — cancels AFTER root creation so the real
+// failure-handling cleanup path is exercised.
 func TestCleanupOnEveryExit(t *testing.T) {
 	live := layeredFixture(t)
 
-	// success: build then explicit cleanup.
+	// success: build then explicit cleanup. The Builder that runs the build is
+	// the same one whose TempRoot we predict the root from.
 	b := builderWith(t, live, AuthInert)
 	c, err := b.Build(context.Background(), live.Target, live.Plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := c.Root
+	root := stageRoot(b.TempRoot, live.Target.ID)
+	if root != c.Root {
+		t.Fatalf("success: predicted root %q != actual %q", root, c.Root)
+	}
 	if err := c.Cleanup(); err != nil {
 		t.Fatal(err)
 	}
 	assertGone(t, "success", root)
 
-	// render: a plan edit targets a file absent from staging.
-	root = stageRoot(builderTempRoot(t, live, AuthInert), live.Target.ID)
+	// render: a plan edit targets a file absent from staging, erroring inside
+	// stage() after the root has been created.
+	rb := builderWith(t, live, AuthInert)
+	root = stageRoot(rb.TempRoot, live.Target.ID)
 	renderPlan := reconcile.Plan{TargetID: live.Target.ID, Edits: []reconcile.FieldEdit{
 		{File: "ghost/missing.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
 	}}
-	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, renderPlan); err == nil {
+	if _, err := rb.Build(context.Background(), live.Target, renderPlan); err == nil {
 		t.Fatal("expected render error")
 	}
 	assertGone(t, "render", root)
 
-	// cancel: a pre-cancelled context fails after root creation.
-	root = stageRoot(builderTempRoot(t, live, AuthInert), live.Target.ID)
+	// cancel: the context is cancelled mid-build — after root creation but
+	// before stage() finishes — by a Sources wrapper that cancels during the
+	// project-layer materialization, so the next ctx.Err() gate in stage()
+	// observes the cancellation and exercises the real failure-handling
+	// cleanup path. This is deterministic (no timing race): cancellation lands
+	// synchronously inside the build, after the root already exists.
+	cb := builderWith(t, live, AuthInert)
+	root = stageRoot(cb.TempRoot, live.Target.ID)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := builderWith(t, live, AuthInert).Build(ctx, live.Target, live.Plan); err == nil {
+	cb.Sources = cancelDuringProject{inner: live.Sources, cancel: cancel}
+	if _, err := cb.Build(ctx, live.Target, live.Plan); err == nil {
 		t.Fatal("expected cancel error")
 	}
 	assertGone(t, "cancel", root)
+	cancel()
 
-	// timeout: an already-expired context fails after root creation.
-	root = stageRoot(builderTempRoot(t, live, AuthInert), live.Target.ID)
-	tctx, tcancel := context.WithTimeout(context.Background(), 0)
+	// timeout: a context whose deadline elapses mid-build — after root
+	// creation but before stage() finishes — so a later ctx.Err() gate
+	// observes context.DeadlineExceeded and the real cleanup path runs. The
+	// deadlineDuringProject wrapper blocks inside Project() (which runs after
+	// the root is created) until the near-future deadline passes.
+	tb := builderWith(t, live, AuthInert)
+	root = stageRoot(tb.TempRoot, live.Target.ID)
+	tctx, tcancel := context.WithDeadline(context.Background(), time.Now().Add(10*time.Millisecond))
 	defer tcancel()
-	if _, err := builderWith(t, live, AuthInert).Build(tctx, live.Target, live.Plan); err == nil {
+	tb.Sources = deadlineDuringProject{inner: live.Sources}
+	if _, err := tb.Build(tctx, live.Target, live.Plan); err == nil {
 		t.Fatal("expected timeout error")
 	}
 	assertGone(t, "timeout", root)
 }
 
-// builderTempRoot returns the TempRoot a builderWith call will use, computed
-// deterministically so TestCleanupOnEveryExit can predict the root path.
-func builderTempRoot(t *testing.T, live liveFixture, mode AuthMode) string {
-	t.Helper()
-	return t.TempDir()
+// cancelDuringProject wraps a SourceMaterializer and cancels the build context
+// during Project() materialization — after the staging root already exists. The
+// next ctx.Err() gate in stage() then observes the cancellation and exercises
+// the real failure-handling cleanup path.
+type cancelDuringProject struct {
+	inner  SourceMaterializer
+	cancel context.CancelFunc
+}
+
+func (c cancelDuringProject) Global(ctx context.Context) (Layer, error) {
+	return c.inner.Global(ctx)
+}
+
+func (c cancelDuringProject) Project(ctx context.Context, res target.Resolved) (Layer, bool, error) {
+	c.cancel()
+	return c.inner.Project(ctx, res)
+}
+
+// deadlineDuringProject wraps a SourceMaterializer and blocks inside Project()
+// (which runs after root creation) until the context's deadline elapses, so a
+// later ctx.Err() gate in stage() observes context.DeadlineExceeded and the
+// real failure-handling cleanup path runs.
+type deadlineDuringProject struct {
+	inner SourceMaterializer
+}
+
+func (d deadlineDuringProject) Global(ctx context.Context) (Layer, error) {
+	return d.inner.Global(ctx)
+}
+
+func (d deadlineDuringProject) Project(ctx context.Context, res target.Resolved) (Layer, bool, error) {
+	// Block until the deadline elapses. The deadline is set by the caller to
+	// a few milliseconds in the future, so this returns quickly but only
+	// after the staging root has already been created by Build.
+	<-ctx.Done()
+	return Layer{}, false, ctx.Err()
 }
 
 func assertGone(t *testing.T, stage, root string) {

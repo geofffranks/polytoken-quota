@@ -1,0 +1,7 @@
+# Synthetic, non-personal registered project override layer. Project wins on
+# merge: it disables codex/gpt and overrides the default. Auth comes from global.
+models:
+  codex/gpt:
+    enabled: false
+defaults:
+  full: codex/gpt

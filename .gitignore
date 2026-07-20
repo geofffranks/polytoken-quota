@@ -4,6 +4,9 @@
 .superpowers/
 .worktrees/
 .polytoken/
+# Contract test fixtures ship committed .polytoken dirs under testdata.
+!contract/testdata/**/.polytoken/
+!contract/testdata/**/.polytoken/**
 .bash-guard
 
 # Approved planning / design artifacts — kept outside commits per artifact policy

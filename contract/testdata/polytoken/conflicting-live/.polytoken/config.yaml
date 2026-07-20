@@ -1,0 +1,9 @@
+# Deliberately CONFLICTING live project config. This must never reach candidate
+# validation through working-directory discovery: the candidate's neutral workdir
+# has no .polytoken, and its config-dir carries the merged global+project layers
+# only. If this value appeared in the candidate, isolation would be broken.
+defaults:
+  full: conflicting/evil
+models:
+  conflicting/evil:
+    enabled: true
