@@ -1,0 +1,285 @@
+package validate
+
+// These tests verify the bounded startup-equivalent validator. The validator
+// runs two Polytoken commands against a staged candidate — `config validate`
+// then `doctor`, both with --config-dir/--working-dir pointing at the staged
+// roots — via direct executable invocation (no shell), with a shared timeout
+// context, bounded combined output, redacted summaries, and staging cleanup on
+// every exit path. A package-local commandSpy backs CommandRunner so no real
+// binary is invoked for the behavioral tests; ExecRunner is exercised directly
+// for the no-shell and output-bounding guarantees.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
+	"github.com/geofffranks/codexbar-hooks/internal/staging"
+	"github.com/geofffranks/codexbar-hooks/internal/target"
+)
+
+// --- fake CommandRunner -----------------------------------------------------
+
+// commandSpy is the package-local fake CommandRunner. It records the args of
+// every Run call. FailAt (>=0) is the 0-based call index that exits non-zero;
+// -1 (the default via newSpy) disables failure. Block makes Run wait on the
+// context to exercise the shared timeout path. Stderr is the canned output
+// returned with a failure or timeout.
+type commandSpy struct {
+	Args   [][]string
+	FailAt int
+	Block  bool
+	Stderr []byte
+	calls  int
+}
+
+func newSpy() *commandSpy { return &commandSpy{FailAt: -1} }
+
+func (s *commandSpy) Run(ctx context.Context, name string, args []string, max int64) (stdout, stderr []byte, exit int, err error) {
+	cp := append([]string(nil), args...)
+	s.Args = append(s.Args, cp)
+	idx := s.calls
+	s.calls++
+	canned := append([]byte(nil), s.Stderr...)
+
+	if s.Block {
+		<-ctx.Done()
+		return nil, canned, 0, ctx.Err()
+	}
+	if s.FailAt >= 0 && idx == s.FailAt {
+		return nil, canned, 1, errors.New("command exited non-zero")
+	}
+	return nil, nil, 0, nil
+}
+
+// --- shared test helpers ----------------------------------------------------
+
+// sanitize aliases the production redactor so the brief's Runner literal stays
+// self-describing.
+var sanitize = DefaultSanitize
+
+// newRunner wires a Runner with the default output cap and production redactor.
+func newRunner(c CommandRunner) Runner {
+	return Runner{Binary: "/opt/polytoken", Commands: c, MaxOutput: 4096, Sanitize: sanitize}
+}
+
+// candidate returns a lightweight staging candidate (no-op cleanup) for tests
+// that do not observe cleanup.
+func candidate() staging.Candidate {
+	return staging.Candidate{ConfigDir: "/private/config", WorkingDir: "/private/work"}
+}
+
+// stubSources is a minimal SourceMaterializer that yields one valid global
+// config layer and no project layer, enough for staging.Builder to materialize
+// an observable candidate.
+type stubSources struct{}
+
+func (stubSources) Global(context.Context) (staging.Layer, error) {
+	return staging.Layer{Config: []byte("defaults:\n  full: zai/glm\n")}, nil
+}
+func (stubSources) Project(context.Context, target.Resolved) (staging.Layer, bool, error) {
+	return staging.Layer{}, false, nil
+}
+
+// realCandidate builds a candidate with a real (observable) cleanup so tests can
+// assert the staging root is removed.
+func realCandidate(t *testing.T) staging.Candidate {
+	t.Helper()
+	b := staging.Builder{TempRoot: t.TempDir(), AuthMode: staging.AuthInert, Sources: stubSources{}}
+	c, err := b.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	if err != nil {
+		t.Fatalf("build candidate: %v", err)
+	}
+	return c
+}
+
+// --- behavioral tests -------------------------------------------------------
+
+// TestValidateExactCommandsAndOrder asserts the exact argv and order: config
+// validate first, then doctor, both with --config-dir/--working-dir from the
+// candidate, and no extra flags.
+func TestValidateExactCommandsAndOrder(t *testing.T) {
+	spy := newSpy()
+	r := Runner{Binary: "/opt/polytoken", Commands: spy, MaxOutput: 4096, Sanitize: sanitize}
+	c := staging.Candidate{ConfigDir: "/private/config", WorkingDir: "/private/work"}
+
+	got := r.Validate(context.Background(), c, time.Second)
+	if !got.ConfigValid || !got.StartupValid {
+		t.Fatalf("expected success, got %+v", got)
+	}
+
+	want := [][]string{
+		{"--config-dir", "/private/config", "--working-dir", "/private/work", "config", "validate"},
+		{"--config-dir", "/private/config", "--working-dir", "/private/work", "doctor"},
+	}
+	if !reflect.DeepEqual(spy.Args, want) {
+		t.Fatalf("args\ngot=%v\nwant=%v", spy.Args, want)
+	}
+}
+
+// TestConfigFailureSkipsDoctor asserts that a non-zero config validate result
+// records only the config_validate stage error and never runs doctor.
+func TestConfigFailureSkipsDoctor(t *testing.T) {
+	spy := &commandSpy{FailAt: 0}
+	got := newRunner(spy).Validate(context.Background(), candidate(), time.Second)
+
+	if len(spy.Args) != 1 {
+		t.Fatalf("expected exactly one command, got %d: %v", len(spy.Args), spy.Args)
+	}
+	if got.Error == nil || got.Error.Stage != ConfigValidate {
+		t.Fatalf("expected config_validate error, got %+v", got)
+	}
+	if got.ConfigValid {
+		t.Fatalf("ConfigValid should be false on config failure: %+v", got)
+	}
+}
+
+// TestDoctorFailureRecordsDoctorStage asserts that when config validate passes
+// but doctor fails, the error stage is doctor and ConfigValid is true.
+func TestDoctorFailureRecordsDoctorStage(t *testing.T) {
+	spy := &commandSpy{FailAt: 1}
+	got := newRunner(spy).Validate(context.Background(), candidate(), time.Second)
+
+	if len(spy.Args) != 2 {
+		t.Fatalf("expected two commands, got %d: %v", len(spy.Args), spy.Args)
+	}
+	if got.Error == nil || got.Error.Stage != Doctor {
+		t.Fatalf("expected doctor error, got %+v", got)
+	}
+	if !got.ConfigValid {
+		t.Fatalf("ConfigValid should be true when config passed: %+v", got)
+	}
+}
+
+// TestTimeoutAndRedaction asserts that an expired shared timeout context kills
+// the run, records TimedOut, and that the persisted summary is redacted of
+// tokens and home paths present in captured output.
+func TestTimeoutAndRedaction(t *testing.T) {
+	spy := &commandSpy{Block: true, Stderr: []byte("token=SECRET /home/alice")}
+	got := newRunner(spy).Validate(context.Background(), candidate(), time.Nanosecond)
+
+	if got.Error == nil || !got.Error.TimedOut {
+		t.Fatalf("expected a timeout error, got %+v", got)
+	}
+	if strings.Contains(got.Error.Summary, "SECRET") {
+		t.Fatalf("summary leaked token value: %q", got.Error.Summary)
+	}
+	if strings.Contains(got.Error.Summary, "alice") {
+		t.Fatalf("summary leaked home path: %q", got.Error.Summary)
+	}
+	if got.Error.Stage != ConfigValidate {
+		t.Fatalf("expected config_validate stage, got %q", got.Error.Stage)
+	}
+	if got.Error.Remediation == "" {
+		t.Fatalf("expected non-empty remediation")
+	}
+}
+
+// TestCleanupOnEveryResult asserts the staging candidate is cleaned up on every
+// result path: success, config failure, doctor failure, and timeout.
+func TestCleanupOnEveryResult(t *testing.T) {
+	cases := []struct {
+		name string
+		spy  *commandSpy
+	}{
+		{"success", newSpy()},
+		{"config_failure", &commandSpy{FailAt: 0}},
+		{"doctor_failure", &commandSpy{FailAt: 1}},
+		{"timeout", &commandSpy{Block: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := realCandidate(t)
+			root := c.Root
+			newRunner(tc.spy).Validate(context.Background(), c, 100*time.Millisecond)
+			if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("staging root %q was not cleaned up: %v", root, err)
+			}
+		})
+	}
+}
+
+// --- redaction tests --------------------------------------------------------
+
+// TestSanitizeRedactsSecrets asserts the production redactor strips tokens,
+// auth values, home/temp paths, account data, and long opaque blobs from the
+// persisted summary.
+func TestSanitizeRedactsSecrets(t *testing.T) {
+	cases := map[string]string{
+		"token assignment": "token=SECRET-abc123 /home/alice",
+		"api key":          "api_key: sk-live-1234567890wxyz",
+		"bearer header":    "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+		"home path":        "loading /home/alice/.polytoken/config.yaml",
+		"temp path":        "wrote /tmp/quota-stage-xyz/config.yaml done",
+		"email":            "account alice@example.com registered",
+		"long blob":        "key=AKIAIOSFODNN7EXAMPLE0123456789abcdefghij",
+	}
+	forbidden := []string{
+		"SECRET", "alice", "sk-live-", "eyJhbGci", "example.com",
+		"AKIAIOSFODNN7EXAMPLE", "quota-stage-xyz",
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := DefaultSanitize([]byte(in))
+			for _, f := range forbidden {
+				if !strings.Contains(in, f) {
+					continue // only forbid fragments actually present in this input
+				}
+				if strings.Contains(out, f) {
+					t.Fatalf("sanitize leaked %q\ninput =%q\noutput=%q", f, in, out)
+				}
+			}
+		})
+	}
+}
+
+// --- bounding tests ---------------------------------------------------------
+
+// TestBoundedCombinedOutput asserts the shared capture budget bounds the total
+// of stdout and stderr to the configured maximum, even when both streams are
+// written far past the limit.
+func TestBoundedCombinedOutput(t *testing.T) {
+	const max int64 = 64
+	budget := &captureBudget{remaining: max}
+	out := &boundedWriter{budget: budget}
+	errw := &boundedWriter{budget: budget}
+
+	out.Write(bytes.Repeat([]byte("o"), 1000))
+	errw.Write([]byte("error: boom\n"))
+
+	combined := append(append([]byte(nil), out.bytes()...), errw.bytes()...)
+	if int64(len(combined)) > max {
+		t.Fatalf("combined output %d exceeds max %d", len(combined), max)
+	}
+	if int64(len(combined)) != max {
+		t.Fatalf("expected combined to use the full budget %d, got %d", max, len(combined))
+	}
+}
+
+// TestExecRunnerDirectInvocation exercises the production runner against a real
+// direct executable (/bin/echo, no shell) and asserts the captured output is
+// bounded to the configured maximum.
+func TestExecRunnerDirectInvocation(t *testing.T) {
+	if _, err := os.Stat("/bin/echo"); err != nil {
+		t.Skip("/bin/echo unavailable on this platform")
+	}
+	const max int64 = 128
+	big := strings.Repeat("x", 5000)
+	r := ExecRunner{}
+
+	stdout, stderr, exit, err := r.Run(context.Background(), "/bin/echo", []string{big}, max)
+	if err != nil || exit != 0 {
+		t.Fatalf("echo: exit=%d err=%v", exit, err)
+	}
+
+	combined := append(append([]byte(nil), stdout...), stderr...)
+	if int64(len(combined)) > max {
+		t.Fatalf("combined output %d exceeds max %d", len(combined), max)
+	}
+}
