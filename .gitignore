@@ -19,3 +19,6 @@ docs/superpowers/
 .complete-candidate.*/
 .config-relocation.*/
 .neutral-validation.*/
+
+# Built binary
+/polytoken-quota

@@ -210,7 +210,7 @@ func (f fixedPolicyLoader) DesiredExists() bool                 { return true }
 // desired.yaml.
 type nilPolicyWriter struct{}
 
-func (nilPolicyWriter) CreateAtomic(context.Context, policy.Desired) error { return nil }
+func (nilPolicyWriter) CreateAtomic(context.Context, policy.Desired) error  { return nil }
 func (nilPolicyWriter) ReplaceAtomic(context.Context, policy.Desired) error { return nil }
 
 // fixedClock implements Clock, returning a constant time.

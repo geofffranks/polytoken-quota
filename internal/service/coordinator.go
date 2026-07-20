@@ -88,10 +88,18 @@ type DoctorInspectors struct {
 // doctor interfaces without exporting them. They mirror doctor's
 // PolicyInspector, TargetInspector, LiveValidator, and PublishInspector.
 type (
-	doctorPolicyInspector    = interface{ Findings(context.Context) []doctor.Finding }
-	doctorTargetInspector    = interface{ Findings(context.Context) []doctor.Finding }
-	doctorLiveValidator      = interface{ Findings(context.Context) []doctor.Finding }
-	doctorPublishInspector   = interface{ Findings(context.Context) []doctor.Finding }
+	doctorPolicyInspector = interface {
+		Findings(context.Context) []doctor.Finding
+	}
+	doctorTargetInspector = interface {
+		Findings(context.Context) []doctor.Finding
+	}
+	doctorLiveValidator = interface {
+		Findings(context.Context) []doctor.Finding
+	}
+	doctorPublishInspector = interface {
+		Findings(context.Context) []doctor.Finding
+	}
 )
 
 // transactionKind identifies which public mutator invoked transact.

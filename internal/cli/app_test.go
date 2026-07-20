@@ -243,8 +243,10 @@ func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.O
 	return s.outcome
 }
 func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport       { return service.StatusReport{} }
-func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report            { return doctor.Report{} }
+func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport {
+	return service.StatusReport{}
+}
+func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
 
 func (s *outcomeSpy) Dependencies() Dependencies {
 	return Dependencies{
