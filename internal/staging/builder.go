@@ -70,6 +70,18 @@ func (c Candidate) Cleanup() error {
 	return c.cleanup()
 }
 
+// WithoutCleanup returns a copy of the candidate whose Cleanup is a no-op. It
+// is used by callers that validate the candidate through a validator (e.g.
+// validate.Runner) which calls Cleanup on completion, but then need the staged
+// files to remain on disk for a subsequent publish step. The caller retains the
+// original candidate (or the returned copy's Root) and is responsible for
+// removing the staging root once publish has consumed the staged files.
+func (c Candidate) WithoutCleanup() Candidate {
+	out := c
+	out.cleanup = nil
+	return out
+}
+
 // Layer is one source layer's materialized contents: the config.yaml bytes and
 // every other file under the layer's configuration root, keyed by forward-slash
 // relative path. Bytes are returned verbatim; no environment expansion occurs.

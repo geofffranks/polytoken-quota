@@ -70,9 +70,10 @@ func (p Publisher) saveState(s state.State) error {
 // per file: write temp, fsync temp, atomic rename, fsync parent dir, update
 // journal progress → publish state.json last (commit) → remove journal → unlock.
 //
-// Apply is the self-locking entry point. Callers that already hold the lock
-// (e.g. the Coordinator, which locks once for a whole multi-target transaction)
-// MUST call ApplyUnderLock instead: flock(2) LOCK_EX is not re-entrant, so a
+// Apply is the self-locking entry point and owns recovery for standalone use.
+// Callers that already hold the lock (e.g. the Coordinator, which locks once
+// for a whole multi-target transaction) MUST recover once and then call
+// ApplyUnderLock per target instead: flock(2) LOCK_EX is not re-entrant, so a
 // second exclusive acquire on the same path from the same process deadlocks.
 func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, error) {
 	if p.Locker == nil {
@@ -83,6 +84,12 @@ func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, erro
 		return state.State{}, err
 	}
 	defer func() { _ = unlock() }()
+	// Recover any prior unfinished transaction before starting a new one, so a
+	// crash mid-apply converges to a coherent committed state. ApplyUnderLock
+	// assumes this has already happened.
+	if _, _, err := p.Recover(ctx, tx.Prior); err != nil {
+		return state.State{}, fmt.Errorf("publish: pre-apply recover: %w", err)
+	}
 	return p.ApplyUnderLock(ctx, tx)
 }
 
@@ -92,6 +99,12 @@ func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, erro
 // lock: flock(2) LOCK_EX is not re-entrant, and re-locking the same path from
 // the same process returns EWOULDBLOCK, deadlocking.
 //
+// ApplyUnderLock assumes the journal was already recovered by the caller. The
+// Coordinator recovers exactly once at the top of its transaction (before any
+// per-target apply), so recovery happens a single time; ApplyUnderLock must not
+// re-run Recover. The public Apply wrapper recovers then calls ApplyUnderLock
+// for standalone use.
+//
 // Each invocation commits state.json (the commit record) before removing its
 // journal, so the terminal invariant (state published before journal removed)
 // holds per target. When the Coordinator publishes several targets under one
@@ -99,12 +112,6 @@ func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, erro
 // intermediate commits; the Coordinator's final saveState is the authoritative
 // commit that supersedes them.
 func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.State, error) {
-	// Recover any prior unfinished transaction before starting a new one, so a
-	// crash mid-apply converges to a coherent committed state.
-	if _, _, err := p.Recover(ctx, tx.Prior); err != nil {
-		return state.State{}, fmt.Errorf("publish: pre-apply recover: %w", err)
-	}
-
 	if err := p.validateTransaction(tx); err != nil {
 		return state.State{}, err
 	}

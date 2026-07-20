@@ -27,6 +27,12 @@ type fileLock struct {
 	f      *os.File
 }
 
+// NewFileLock returns a Locker backed by an advisory flock at path. It is the
+// production locker constructor used by the CLI wiring and by tests.
+func NewFileLock(path string) Locker {
+	return newFileLock(path)
+}
+
 // newFileLock returns a Locker backed by an advisory flock at path.
 func newFileLock(path string) Locker {
 	return &fileLock{path: path, poll: 5 * time.Millisecond, maxWait: 30 * time.Second}

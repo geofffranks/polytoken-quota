@@ -23,11 +23,16 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
+	"github.com/geofffranks/codexbar-hooks/internal/doctor"
 	"github.com/geofffranks/codexbar-hooks/internal/hook"
 	"github.com/geofffranks/codexbar-hooks/internal/policy"
 	"github.com/geofffranks/codexbar-hooks/internal/publish"
@@ -55,10 +60,39 @@ type Coordinator struct {
 	// the Sync import (both call policy.Init/policy.Import). It is nil-safe:
 	// Init reports an error and Sync refuses when it is unset.
 	Sources policy.SourceReader
+	// DiagnosticState is the concrete state.Store used by the read-only Status
+	// and Doctor diagnostic methods. It is separate from State (the
+	// transactional StateStore interface) because doctor.Run needs the concrete
+	// store's Load/RecoveredRetention. It is nil-safe: diagnostics return an
+	// empty report when unset.
+	DiagnosticState state.Store
+	// DoctorInspectors carries the optional doctor inspectors (policy/target/
+	// live/publish). Each is nil-safe: an unset inspector contributes no
+	// findings, so Doctor never panics before full inspector wiring.
+	DoctorInspectors DoctorInspectors
 	// tracer is the observability seam that records each transaction step. It
 	// is nil in production; tests inject a recording tracer.
 	tracer Tracer
 }
+
+// DoctorInspectors holds the optional inspectors Doctor delegates to. Each field
+// is nil-safe.
+type DoctorInspectors struct {
+	Policy    doctorPolicyInspector
+	Targets   doctorTargetInspector
+	Validator doctorLiveValidator
+	Publisher doctorPublishInspector
+}
+
+// doctor inspector aliases (unexported) so the service package can reference the
+// doctor interfaces without exporting them. They mirror doctor's
+// PolicyInspector, TargetInspector, LiveValidator, and PublishInspector.
+type (
+	doctorPolicyInspector    = interface{ Findings(context.Context) []doctor.Finding }
+	doctorTargetInspector    = interface{ Findings(context.Context) []doctor.Finding }
+	doctorLiveValidator      = interface{ Findings(context.Context) []doctor.Finding }
+	doctorPublishInspector   = interface{ Findings(context.Context) []doctor.Finding }
+)
 
 // transactionKind identifies which public mutator invoked transact.
 type transactionKind uint8
@@ -148,8 +182,14 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		_ = unlock()
 	}()
 
+	c.step("load-state")
+	loaded, err := c.State.LoadState()
+	if err != nil {
+		return Outcome{Error: fmt.Errorf("service: load state: %w", err)}
+	}
+
 	c.step("recover")
-	recovered, err := c.Publish.Recover(ctx, state.State{})
+	recovered, err := c.Publish.Recover(ctx, loaded)
 	if err != nil {
 		return Outcome{Error: fmt.Errorf("service: recover journal: %w", err)}
 	}
@@ -397,6 +437,11 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		step("record-pending")
 		return pendingOutcome(id, next.Revision, "stage", err)
 	}
+	// The Validator adapter runs validation against a no-cleanup copy of the
+	// candidate so the staged files survive into publish (applyOne renames the
+	// temp files to their live paths). The Coordinator owns the candidate's
+	// lifecycle and removes the staging root on every exit path after staging.
+	defer func() { _ = candidate.Cleanup() }()
 	step("validate")
 	result := c.Validate.Validate(ctx, candidate, timeout)
 	if !result.StartupValid {
@@ -455,9 +500,35 @@ func validEvent(e *hook.Event) bool {
 	return e != nil && e.Type != "" && e.Provider != "" && !e.Timestamp.IsZero()
 }
 
+// sortedProviderNames returns the keys of m in sorted order for deterministic
+// status output.
+func sortedProviderNames(m map[string]state.ProviderState) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sortedTargetIDs returns the keys of m in sorted order for deterministic
+// status output.
+func sortedTargetIDs(m map[string]state.TargetState) []string {
+	ids := make([]string, 0, len(m))
+	for k := range m {
+		ids = append(ids, k)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // buildTransaction constructs a publish.Transaction from the plan's files mapped
-// to their live and staged paths. The publisher computes hashes, modes, backups,
-// and journals from these paths under the Coordinator's already-held lock.
+// to their live and staged paths. The publisher's applyOne re-reads the temp
+// file and asserts sha256(data) == NewHash before renaming, so NewHash MUST be
+// the SHA-256 of the staged temp content the staging.Builder wrote. OldHash is
+// the SHA-256 of the current live file (zero [32]byte on first publish when no
+// live file exists). Mode is the live file's permission bits (0600 default when
+// no live file exists) so the renamed file preserves it.
 func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate) publish.Transaction {
 	var replacements []publish.Replacement
 	seen := map[string]bool{}
@@ -466,10 +537,9 @@ func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTar
 			continue
 		}
 		seen[fe.File] = true
-		replacements = append(replacements, publish.Replacement{
-			LivePath: filepath.Join(rt.Resolved.CanonicalRoot, filepath.FromSlash(fe.File)),
-			TempPath: filepath.Join(candidate.ConfigDir, filepath.FromSlash(fe.File)),
-		})
+		livePath := filepath.Join(rt.Resolved.CanonicalRoot, filepath.FromSlash(fe.File))
+		tempPath := filepath.Join(candidate.ConfigDir, filepath.FromSlash(fe.File))
+		replacements = append(replacements, buildReplacement(livePath, tempPath))
 	}
 	return publish.Transaction{
 		Prior:        prior,
@@ -478,6 +548,31 @@ func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTar
 		Replacements: replacements,
 	}
 }
+
+// buildReplacement computes the hash and mode metadata for one managed file
+// replacement from its live and staged temp paths.
+func buildReplacement(livePath, tempPath string) publish.Replacement {
+	r := publish.Replacement{LivePath: livePath, TempPath: tempPath, Mode: defaultReplacementMode}
+	// NewHash is the SHA-256 of the staged temp file the Builder wrote. This is
+	// the hash applyOne asserts before the atomic rename, so it must match the
+	// on-disk temp bytes exactly.
+	if data, err := os.ReadFile(tempPath); err == nil {
+		r.NewHash = sha256.Sum256(data)
+	}
+	// OldHash and Mode come from the live file when it exists; on a first
+	// publish (no live file) OldHash stays the zero digest and Mode the default.
+	if info, err := os.Stat(livePath); err == nil {
+		r.Mode = info.Mode()
+		if data, err := os.ReadFile(livePath); err == nil {
+			r.OldHash = sha256.Sum256(data)
+		}
+	}
+	return r
+}
+
+// defaultReplacementMode is the permission applied to a newly created live
+// managed file on first publish (when no live file exists to inherit from).
+const defaultReplacementMode fs.FileMode = 0o600
 
 // recordTargetOutcomes folds the per-target outcomes into the committed state's
 // per-target metadata. Applied targets clear their pending error; pending

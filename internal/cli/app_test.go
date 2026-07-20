@@ -80,7 +80,7 @@ func (s *depsSpy) Clear(_ context.Context, selector state.Selector) service.Outc
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) Status(context.Context, bool) StatusReport { return StatusReport{} }
+func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return service.StatusReport{} }
 
 func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
 
@@ -193,14 +193,14 @@ func TestInitOutputContract(t *testing.T) {
 // --- Task 13: status advisory, exit contracts, and process-control guard ----
 
 // statusFixture returns a representative StatusReport for rendering tests.
-func statusFixture() StatusReport {
-	return StatusReport{
+func statusFixture() service.StatusReport {
+	return service.StatusReport{
 		Revision: 5,
-		Providers: []ProviderStatus{
+		Providers: []service.ProviderStatus{
 			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal},
 			{Provider: "zai", Quota: state.QuotaLow, Availability: state.Available, Mode: state.ModeReserve, LastEvent: "quota_low"},
 		},
-		Targets: []TargetStatus{
+		Targets: []service.TargetStatus{
 			{TargetID: "global", AttemptedRevision: 5, AppliedRevision: 4, Pending: true},
 		},
 		Pending: 1,
@@ -223,7 +223,7 @@ func TestStatusAlwaysWarnsAboutRunningSessions(t *testing.T) {
 // report contains pending targets or drift, while an actionable doctor report
 // exits 1.
 func TestStatusPendingDriftAlwaysExitsZero(t *testing.T) {
-	report := StatusReport{Pending: 2, Drift: true}
+	report := service.StatusReport{Pending: 2, Drift: true}
 	if got := DiagnosticExitCode(StatusCommand, report.Pending > 0 || report.Drift); got != 0 {
 		t.Fatalf("status exit=%d", got)
 	}
@@ -243,7 +243,7 @@ func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.O
 	return s.outcome
 }
 func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Status(context.Context, bool) StatusReport             { return StatusReport{} }
+func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport       { return service.StatusReport{} }
 func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report            { return doctor.Report{} }
 
 func (s *outcomeSpy) Dependencies() Dependencies {

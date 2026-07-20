@@ -203,7 +203,7 @@ func TestCoordinatorOrderAndPartialSuccess(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey, "project", "invalid")
 	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
 	want := []string{
-		"lock", "recover",
+		"lock", "load-state", "recover",
 		"load-policy", "load-state", "load-sources", "accept-revision",
 		"render:global", "stage:global", "validate:global", "publish:global",
 		"render:project", "stage:project", "validate:project", "record-pending:project",
@@ -243,7 +243,7 @@ func TestInitExistingPolicyIsRejectedCreateOnly(t *testing.T) {
 	if !reflect.DeepEqual(before, spy.Snapshot()) {
 		t.Fatal("rejected init mutated files")
 	}
-	if !reflect.DeepEqual(spy.Trace, []string{"lock", "recover", "desired-exists", "unlock"}) {
+	if !reflect.DeepEqual(spy.Trace, []string{"lock", "load-state", "recover", "desired-exists", "unlock"}) {
 		t.Fatalf("trace=%v", spy.Trace)
 	}
 	if !strings.Contains(out.Error.Error(), "use sync --from-polytoken") {
@@ -267,7 +267,7 @@ func TestSetAndClearUseSingleLockedTransactionCycle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 			out := tc.call(&spy.Coordinator)
-			want := []string{"lock", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
+			want := []string{"lock", "load-state", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
 			if !reflect.DeepEqual(spy.Trace, want) {
 				t.Fatalf("got =%v\nwant=%v", spy.Trace, want)
 			}

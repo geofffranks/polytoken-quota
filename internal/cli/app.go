@@ -28,7 +28,7 @@ const (
 )
 
 // Mutator performs the state-changing operations surfaced by the CLI. The
-// production implementation is service.Coordinator (wired in Task 12).
+// production implementation is service.Coordinator.
 type Mutator interface {
 	Init(context.Context) service.Outcome
 	HandleEvent(context.Context, hook.Event) service.Outcome
@@ -36,45 +36,6 @@ type Mutator interface {
 	Sync(context.Context, bool) service.Outcome
 	Set(context.Context, string, state.ProviderPatch) service.Outcome
 	Clear(context.Context, state.Selector) service.Outcome
-}
-
-// Diagnoser performs the read-only diagnostic operations surfaced by the CLI.
-// The production implementation is service.Coordinator (wired in Task 12).
-type Diagnoser interface {
-	Status(context.Context, bool) StatusReport
-	Doctor(context.Context, bool) doctor.Report
-}
-
-// ProviderStatus is one provider's quota/availability/mode axis in a status
-// report.
-type ProviderStatus struct {
-	Provider     string             `json:"provider"`
-	Quota        state.Quota        `json:"quota"`
-	Availability state.Availability `json:"availability"`
-	Mode         state.Mode         `json:"mode"`
-	LastEvent    string             `json:"last_event,omitempty"`
-}
-
-// TargetStatus is one target's attempted/applied revision in a status report.
-type TargetStatus struct {
-	TargetID          string `json:"target_id"`
-	AttemptedRevision uint64 `json:"attempted_revision"`
-	AppliedRevision   uint64 `json:"applied_revision"`
-	Pending           bool   `json:"pending"`
-}
-
-// StatusReport is the result of the status command. It carries the provider
-// axes, effective modes, last events, current revision, per-target
-// attempted/applied revisions, concise pending/drift summary, and the
-// unconditional running-session advisory.
-type StatusReport struct {
-	JSON                   bool             `json:"-"`
-	Revision               uint64           `json:"revision"`
-	Providers              []ProviderStatus `json:"providers,omitempty"`
-	Targets                []TargetStatus   `json:"targets,omitempty"`
-	Pending                int              `json:"pending"`
-	Drift                  bool             `json:"drift"`
-	RunningSessionAdvisory string           `json:"running_session_advisory"`
 }
 
 // statusAdvisoryFragments holds the running-session advisory text split across
@@ -101,7 +62,7 @@ const (
 // Dependencies are the injected collaborators Run dispatches to.
 type Dependencies struct {
 	Mutator   Mutator
-	Diagnoser Diagnoser
+	Diagnoser service.Diagnoser
 	// Environment returns the supported CODEXBAR_* environment snapshot passed
 	// to hook.Decode. Production wraps os.Environ (filtering to CODEXBAR_*);
 	// tests inject a fixed map.
@@ -383,7 +344,7 @@ func parseSyncFlags(args []string) (fromPolytoken, force, ok bool) {
 // The running-session advisory is always present in both. The JSON DTO uses
 // snake_case keys matching the design contract (running_session_advisory,
 // revision, providers, targets, pending, drift).
-func renderStatus(r StatusReport) (text, jsonText string) {
+func renderStatus(r service.StatusReport) (text, jsonText string) {
 	// Build an explicit copy for JSON so the advisory assignment never
 	// mutates the caller's StatusReport. The text path reads r unchanged.
 	jsonReport := r
@@ -425,7 +386,7 @@ func renderStatus(r StatusReport) (text, jsonText string) {
 	return sb.String(), jsonText
 }
 
-func writeStatus(w io.Writer, r StatusReport, jsonOut bool) {
+func writeStatus(w io.Writer, r service.StatusReport, jsonOut bool) {
 	text, jsonText := renderStatus(r)
 	if jsonOut {
 		fmt.Fprintln(w, jsonText)
