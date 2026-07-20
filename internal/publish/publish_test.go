@@ -121,7 +121,8 @@ func TestLockCancelledContext(t *testing.T) {
 func TestFaultAtEveryPublishStepRecovers(t *testing.T) {
 	steps := []string{
 		"backup", "journal-fsync", "temp-write", "temp-fsync",
-		"rename", "dir-fsync", "progress", "state-publish", "journal-remove",
+		"rename", "dir-fsync", "progress", "state-publish", "state-fsync",
+		"journal-remove",
 	}
 	for _, step := range steps {
 		t.Run(step, func(t *testing.T) {
@@ -161,6 +162,45 @@ func TestFaultAtEveryPublishStepRecovers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStateCommitFaultLeavesJournalAndUncommittedState (I2) proves the durability
+// ordering that C1 makes possible: when the state-commit fault fires between the
+// state write and the fsync, the commit is NOT durable (state.json stays at the
+// prior revision) and the journal survives, so Recover can roll the transaction
+// forward to a coherent commit. This is the real durability gap that
+// assertStatePublishedBeforeJournalRemoval's post-hoc check alone cannot reach.
+func TestStateCommitFaultLeavesJournalAndUncommittedState(t *testing.T) {
+	env := faultEnv(t, "state-fsync")
+	// Apply must fail at the durability boundary inside Save, after the temp
+	// file is written but before it is fsync'd/renamed.
+	if _, err := env.Publisher.Apply(context.Background(), env.Tx); err == nil {
+		t.Fatal("expected Apply to fail at the state-fsync durability boundary")
+	}
+	// The commit was NOT made durable: state.json still holds the prior
+	// revision, proving the fault fired after the write but before the
+	// fsync/rename completed. This is the durability-ordering assertion.
+	if got := env.committedState(t); got.Revision != env.Prior.Revision {
+		t.Fatalf("state committed to %d before fsync; want prior %d", got.Revision, env.Prior.Revision)
+	}
+	// The journal survives because removal is gated on a durable commit.
+	if _, err := os.Stat(env.Publisher.JournalPath); err != nil {
+		t.Fatalf("journal removed before state commit was durable: %v", err)
+	}
+	// Recover must roll the journaled transaction forward to the accepted
+	// revision and then — and only then — remove the journal.
+	env.rewiredForRecover()
+	final, report, err := env.Publisher.Recover(context.Background(), env.Prior)
+	if err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if report.Action != ActionRollForward {
+		t.Fatalf("action=%s want roll-forward", report.Action)
+	}
+	if final.Revision != env.Tx.Next.Revision {
+		t.Fatalf("recovered revision=%d want %d", final.Revision, env.Tx.Next.Revision)
+	}
+	assertStatePublishedBeforeJournalRemoval(t, env)
 }
 
 // stepJournalDurable reports whether a complete (parsable) journal is present at
@@ -359,12 +399,51 @@ func TestRecoverCorruptJournalErrors(t *testing.T) {
 	if err := os.WriteFile(e.Publisher.JournalPath, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Publisher.Recover(context.Background(), e.Prior); err == nil {
+	_, report, err := e.Publisher.Recover(context.Background(), e.Prior)
+	if err == nil {
 		t.Fatal("expected error for corrupt journal")
+	}
+	if report.Action != ActionCorrupt {
+		t.Fatalf("action=%s want corrupt", report.Action)
 	}
 	// Corrupt journal must remain for an operator to inspect/repair.
 	if _, err := os.Stat(e.Publisher.JournalPath); err != nil {
 		t.Fatalf("corrupt journal removed: %v", err)
+	}
+}
+
+// TestRecoverRejectsStalePriorRevision (I3.1) proves that a journal written for
+// a different base state (PriorRevision != committed prior.Revision) is treated
+// as corrupt rather than applied: it would roll forward/restore against the
+// wrong base, so Recover errors, reports corrupt, and leaves the journal.
+func TestRecoverRejectsStalePriorRevision(t *testing.T) {
+	e := newStagedEnv(t, "")
+	e.rewireForRecover(t)
+	// Record a journal whose PriorRevision does not match the committed base.
+	j := Journal{
+		Schema:        JournalSchema,
+		PriorRevision: e.Prior.Revision - 5, // written for a different base
+		NextRevision:  e.Tx.Next.Revision,
+		TargetID:      e.Tx.TargetID,
+		Replacements:  cloneReplacements(e.Tx.Replacements),
+		Intended:      intendedOutcome(e.Tx),
+	}
+	if err := os.MkdirAll(filepath.Dir(e.Publisher.JournalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJournal(OSFS{}, e.Publisher.JournalPath, j, nil); err != nil {
+		t.Fatal(err)
+	}
+	_, report, err := e.Publisher.Recover(context.Background(), e.Prior)
+	if err == nil {
+		t.Fatal("expected error for stale prior revision")
+	}
+	if report.Action != ActionCorrupt {
+		t.Fatalf("action=%s want corrupt", report.Action)
+	}
+	// The stale journal must remain for inspection.
+	if _, err := os.Stat(e.Publisher.JournalPath); err != nil {
+		t.Fatalf("stale journal removed: %v", err)
 	}
 }
 

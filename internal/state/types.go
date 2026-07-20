@@ -133,9 +133,17 @@ type State struct {
 
 // Store is the sanitized, atomic persistence layer for State. Save prunes
 // recovered errors older than RecoveredRetention (by Now) before writing, and
-// atomically replaces the state file with mode 0600.
+// atomically replaces the state file with mode 0600. The write is crash-safe:
+// the temp file is fsync'd before the rename and the parent directory is fsync'd
+// after, so the committed state.json is durably atomic.
 type Store struct {
 	Path               string
 	Now                func() time.Time
 	RecoveredRetention time.Duration
+	// Fault, when non-nil, is consulted after the state temp file is written but
+	// before it is fsync'd. It is a test-only seam letting a caller simulate a
+	// crash between the write and the fsync so the publisher's durability
+	// ordering (state durable before journal removal) is exercisable. Production
+	// leaves it nil, in which case Save is fully durable.
+	Fault func() error
 }

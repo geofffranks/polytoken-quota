@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -49,11 +50,14 @@ func (st Store) Load() (State, error) {
 }
 
 // Save prunes recovered errors older than RecoveredRetention (by Now) and
-// atomically writes the state with mode 0600. The write is atomic via a
-// same-directory temporary file and rename, so a reader never observes a
-// partial state file. The persisted JSON contains only sanitized state fields —
-// never provider credentials, account names, auth blocks, or unmanaged source
-// content.
+// atomically writes the state with mode 0600. The write is crash-consistent via
+// a same-directory temporary file: the temp file is fsync'd BEFORE the rename
+// and the parent directory is fsync'd AFTER, so the committed state.json is
+// durably atomic — a crash can never leave a torn or stale commit record while a
+// journal that depends on it has already been removed (the terminal invariant).
+// A reader never observes a partial state file. The persisted JSON contains only
+// sanitized state fields — never provider credentials, account names, auth
+// blocks, or unmanaged source content.
 func (st Store) Save(s State) error {
 	s = PruneRecovered(s, st.now(), st.RecoveredRetention)
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -81,6 +85,21 @@ func (st Store) Save(s State) error {
 		cleanup()
 		return fmt.Errorf("state: chmod temp: %w", err)
 	}
+	// Durability fault boundary (test-only seam): the temp file has been written
+	// but is not yet durable. A non-nil Fault simulates a crash between the write
+	// and the fsync so callers can prove the commit is not durable here.
+	if err := st.fault(); err != nil {
+		f.Close()
+		cleanup()
+		return err
+	}
+	// C1: fsync the temp file's bytes BEFORE the rename so the commit record is
+	// stable the instant it becomes visible via the rename.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		cleanup()
+		return fmt.Errorf("state: fsync temp: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		cleanup()
 		return fmt.Errorf("state: close temp: %w", err)
@@ -89,7 +108,36 @@ func (st Store) Save(s State) error {
 		cleanup()
 		return fmt.Errorf("state: rename temp: %w", err)
 	}
+	// C1: fsync the parent directory AFTER the rename so the directory entry
+	// pointing at the new state.json is stable. Without this a crash after the
+	// rename could lose the new entry while the journal is already gone.
+	if err := fsyncDir(dir); err != nil {
+		return fmt.Errorf("state: fsync dir: %w", err)
+	}
 	return nil
+}
+
+// fault consults the optional test-only durability seam. It returns nil when
+// unset (production).
+func (st Store) fault() error {
+	if st.Fault == nil {
+		return nil
+	}
+	return st.Fault()
+}
+
+// fsyncDir flushes directory-entry changes (the rename) to stable storage by
+// fsync'ing the parent directory's open file descriptor. All supported targets
+// (Linux, macOS, and other Unix) accept fsync on a directory fd; should a future
+// platform lack it, returning nil is an acceptable degradation at the cost of a
+// wider rename crash window.
+func fsyncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return syscall.Fsync(int(d.Fd()))
 }
 
 func (st Store) now() time.Time {

@@ -65,7 +65,7 @@ type Transaction struct {
 
 // RecoveryReport summarizes a single recovery invocation.
 type RecoveryReport struct {
-	Action   string // "noop", "roll-forward", or "restore"
+	Action   string // "noop", "roll-forward", "restore", or "corrupt"
 	TargetID string
 }
 
@@ -74,19 +74,22 @@ const (
 	ActionRollForward = "roll-forward"
 	ActionRestore     = "restore"
 	ActionNoop        = "noop"
+	// ActionCorrupt marks a recovery that could not proceed because the journal
+	// was unparseable or was written for a different base state. The journal is
+	// left in place for an operator to inspect; the accepted event is preserved
+	// at the prior committed revision.
+	ActionCorrupt = "corrupt"
 )
 
-// DurableFS abstracts the fsync + atomic-rename primitives used by publication
-// so failures can be injected at every durable step in tests. Production uses
-// OSFS, which calls the real os package; tests use FaultFS to inject errors.
-//
-// Each method that writes durable state is counted by FaultFS so tests can fail
-// a specific step. WriteTemp writes data to a fresh temp file in the same
-// directory as dst, returns the temp path, and is the file later renamed. Fsync
-// flushes a path's data to stable storage. Rename is the atomic rename. SyncDir
-// fsyncs the parent directory so the rename entry is durable. RemoveAll deletes
-// a path recursively. MkdirAll creates directories. Stat reports file info.
-// ReadFile and WriteFile read/write whole files.
+// DurableFS abstracts the fsync + atomic-rename primitives used by publication.
+// Production uses OSFS, which performs the real os/syscalls so durability is
+// exercised against the kernel. Test injection does not use a fake filesystem:
+// the Publisher consults a FaultHook (see fault.go) at each named durable step,
+// while OSFS still performs the real operation. CreateTemp opens a fresh temp
+// file in the same directory as the target for an atomic rename; Open re-opens
+// an already-written temp so it can be Fsync'd before the rename; SyncDir fsyncs
+// a directory so a rename/create/unlink entry is durable. MkdirAll, Stat,
+// ReadFile, WriteFile, and RemoveAll are the usual whole-file/directory helpers.
 type DurableFS interface {
 	MkdirAll(path string, perm os.FileMode) error
 	Stat(path string) (fs.FileInfo, error)
@@ -108,6 +111,4 @@ type DurableFS interface {
 	SyncDir(dir string) error
 	// RemoveAll removes path and any children.
 	RemoveAll(path string) error
-	// RenameAtCount is a hook used by the faulting filesystem to classify the
-	// rename step; it is a no-op for OSFS.
 }

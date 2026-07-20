@@ -51,6 +51,16 @@ func (p Publisher) now() time.Time {
 	return time.Now()
 }
 
+// saveState publishes the committed state through the store while propagating
+// the fault hook into the store's durability boundary (stepStateFsync). The
+// store copy is local, so the propagation does not leak into the recovery paths,
+// which call p.State.Save directly and must always complete the commit.
+func (p Publisher) saveState(s state.State) error {
+	st := p.State
+	st.Fault = func() error { return p.hook(stepStateFsync) }
+	return st.Save(s)
+}
+
 // Apply writes tx.Replacements to their live paths through a crash-consistent
 // journal, then publishes tx.Next as the committed observed state. It first
 // recovers any prior unfinished journal for the same target so a crash mid-apply
@@ -124,11 +134,15 @@ func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, erro
 		}
 	}
 
-	// 4. Publish state.json last — the commit record.
+	// 4. Publish state.json last — the commit record. The durability boundary
+	// lives inside Save (stepStateFsync): the fault hook fires after the temp
+	// write but before the fsync, so if a crash lands there state.json stays at
+	// the prior revision and the journal survives for Recover to repair. The
+	// journal is removed only once the commit is durable.
 	if err := p.hook(stepStatePublish); err != nil {
 		return state.State{}, err
 	}
-	if err := p.State.Save(tx.Next); err != nil {
+	if err := p.saveState(tx.Next); err != nil {
 		return state.State{}, err
 	}
 
@@ -248,8 +262,10 @@ func (p Publisher) fsyncPath(path, step string) error {
 func (p Publisher) Recover(ctx context.Context, prior state.State) (state.State, RecoveryReport, error) {
 	j, ok, err := readJournal(p.fs(), p.JournalPath)
 	if err != nil {
-		// Corrupt or incomplete journal.
-		return prior, RecoveryReport{Action: ActionNoop}, err
+		// Corrupt or incomplete journal: distinguish it from a genuine no-op so
+		// the coordinator and status reporting can surface the failure. The
+		// journal is left in place for an operator to inspect.
+		return prior, RecoveryReport{Action: ActionCorrupt}, err
 	}
 	if !ok {
 		// No journal → no-op coherent commit.
@@ -261,6 +277,16 @@ func (p Publisher) Recover(ctx context.Context, prior state.State) (state.State,
 	if prior.Revision == j.NextRevision {
 		_ = removeJournal(p.fs(), p.JournalPath)
 		return prior, RecoveryReport{Action: ActionNoop, TargetID: j.TargetID}, nil
+	}
+
+	// I3.1: the journal was recorded against a specific base revision. If that
+	// no longer matches the committed prior, the journal is stale — written for
+	// a different base state — and must not be applied. Treat it as corrupt and
+	// leave it for inspection rather than rolling forward/restoring the wrong
+	// base.
+	if j.PriorRevision != prior.Revision {
+		return prior, RecoveryReport{Action: ActionCorrupt, TargetID: j.TargetID},
+			fmt.Errorf("publish: journal prior revision %d != committed %d", j.PriorRevision, prior.Revision)
 	}
 
 	// Decide roll-forward vs restore by comparing live-file hashes.

@@ -11,8 +11,6 @@ import (
 // canonicalization, or when a managed file is a symlink.
 var ErrPathEscape = errors.New("publish: managed path escapes root or is a symlink")
 
-func errEscape(path string) error { return ErrPathEscape }
-
 // filepathAbs returns the absolute, cleaned form of path.
 func filepathAbs(path string) (string, error) {
 	return filepath.Abs(filepath.Clean(path))
@@ -50,7 +48,7 @@ func walkNoSymlink(root, target string) error {
 	rel = filepath.ToSlash(rel)
 	cur := root
 	segments := strings.Split(rel, "/")
-	for i, seg := range segments {
+	for _, seg := range segments {
 		if seg == "" || seg == "." {
 			continue
 		}
@@ -64,12 +62,11 @@ func walkNoSymlink(root, target string) error {
 			}
 			return err
 		}
-		isLast := i == len(segments)-1
 		if info.Mode()&os.ModeSymlink != 0 {
-			// A symlink on the path is only tolerated when it is a final target
-			// that the publisher will replace wholesale? No: managed files must
-			// never be symlinks. Reject in all cases.
-			_ = isLast
+			// Managed files and their parent directories must never be symlinks:
+			// a path clean at validation time may have been swapped for a symlink
+			// in the window before the write (TOCTOU). Reject unconditionally,
+			// including the final segment.
 			return ErrPathEscape
 		}
 	}
