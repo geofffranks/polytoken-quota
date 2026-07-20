@@ -384,9 +384,12 @@ func parseSyncFlags(args []string) (fromPolytoken, force, ok bool) {
 // snake_case keys matching the design contract (running_session_advisory,
 // revision, providers, targets, pending, drift).
 func renderStatus(r StatusReport) (text, jsonText string) {
-	r.RunningSessionAdvisory = RunningSessionAdvisory
+	// Build an explicit copy for JSON so the advisory assignment never
+	// mutates the caller's StatusReport. The text path reads r unchanged.
+	jsonReport := r
+	jsonReport.RunningSessionAdvisory = RunningSessionAdvisory
 
-	data, err := json.Marshal(r)
+	data, err := json.Marshal(jsonReport)
 	if err != nil {
 		jsonText = "{}"
 	} else {

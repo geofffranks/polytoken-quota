@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,13 @@ func (s policyInspectorStub) Findings(context.Context) []Finding {
 			Code: "mapping-ambiguous", Severity: Error,
 			Message:     "a codexbar or polytoken provider is ambiguous across mappings",
 			Remediation: "disambiguate the provider mapping",
+		})
+	}
+	if s.conds["stale"] {
+		out = append(out, Finding{
+			Code: "enumeration-stale", Severity: Warning,
+			Message:     "the live configuration exposes models or references not in the desired enumeration",
+			Remediation: "refresh the enumeration or add the new references to desired policy",
 		})
 	}
 	return out
@@ -79,6 +87,13 @@ func (s liveValidatorStub) Findings(context.Context) []Finding {
 			Code: "config-invalid", Severity: Error,
 			Message:     "the current live configuration fails validation",
 			Remediation: "inspect the sanitized validation output and fix the config",
+		})
+	}
+	if s.conds["symlink"] {
+		out = append(out, Finding{
+			Code: "definition-symlink", Severity: Warning,
+			Message:     "a managed definition file is a broken or unexpected symlink",
+			Remediation: "repair or remove the symlink and republish the definition",
 		})
 	}
 	return out
@@ -140,6 +155,9 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 				Remediation:            "add fallback models to the desired chain",
 				AttemptedRevision:      3,
 				LastSuccessfulRevision: 2,
+				AttemptedAt:            time.Date(2026, 7, 19, 11, 0, 0, 0, time.UTC),
+				LastSuccessfulAt:       time.Date(2026, 7, 19, 10, 0, 0, 0, time.UTC),
+				Reproduces:             true,
 				LiveStatus:             "last-known-good",
 			},
 		}
@@ -170,11 +188,9 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 
 // recoveredOnlyFixture builds Dependencies with no actionable findings and a
 // single recovered error resolved at resolvedAt.
-func recoveredOnlyFixture(resolvedAt time.Time, retention time.Duration, now func() time.Time) Dependencies {
-	dir, err := os.MkdirTemp("", "doctor-recovered-*")
-	if err != nil {
-		panic(err)
-	}
+func recoveredOnlyFixture(t *testing.T, resolvedAt time.Time, retention time.Duration, now func() time.Time) Dependencies {
+	t.Helper()
+	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")
 	st := state.State{
 		Schema:    1,
@@ -188,8 +204,13 @@ func recoveredOnlyFixture(resolvedAt time.Time, retention time.Duration, now fun
 			LiveStatus: "last-known-good",
 		}},
 	}
-	data, _ := json.MarshalIndent(st, "", "  ")
-	_ = os.WriteFile(statePath, data, 0o600)
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal state: %v", err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
 
 	return Dependencies{
 		Policy:    noopInspector{},
@@ -233,12 +254,13 @@ func pendingFinding(t *testing.T, r Report) Finding {
 // carries the required detail fields.
 func TestDoctorFindingsAndPersistedErrorFields(t *testing.T) {
 	r := Run(context.Background(), doctorFixture(t,
-		"schema", "ambiguous", "uncovered", "drift", "empty",
-		"provider-loss", "invalid-live", "journal", "permission", "pending"))
+		"schema", "ambiguous", "stale", "uncovered", "drift", "empty",
+		"provider-loss", "invalid-live", "symlink", "journal", "permission", "pending"))
 	codes := findingCodes(r)
 	for _, want := range []string{
-		"policy-schema", "mapping-ambiguous", "model-uncovered", "managed-drift",
-		"empty-chain", "provider-loss", "config-invalid", "journal-incomplete",
+		"policy-schema", "mapping-ambiguous", "enumeration-stale",
+		"model-uncovered", "managed-drift", "empty-chain", "provider-loss",
+		"config-invalid", "definition-symlink", "journal-incomplete",
 		"permission", "target-pending",
 	} {
 		if !slices.Contains(codes, want) {
@@ -247,14 +269,29 @@ func TestDoctorFindingsAndPersistedErrorFields(t *testing.T) {
 	}
 
 	f := pendingFinding(t, r)
+	// Locating detail fields are populated.
 	for name, value := range map[string]string{
-		"stage":       f.Code,
 		"file":        f.File,
 		"chain":       f.Chain,
 		"remediation": f.Remediation,
 	} {
 		if value == "" {
 			t.Errorf("empty %s", name)
+		}
+	}
+	// Every persisted-error detail token appears in the message.
+	for _, want := range []string{
+		"stage=render",
+		"attempted_revision=3",
+		"attempted_at=2026-07-19 11:00:00 +0000 UTC",
+		"last_successful_revision=2",
+		"last_successful_at=2026-07-19 10:00:00 +0000 UTC",
+		`summary="render failed: empty chain"`,
+		"reproduces=true",
+		"live_status=last-known-good",
+	} {
+		if !strings.Contains(f.Message, want) {
+			t.Errorf("message missing %q\nmessage: %s", want, f.Message)
 		}
 	}
 }
@@ -266,7 +303,7 @@ func TestRecoveredRetentionVisibilityAndExit(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	retention := 24 * time.Hour
 	r := Run(context.Background(),
-		recoveredOnlyFixture(now.Add(-retention+time.Second), retention, func() time.Time { return now }))
+		recoveredOnlyFixture(t, now.Add(-retention+time.Second), retention, func() time.Time { return now }))
 	if r.Actionable() || len(r.Recovered) != 1 {
 		t.Fatalf("actionable=%v recovered=%d: %+v", r.Actionable(), len(r.Recovered), r)
 	}
@@ -278,7 +315,7 @@ func TestRecoveredRetentionExpiredAbsent(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	retention := 24 * time.Hour
 	r := Run(context.Background(),
-		recoveredOnlyFixture(now.Add(-retention), retention, func() time.Time { return now }))
+		recoveredOnlyFixture(t, now.Add(-retention), retention, func() time.Time { return now }))
 	if len(r.Recovered) != 0 {
 		t.Fatalf("expected 0 recovered after expiry, got %d", len(r.Recovered))
 	}

@@ -38,21 +38,21 @@ const (
 // live status). TargetID, File, and Chain locate the finding when known;
 // Remediation suggests the next step.
 type Finding struct {
-	Code        string
-	Message     string
-	TargetID    string
-	File        string
-	Chain       string
-	Remediation string
-	Severity    Severity
+	Code        string   `json:"code"`
+	Message     string   `json:"message"`
+	TargetID    string   `json:"target_id"`
+	File        string   `json:"file"`
+	Chain       string   `json:"chain"`
+	Remediation string   `json:"remediation"`
+	Severity    Severity `json:"severity"`
 }
 
 // Report is a doctor health report. Findings holds every static, live, pending,
 // and recovered-adjacent diagnostic; Recovered holds aged recovered-error
 // history within the retention window.
 type Report struct {
-	Findings  []Finding
-	Recovered []state.ApplyFailure
+	Findings  []Finding           `json:"findings"`
+	Recovered []state.ApplyFailure `json:"recovered"`
 }
 
 // Actionable reports whether the report contains any Warning or Error finding

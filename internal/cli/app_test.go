@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -283,24 +285,59 @@ func TestCLIExitContract(t *testing.T) {
 	}
 }
 
-// scanGoSources walks the project root for .go files and invokes fn for each.
-func scanGoSources(t *testing.T, fn func(path string, b []byte)) {
+// moduleRoot returns the absolute project root containing go.mod, derived from
+// this test file's own path via runtime.Caller(0) so the scan is independent of
+// the test binary's CWD (which is the package source dir, not the project root).
+func moduleRoot(t *testing.T) string {
 	t.Helper()
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(thisFile)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("no go.mod found above %s", thisFile)
+		}
+		dir = parent
+	}
+}
+
+// scanGoSources walks the whole module root for .go files and invokes fn for
+// each, passing the path relative to the module root. It walks from the module
+// root (not the test CWD) so every package is covered.
+func scanGoSources(t *testing.T, fn func(relPath string, b []byte)) {
+	t.Helper()
+	root := moduleRoot(t)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
+			// Skip vendored/build cache directories if ever present.
+			name := d.Name()
+			if name == "vendor" || name == "node_modules" {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
 		b, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return rerr
 		}
-		fn(path, b)
+		fn(rel, b)
 		return nil
 	})
 	if err != nil {
@@ -308,8 +345,9 @@ func scanGoSources(t *testing.T, fn func(path string, b []byte)) {
 	}
 }
 
-// TestNoProcessControl scans Go sources for forbidden daemon restart/signal/kill
-// references, excluding the validator's legitimate child-process cleanup.
+// TestNoProcessControl scans Go sources across the whole module for forbidden
+// daemon restart/signal/kill references, excluding the validator's legitimate
+// child-process cleanup.
 func TestNoProcessControl(t *testing.T) {
 	// Build the forbidden pattern from fragments so the test source itself does
 	// not trip the guard on a single line.
@@ -317,9 +355,63 @@ func TestNoProcessControl(t *testing.T) {
 	name := "polytoken"
 	pat := "(?i)" + verbs + ".*" + name + "|" + name + ".*" + verbs
 	forbidden := regexp.MustCompile(pat)
-	scanGoSources(t, func(path string, b []byte) {
-		if !strings.Contains(path, "internal/validate/") && forbidden.Match(b) {
-			t.Errorf("forbidden process control in %s", path)
+	scanGoSources(t, func(relPath string, b []byte) {
+		// The validator legitimately performs child-process cleanup.
+		if strings.HasPrefix(relPath, "internal/validate/") && !strings.HasSuffix(relPath, "_test.go") {
+			return
+		}
+		if forbidden.Match(b) {
+			t.Errorf("forbidden process control in %s", relPath)
 		}
 	})
+}
+
+// TestRenderStatusDoesNotMutateInput proves renderStatus leaves the caller's
+// StatusReport.RunningSessionAdvisory untouched.
+func TestRenderStatusDoesNotMutateInput(t *testing.T) {
+	r := statusFixture()
+	if r.RunningSessionAdvisory != "" {
+		t.Fatalf("fixture precondition: advisory already set %q", r.RunningSessionAdvisory)
+	}
+	renderStatus(r)
+	if r.RunningSessionAdvisory != "" {
+		t.Fatalf("renderStatus mutated input advisory to %q", r.RunningSessionAdvisory)
+	}
+}
+
+// TestDoctorJSONContract proves doctor --json emits snake_case keys for Finding
+// and Report, matching the status command's JSON shape.
+func TestDoctorJSONContract(t *testing.T) {
+	report := doctor.Report{
+		Findings: []doctor.Finding{{
+			Code:        "config-invalid",
+			Message:     "the current live configuration fails validation",
+			TargetID:    "global",
+			File:        "config.yaml",
+			Chain:       "defaults.full",
+			Remediation: "fix the config",
+			Severity:    doctor.Error,
+		}},
+	}
+	var buf bytes.Buffer
+	writeDoctor(&buf, report, true)
+	var decoded map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &decoded); err != nil {
+		t.Fatalf("unmarshal doctor json: %v\nraw: %s", err, buf.String())
+	}
+	for _, key := range []string{"findings", "recovered"} {
+		if _, ok := decoded[key]; !ok {
+			t.Errorf("report json missing top-level %q\nraw: %s", key, buf.String())
+		}
+	}
+	findings, _ := decoded["findings"].([]any)
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	first, _ := findings[0].(map[string]any)
+	for _, key := range []string{"code", "message", "target_id", "file", "chain", "remediation", "severity"} {
+		if _, ok := first[key]; !ok {
+			t.Errorf("finding json missing %q\nraw: %s", key, buf.String())
+		}
+	}
 }
