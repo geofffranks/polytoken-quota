@@ -69,6 +69,11 @@ func (p Publisher) saveState(s state.State) error {
 // Apply order: lock → recover prior journal → create backups → write journal →
 // per file: write temp, fsync temp, atomic rename, fsync parent dir, update
 // journal progress → publish state.json last (commit) → remove journal → unlock.
+//
+// Apply is the self-locking entry point. Callers that already hold the lock
+// (e.g. the Coordinator, which locks once for a whole multi-target transaction)
+// MUST call ApplyUnderLock instead: flock(2) LOCK_EX is not re-entrant, so a
+// second exclusive acquire on the same path from the same process deadlocks.
 func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, error) {
 	if p.Locker == nil {
 		return state.State{}, errors.New("publish: no locker configured")
@@ -78,7 +83,22 @@ func (p Publisher) Apply(ctx context.Context, tx Transaction) (state.State, erro
 		return state.State{}, err
 	}
 	defer func() { _ = unlock() }()
+	return p.ApplyUnderLock(ctx, tx)
+}
 
+// ApplyUnderLock performs the full journal + file replacement + state commit +
+// journal removal WITHOUT acquiring or releasing the lock. The caller holds the
+// advisory lock for the whole transaction. ApplyUnderLock must NOT acquire the
+// lock: flock(2) LOCK_EX is not re-entrant, and re-locking the same path from
+// the same process returns EWOULDBLOCK, deadlocking.
+//
+// Each invocation commits state.json (the commit record) before removing its
+// journal, so the terminal invariant (state published before journal removed)
+// holds per target. When the Coordinator publishes several targets under one
+// held lock, these per-target state publishes are cumulative, atomic
+// intermediate commits; the Coordinator's final saveState is the authoritative
+// commit that supersedes them.
+func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.State, error) {
 	// Recover any prior unfinished transaction before starting a new one, so a
 	// crash mid-apply converges to a coherent committed state.
 	if _, _, err := p.Recover(ctx, tx.Prior); err != nil {

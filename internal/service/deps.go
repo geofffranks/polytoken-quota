@@ -81,8 +81,14 @@ type Validator interface {
 
 // Publisher recovers any prior unfinished apply journal and publishes one
 // target's validated candidate files. The Coordinator holds the advisory lock
-// and calls Recover once, then Apply per valid target; neither re-locks.
+// and calls Recover once, then ApplyUnderLock per valid target; neither
+// re-locks.
 type Publisher interface {
 	Recover(ctx context.Context, prior state.State) (state.State, error)
-	Apply(ctx context.Context, tx publish.Transaction) (state.State, error)
+	// ApplyUnderLock publishes tx's validated candidate files without acquiring
+	// the lock. ApplyUnderLock must NOT acquire the lock; the caller (the
+	// Coordinator) holds it for the whole transaction. This is a hard contract:
+	// flock(2) LOCK_EX is not re-entrant, so locking again from the same
+	// process would return EWOULDBLOCK and deadlock.
+	ApplyUnderLock(ctx context.Context, tx publish.Transaction) (state.State, error)
 }

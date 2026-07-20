@@ -165,7 +165,10 @@ func (s *coordinatorSpy) Validate(_ context.Context, c staging.Candidate, _ time
 func (s *coordinatorSpy) Recover(context.Context, state.State) (state.State, error) {
 	return state.State{Revision: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{}}, nil
 }
-func (s *coordinatorSpy) Apply(context.Context, publish.Transaction) (state.State, error) {
+
+// ApplyUnderLock mirrors the production seam: the Coordinator already holds the
+// lock, so the publisher does not re-acquire it. The spy records the publish.
+func (s *coordinatorSpy) ApplyUnderLock(context.Context, publish.Transaction) (state.State, error) {
 	s.Publishes++
 	return state.State{}, nil
 }

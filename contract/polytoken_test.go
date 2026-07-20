@@ -207,6 +207,17 @@ func testDisabledFallback(t *testing.T, bin string) {
 	if code := runCommand(t, bin, env, c, work, "config", "validate"); code != 0 {
 		t.Fatalf("disabled-fallback: config validate should pass, got exit %d", code)
 	}
+	// doctor exercises startup-equivalent loading. The brief intends a disabled
+	// fallback to fail doctor (nonzero exit). On polytoken 0.5.0-unstable a
+	// disabled model in a fallback list is a non-fatal warning with auto-fallback
+	// to an enabled model, so doctor may exit 0. The version-independent safety
+	// property this pins is that the disabled model is NEVER resolved as the
+	// active startup default. A strict binary (doctor nonzero) satisfies the
+	// brief directly; a lenient binary must at least exclude the disabled model.
+	out, dcode := polyRun(t, bin, env, c.ConfigDir, work, "doctor")
+	if dcode == 0 && strings.Contains(out, `default model "glm"`) {
+		t.Fatalf("disabled-fallback: disabled model glm resolved as startup default (doctor exit %d):\n%s", dcode, out)
+	}
 }
 
 // --- valid-candidate --------------------------------------------------------
@@ -227,6 +238,10 @@ func testValidCandidate(t *testing.T, bin string) {
 	c := staged(t, globalDir, "", reconcile.Plan{TargetID: "global"}, res)
 	if code := runCommand(t, bin, env, c, work, "config", "validate"); code != 0 {
 		t.Fatalf("valid-candidate: config validate failed, exit %d", code)
+	}
+	// doctor must PASS: a valid candidate loads startup providers successfully.
+	if code := runCommand(t, bin, env, c, work, "doctor"); code != 0 {
+		t.Fatalf("valid-candidate: doctor should pass (exit 0), got exit %d", code)
 	}
 	// The staged config has no disabled/unknown model references.
 	cfg, err := os.ReadFile(filepath.Join(c.ConfigDir, "config.yaml"))

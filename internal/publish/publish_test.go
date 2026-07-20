@@ -203,6 +203,73 @@ func TestStateCommitFaultLeavesJournalAndUncommittedState(t *testing.T) {
 	assertStatePublishedBeforeJournalRemoval(t, env)
 }
 
+// TestApplyUnderLockDoesNotReAcquireLock is the C1 regression test. The
+// Coordinator acquires the transaction flock once for a whole multi-target
+// transaction and calls Publish.ApplyUnderLock per valid target. flock(2)
+// LOCK_EX is NOT re-entrant: a second exclusive acquire on the same path from
+// the same process returns EWOULDBLOCK and would spin until the deadline,
+// deadlocking. This wires the REAL Publisher over a real flock, acquires that
+// same lock (exactly as the Coordinator does), and proves ApplyUnderLock
+// completes successfully instead of re-locking.
+//
+// The ctx carries a short deadline so that if a future change reintroduces a
+// re-lock inside ApplyUnderLock, the second Lock fails fast with
+// context.DeadlineExceeded rather than hanging the suite for the 30s lock cap.
+func TestApplyUnderLockDoesNotReAcquireLock(t *testing.T) {
+	env := newStagedEnv(t, "")
+	env.rewiredForRecover()
+	// The Coordinator holds this exact lock for the whole transaction.
+	unlock, err := env.Publisher.Locker.Lock(context.Background())
+	if err != nil {
+		t.Fatalf("acquire coordinator lock: %v", err)
+	}
+	defer unlock()
+	// Short, bounded deadline: success does not consult it; a regression
+	// (re-lock) fails fast instead of deadlocking.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	committed, err := env.Publisher.ApplyUnderLock(ctx, env.Tx)
+	if err != nil {
+		t.Fatalf("ApplyUnderLock under the held lock: %v", err)
+	}
+	if committed.Revision != env.Tx.Next.Revision {
+		t.Fatalf("committed revision=%d want %d", committed.Revision, env.Tx.Next.Revision)
+	}
+	// The terminal invariant still holds per target: state published (commit)
+	// before the journal was removed.
+	assertStatePublishedBeforeJournalRemoval(t, &env)
+}
+
+// TestApplyUnderLockMatchesApply proves the lock-free seam is behaviorally
+// identical to Apply except for locking: both commit the same accepted state
+// and remove the journal. Apply must lock+unlock around ApplyUnderLock.
+func TestApplyUnderLockMatchesApply(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(t *testing.T, env *stagedEnv) (state.State, error)
+	}{
+		{"Apply", func(t *testing.T, env *stagedEnv) (state.State, error) {
+			return env.Publisher.Apply(context.Background(), env.Tx)
+		}},
+		{"ApplyUnderLock", func(t *testing.T, env *stagedEnv) (state.State, error) {
+			return env.Publisher.ApplyUnderLock(context.Background(), env.Tx)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newStagedEnv(t, "")
+			env.rewiredForRecover()
+			committed, err := tc.call(t, &env)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if committed.Revision != env.Tx.Next.Revision {
+				t.Fatalf("%s: committed revision=%d want %d", tc.name, committed.Revision, env.Tx.Next.Revision)
+			}
+			assertStatePublishedBeforeJournalRemoval(t, &env)
+		})
+	}
+}
+
 // stepJournalDurable reports whether a complete (parsable) journal is present at
 // path. A pre-journal fault leaves no (or partial) journal; a post-journal fault
 // leaves a complete one.

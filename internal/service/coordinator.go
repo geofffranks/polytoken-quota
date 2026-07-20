@@ -333,53 +333,12 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 		return Outcome{Accepted: false, Error: err}
 	}
 	timeout := c.validationTimeout(desired)
-	// Render, stage, and validate every target without per-target trace steps;
-	// the coarse path reports a single reconcile step for the whole batch.
-	type attempt struct {
-		rt        RegisteredTarget
-		plan      reconcile.Plan
-		candidate staging.Candidate
-		result    validate.Result
-		renderErr error
-	}
-	var attempts []attempt
-	for _, rt := range targets {
-		a := attempt{rt: rt}
-		plan, perr := c.Builder.Build(desired, next, rt.Policy)
-		if perr != nil {
-			a.renderErr = perr
-			attempts = append(attempts, a)
-			continue
-		}
-		a.plan = plan
-		candidate, serr := c.Stage.Stage(ctx, rt.Resolved, plan)
-		if serr != nil {
-			a.renderErr = serr
-			attempts = append(attempts, a)
-			continue
-		}
-		a.candidate = candidate
-		a.result = c.Validate.Validate(ctx, candidate, timeout)
-		attempts = append(attempts, a)
-	}
+	// The coarse path reports a single reconcile and publish-targets step for
+	// the whole batch; processOneTarget emits no per-target steps (detailed=false).
 	c.step("publish-targets")
-	outcomes := make([]TargetOutcome, 0, len(attempts))
-	for _, a := range attempts {
-		id := targetID(a.rt)
-		if a.renderErr != nil {
-			outcomes = append(outcomes, pendingOutcome(id, next.Revision, "render", a.renderErr))
-			continue
-		}
-		if !a.result.StartupValid {
-			outcomes = append(outcomes, pendingValidate(id, next.Revision, a.result))
-			continue
-		}
-		tx := c.buildTransaction(observed, next, a.rt, a.plan, a.candidate)
-		if _, perr := c.Publish.Apply(ctx, tx); perr != nil {
-			outcomes = append(outcomes, pendingOutcome(id, next.Revision, "publish", perr))
-			continue
-		}
-		outcomes = append(outcomes, appliedOutcome(id, next.Revision))
+	outcomes := make([]TargetOutcome, 0, len(targets))
+	for _, rt := range targets {
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
@@ -407,40 +366,54 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 	timeout := c.validationTimeout(desired)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		id := targetID(rt)
-		c.step("render:" + id)
-		plan, err := c.Builder.Build(desired, next, rt.Policy)
-		if err != nil {
-			c.step("record-pending:" + id)
-			outcomes = append(outcomes, pendingOutcome(id, next.Revision, "render", err))
-			continue
-		}
-		c.step("stage:" + id)
-		candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan)
-		if err != nil {
-			c.step("record-pending:" + id)
-			outcomes = append(outcomes, pendingOutcome(id, next.Revision, "stage", err))
-			continue
-		}
-		c.step("validate:" + id)
-		result := c.Validate.Validate(ctx, candidate, timeout)
-		if !result.StartupValid {
-			c.step("record-pending:" + id)
-			outcomes = append(outcomes, pendingValidate(id, next.Revision, result))
-			continue
-		}
-		if publish {
-			c.step("publish:" + id)
-			tx := c.buildTransaction(prior, next, rt, plan, candidate)
-			if _, err := c.Publish.Apply(ctx, tx); err != nil {
-				c.step("record-pending:" + id)
-				outcomes = append(outcomes, pendingOutcome(id, next.Revision, "publish", err))
-				continue
-			}
-		}
-		outcomes = append(outcomes, appliedOutcome(id, next.Revision))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true))
 	}
 	return outcomes
+}
+
+// processOneTarget renders, stages, validates, and (when publish is true)
+// publishes a single target, returning its outcome. This is the single place
+// the render → stage → validate → publish-or-pending pipeline lives. When
+// detailed is true it emits a per-target trace step for each stage and outcome
+// (render:/stage:/validate:/publish:/record-pending: suffixed with the target
+// id); the coarse Set/Clear path passes false so the whole batch reports only
+// the batch-level reconcile/publish-targets steps emitted by its caller.
+func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed bool) TargetOutcome {
+	id := targetID(rt)
+	step := func(name string) {
+		if detailed {
+			c.step(name + ":" + id)
+		}
+	}
+	step("render")
+	plan, err := c.Builder.Build(desired, next, rt.Policy)
+	if err != nil {
+		step("record-pending")
+		return pendingOutcome(id, next.Revision, "render", err)
+	}
+	step("stage")
+	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan)
+	if err != nil {
+		step("record-pending")
+		return pendingOutcome(id, next.Revision, "stage", err)
+	}
+	step("validate")
+	result := c.Validate.Validate(ctx, candidate, timeout)
+	if !result.StartupValid {
+		step("record-pending")
+		return pendingValidate(id, next.Revision, result)
+	}
+	if publish {
+		step("publish")
+		tx := c.buildTransaction(prior, next, rt, plan, candidate)
+		// ApplyUnderLock: the Coordinator already holds the transaction lock;
+		// the publisher must NOT re-acquire it (flock LOCK_EX is not re-entrant).
+		if _, err := c.Publish.ApplyUnderLock(ctx, tx); err != nil {
+			step("record-pending")
+			return pendingOutcome(id, next.Revision, "publish", err)
+		}
+	}
+	return appliedOutcome(id, next.Revision)
 }
 
 // --- helpers ----------------------------------------------------------------
