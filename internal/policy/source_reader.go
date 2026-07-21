@@ -1,0 +1,232 @@
+package policy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+
+	"gopkg.in/yaml.v3"
+)
+
+// FilesystemSourceReader reads the managed subset of Polytoken's filesystem
+// configuration. It never returns credentials or unrelated config fields.
+type FilesystemSourceReader struct {
+	GlobalDir   string
+	DesiredPath string
+}
+
+func (r FilesystemSourceReader) Global(ctx context.Context) (SourceSet, error) {
+	return r.readSet(ctx, r.GlobalDir, "global", true, true)
+}
+
+func (r FilesystemSourceReader) Projects(ctx context.Context) ([]SourceSet, error) {
+	if r.DesiredPath == "" {
+		return nil, errors.New("policy: source reader requires desired policy for registered projects")
+	}
+	d, err := Load(r.DesiredPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("policy: read registered projects: %w", err)
+	}
+	out := make([]SourceSet, 0, len(d.Projects))
+	for _, p := range d.Projects {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		set, err := r.readSet(ctx, p.Root, p.ID, false, true)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, set)
+	}
+	return out, nil
+}
+
+func (r FilesystemSourceReader) readSet(ctx context.Context, root, id string, global, readConfig bool) (SourceSet, error) {
+	if err := ctx.Err(); err != nil {
+		return SourceSet{}, err
+	}
+	if root == "" {
+		return SourceSet{}, errors.New("policy: source root is empty")
+	}
+	root, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return SourceSet{}, fmt.Errorf("policy: source root: %w", err)
+	}
+	if _, err := os.Stat(root); err != nil {
+		return SourceSet{}, fmt.Errorf("policy: source root %q: %w", root, err)
+	}
+	set := SourceSet{ID: id, Root: root, Global: global}
+	if readConfig {
+		set.Config, err = readManagedConfig(filepath.Join(root, "config.yaml"))
+		if err != nil {
+			return SourceSet{}, err
+		}
+	}
+	paths, err := discoverManagedFiles(root)
+	if err != nil {
+		return SourceSet{}, fmt.Errorf("policy: discover %s source: %w", id, err)
+	}
+	for _, rel := range paths {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return SourceSet{}, fmt.Errorf("policy: read definition %q: %w", rel, err)
+		}
+		def, ok, err := readManagedDefinition(data)
+		if err != nil {
+			return SourceSet{}, fmt.Errorf("policy: read definition %q: %w", rel, err)
+		}
+		if ok {
+			def.Path = rel
+			set.Definitions = append(set.Definitions, def)
+		}
+	}
+	return set, nil
+}
+
+type sourceConfigWire struct {
+	Providers map[string]struct{} `yaml:"providers"`
+	Models    map[string]struct {
+		Enabled *bool `yaml:"enabled"`
+	} `yaml:"models"`
+	Defaults struct {
+		Full string `yaml:"full"`
+		Mini string `yaml:"mini"`
+		Nano string `yaml:"nano"`
+	} `yaml:"defaults"`
+	Autonomous struct {
+		Classifier string `yaml:"classifier_model"`
+	} `yaml:"autonomous_permission_matcher"`
+}
+
+func readManagedConfig(path string) (SourceConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return SourceConfig{}, fmt.Errorf("policy: read config %q: %w", path, err)
+	}
+	var w sourceConfigWire
+	if err := yaml.Unmarshal(data, &w); err != nil {
+		return SourceConfig{}, fmt.Errorf("policy: parse config %q: %w", path, err)
+	}
+	ids := make([]string, 0, len(w.Providers))
+	for id := range w.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := SourceConfig{
+		Full: ChainIf(w.Defaults.Full), Mini: ChainIf(w.Defaults.Mini), Nano: ChainIf(w.Defaults.Nano),
+		Classifier: ChainIf(w.Autonomous.Classifier),
+	}
+	for _, id := range ids {
+		models := map[string]ModelBaseline{}
+		prefix := id + "/"
+		for name, entry := range w.Models {
+			if len(prefix) > len(name) || name[:len(prefix)] != prefix {
+				continue
+			}
+			mb := ModelBaseline{Enabled: true}
+			if entry.Enabled != nil {
+				mb.Enabled, mb.HadEnabledKey = *entry.Enabled, true
+			}
+			models[name] = mb
+		}
+		out.Providers = append(out.Providers, SourceMapping{ID: id, CodexBarProviders: []string{id}, PolytokenProviders: []string{id}, Models: models})
+	}
+	return out, nil
+}
+
+func discoverManagedFiles(root string) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if _, ok, err := readManagedDefinition(data); err != nil {
+			return err
+		} else if ok {
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			found = append(found, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(found)
+	return found, nil
+}
+
+func ChainIf(s string) Chain {
+	if s == "" {
+		return nil
+	}
+	return Chain{s}
+}
+
+type sourceDefinitionWire struct {
+	Polytoken *struct {
+		Model          string   `yaml:"model"`
+		FallbackModels []string `yaml:"fallback_models"`
+	} `yaml:"polytoken"`
+}
+
+func readManagedDefinition(data []byte) (SourceDefinition, bool, error) {
+	start, end, _, ok := frontmatterBounds(data)
+	if !ok {
+		return SourceDefinition{}, false, nil
+	}
+	var w sourceDefinitionWire
+	if err := yaml.Unmarshal(data[start:end], &w); err != nil {
+		return SourceDefinition{}, false, err
+	}
+	if w.Polytoken == nil || (w.Polytoken.Model == "" && len(w.Polytoken.FallbackModels) == 0) {
+		return SourceDefinition{}, false, nil
+	}
+	return SourceDefinition{Model: w.Polytoken.Model, FallbackModels: append([]string(nil), w.Polytoken.FallbackModels...)}, true, nil
+}
+
+func frontmatterBounds(data []byte) (int, int, int, bool) {
+	if len(data) < 4 || string(data[:3]) != "---" || (data[3] != '\n' && data[3] != '\r') {
+		return 0, 0, 0, false
+	}
+	start := 4
+	if data[3] == '\r' && start < len(data) && data[start] == '\n' {
+		start++
+	}
+	for pos := start; pos < len(data); {
+		lineEnd := pos
+		for lineEnd < len(data) && data[lineEnd] != '\n' && data[lineEnd] != '\r' {
+			lineEnd++
+		}
+		if string(data[pos:lineEnd]) == "---" {
+			return start, pos, lineEnd, true
+		}
+		for lineEnd < len(data) && (data[lineEnd] == '\n' || data[lineEnd] == '\r') {
+			lineEnd++
+		}
+		pos = lineEnd
+	}
+	return 0, 0, 0, false
+}

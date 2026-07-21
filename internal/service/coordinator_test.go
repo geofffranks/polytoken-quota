@@ -96,6 +96,12 @@ func (s *coordinatorSpy) Step(step string) { s.Trace = append(s.Trace, step) }
 
 func (s *coordinatorSpy) Now() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }
 
+type failingValidator struct{ result validate.Result }
+
+func (v failingValidator) Validate(context.Context, staging.Candidate, time.Duration) validate.Result {
+	return v.result
+}
+
 // --- Locker ---
 func (s *coordinatorSpy) Lock(context.Context) (func() error, error) {
 	return func() error { return nil }, nil
@@ -230,6 +236,48 @@ func TestDryRunIsNonMutating(t *testing.T) {
 	out := spy.Coordinator.Reconcile(context.Background(), true)
 	if out.Error != nil || spy.StateSaves != 0 || spy.Publishes != 0 || spy.ValidationIntents == 0 {
 		t.Fatalf("out=%+v saves=%d publishes=%d intents=%d", out, spy.StateSaves, spy.Publishes, spy.ValidationIntents)
+	}
+}
+
+func TestPendingValidationCarriesAttemptTimestampAndDiagnostics(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	when := time.Date(2026, 7, 21, 12, 34, 56, 0, time.UTC)
+	spy.Coordinator.Clock = fixedClock{t: when}
+	spy.Coordinator.Validate = failingValidator{result: validate.Result{
+		Error: &validate.CommandError{
+			Stage:       validate.ConfigValidate,
+			Summary:     "config validate: invalid model chain",
+			Remediation: "inspect staged config",
+		},
+	}}
+
+	out := spy.Coordinator.Reconcile(context.Background(), false)
+	if out.PendingCount() != 1 {
+		t.Fatalf("out=%+v", out)
+	}
+	pending := out.Targets[0].Pending
+	if pending == nil || pending.Summary != "config validate: invalid model chain" || pending.Remediation != "inspect staged config" {
+		t.Fatalf("pending=%+v", pending)
+	}
+	if !pending.AttemptedAt.Equal(when) {
+		t.Fatalf("pending attempted_at=%v want %v", pending.AttemptedAt, when)
+	}
+}
+
+func TestDryRunPendingValidationCarriesAttemptTimestamp(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	when := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
+	spy.Coordinator.Clock = fixedClock{t: when}
+	spy.Coordinator.Validate = failingValidator{result: validate.Result{Error: &validate.CommandError{
+		Stage: validate.ConfigValidate, Summary: "config validate: invalid model",
+	}}}
+
+	out := spy.Coordinator.Reconcile(context.Background(), true)
+	if out.PendingCount() != 1 || !out.Targets[0].Pending.AttemptedAt.Equal(when) {
+		t.Fatalf("out=%+v", out)
+	}
+	if spy.StateSaves != 0 || spy.Publishes != 0 {
+		t.Fatalf("dry-run mutated state: saves=%d publishes=%d", spy.StateSaves, spy.Publishes)
 	}
 }
 

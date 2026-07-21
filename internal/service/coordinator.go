@@ -454,7 +454,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	result := c.Validate.Validate(ctx, candidate, timeout)
 	if !result.StartupValid {
 		step("record-pending")
-		return pendingValidate(id, next.Revision, result)
+		return pendingValidate(id, next.Revision, c.now(), result)
 	}
 	if publish {
 		step("publish")
@@ -591,13 +591,22 @@ func (c *Coordinator) recordTargetOutcomes(s state.State, outcomes []TargetOutco
 	}
 	now := c.now()
 	for _, o := range outcomes {
+		prior := s.Targets[o.TargetID]
 		ts := state.TargetState{
 			AttemptedRevision: o.AttemptedRevision,
 			AppliedRevision:   o.AppliedRevision,
 			AttemptedAt:       now,
 		}
 		if o.Pending != nil {
-			ts.Pending = o.Pending
+			pending := *o.Pending
+			pending.TargetID = o.TargetID
+			pending.AttemptedRevision = o.AttemptedRevision
+			if pending.AttemptedAt.IsZero() {
+				pending.AttemptedAt = now
+			}
+			pending.LastSuccessfulRevision = prior.AppliedRevision
+			pending.LastSuccessfulAt = prior.AppliedAt
+			ts.Pending = &pending
 		} else {
 			ts.AppliedAt = now
 		}
@@ -626,8 +635,15 @@ func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcom
 	}
 }
 
+func validationRemediation(result validate.Result) string {
+	if result.Error == nil {
+		return "re-run reconcile after resolving the validation failure"
+	}
+	return result.Error.Remediation
+}
+
 // pendingValidate records a target whose staged candidate failed validation.
-func pendingValidate(id string, rev uint64, result validate.Result) TargetOutcome {
+func pendingValidate(id string, rev uint64, attemptedAt time.Time, result validate.Result) TargetOutcome {
 	stage := string(validate.ConfigValidate)
 	summary := "validation failed"
 	if result.Error != nil {
@@ -641,7 +657,9 @@ func pendingValidate(id string, rev uint64, result validate.Result) TargetOutcom
 			TargetID:          id,
 			Stage:             stage,
 			Summary:           summary,
+			Remediation:       validationRemediation(result),
 			AttemptedRevision: rev,
+			AttemptedAt:       attemptedAt,
 			LiveStatus:        "last-known-good",
 		},
 	}

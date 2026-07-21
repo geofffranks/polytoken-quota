@@ -189,6 +189,81 @@ func TestInitReportsInvalidReferences(t *testing.T) {
 // TestWriterCreateAtomicRejectsExistingDesired proves exclusive create rejects an
 // existing desired.yaml with ErrDesiredExists, preserves its bytes, and points to
 // `sync --from-polytoken`.
+func TestFilesystemSourceReaderReadsManagedGlobalFields(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(`providers:
+  codex:
+    api_key: secret-must-not-be-copied
+models:
+  codex/gpt:
+    enabled: false
+defaults:
+  full: codex/gpt
+  mini: codex/gpt
+autonomous_permission_matcher:
+  classifier_model: codex/gpt
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "agent.md"), []byte(`---
+polytoken:
+  model: codex/gpt
+  fallback_models:
+    - codex/gpt
+other: private
+---
+body
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := FilesystemSourceReader{GlobalDir: root}
+	got, err := reader.Global(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Config.Providers) != 1 || got.Config.Providers[0].Models["codex/gpt"].Enabled {
+		t.Fatalf("providers=%+v", got.Config.Providers)
+	}
+	if !reflect.DeepEqual(got.Config.Full, Chain{"codex/gpt"}) || !reflect.DeepEqual(got.Config.Classifier, Chain{"codex/gpt"}) {
+		t.Fatalf("managed chains=%+v", got.Config)
+	}
+	if len(got.Definitions) != 1 || got.Definitions[0].Model != "codex/gpt" {
+		t.Fatalf("definitions=%+v", got.Definitions)
+	}
+	if got.Definitions[0].Path != "agents/agent.md" {
+		t.Fatalf("definition path=%q", got.Definitions[0].Path)
+	}
+}
+
+func TestFilesystemSourceReaderUsesOnlyRegisteredProjects(t *testing.T) {
+	root := t.TempDir()
+	global := filepath.Join(root, "global")
+	project := filepath.Join(root, "project")
+	unregistered := filepath.Join(root, "unregistered")
+	for _, dir := range []string{global, project, unregistered} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("models: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desiredPath := filepath.Join(root, "desired.yaml")
+	if err := os.WriteFile(desiredPath, []byte("version: 1\nproviders: {}\nglobal: {id: global, root: "+global+"}\nprojects:\n  - id: registered\n    root: "+project+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (FilesystemSourceReader{GlobalDir: global, DesiredPath: desiredPath}).Projects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "registered" || got[0].Root != project {
+		t.Fatalf("projects=%+v", got)
+	}
+}
+
 func TestWriterCreateAtomicRejectsExistingDesired(t *testing.T) {
 	path := writeDesired(t, "existing")
 	before, _ := os.ReadFile(path)

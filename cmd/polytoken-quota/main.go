@@ -28,7 +28,7 @@ import (
 // environment. The utility root defaults to $HOME/.polytoken-quota and is
 // overridable via POLYTOKEN_QUOTA_HOME. The Polytoken binary defaults to the
 // supported pinned path and is overridable via POLYTOKEN_BINARY. The global
-// Polytoken configuration directory defaults to $HOME/.polytoken and is
+// Polytoken configuration directory defaults to $HOME/.config/polytoken and is
 // overridable via POLYTOKEN_CONFIG_DIR.
 type config struct {
 	Home         string // utility root for state/lock/journal/backups/staging
@@ -61,7 +61,7 @@ func resolveConfig() (config, error) {
 		if err != nil {
 			return config{}, fmt.Errorf("resolve polytoken config dir: %w", err)
 		}
-		globalDir = filepath.Join(h, ".polytoken")
+		globalDir = filepath.Join(h, ".config", "polytoken")
 	}
 	bin := os.Getenv("POLYTOKEN_BINARY")
 	if bin == "" {
@@ -89,9 +89,9 @@ const defaultPolytokenBinary = "/home/linuxbrew/.linuxbrew/bin/polytoken"
 
 // newCoordinator constructs a fully-wired *service.Coordinator with all real
 // production dependencies. Every field is wired so no command nil-panics.
-// Sources (Init/Sync's polytoken source reader) is left nil: it is nil-safe
-// (Init/Sync report a clean error when unset) and a production filesystem
-// SourceReader is out of scope for this wiring task.
+// Sources (Init/Sync's polytoken source reader) reads the managed subset of the
+// global config and explicitly registered project roots without retaining
+// credentials or unrelated configuration.
 func newCoordinator(cfg config) *service.Coordinator {
 	store := state.Store{
 		Path:               cfg.StatePath,
@@ -128,6 +128,7 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Validate:        service.ValidateRunner{Runner: runner},
 		Publish:         service.PublisherAdapter{Publisher: pub},
 		DiagnosticState: store,
+		Sources:         policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
 	}
 }
 

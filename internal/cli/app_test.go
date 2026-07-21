@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -134,6 +135,23 @@ func TestStateAdaptersPassTypedValues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(spy.ClearSelector, state.Selector{All: true}) {
 		t.Fatalf("selector=%+v", spy.ClearSelector)
+	}
+}
+
+func TestDryRunReportsPendingValidationWithoutPendingExit(t *testing.T) {
+	stderr := new(strings.Builder)
+	spy := &outcomeSpy{outcome: service.Outcome{
+		Accepted: true,
+		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+			Stage: "config_validate", Summary: "config validate: invalid model", Remediation: "inspect staged config",
+		}}},
+	}}
+	code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), io.Discard, stderr, Dependencies{Mutator: spy, Diagnoser: spy, Environment: func() map[string]string { return nil }})
+	if code != ExitOK {
+		t.Fatalf("exit=%d want %d", code, ExitOK)
+	}
+	if !strings.Contains(stderr.String(), "config validate: invalid model") || !strings.Contains(stderr.String(), "inspect staged config") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
@@ -284,6 +302,28 @@ func TestCLIExitContract(t *testing.T) {
 		if got := runWithOutcome(t, tc.args, tc.outcome); got != tc.want {
 			t.Fatalf("got=%d want=%d", got, tc.want)
 		}
+	}
+}
+
+func TestMutationErrorsArePrinted(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		args    []string
+	}{
+		{command: "init", args: []string{"init"}},
+		{command: "sync", args: []string{"sync", "--from-polytoken"}},
+		{command: "reconcile", args: []string{"reconcile"}},
+	} {
+		t.Run(tc.command, func(t *testing.T) {
+			spy := &outcomeSpy{outcome: service.Outcome{Error: errors.New("source reader unavailable")}}
+			var stderr bytes.Buffer
+			if got := Run(context.Background(), tc.args, strings.NewReader(""), io.Discard, &stderr, spy.Dependencies()); got != ExitRejected {
+				t.Fatalf("exit=%d want=%d", got, ExitRejected)
+			}
+			if !strings.Contains(stderr.String(), "source reader unavailable") {
+				t.Fatalf("stderr=%q does not contain mutation error", stderr.String())
+			}
+		})
 	}
 }
 

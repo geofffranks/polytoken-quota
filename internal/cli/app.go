@@ -82,6 +82,29 @@ func MutationExitCode(o service.Outcome) int {
 	return ExitOK
 }
 
+func mutationExitCode(o service.Outcome, stderr io.Writer) int {
+	if o.Error != nil {
+		fmt.Fprintln(stderr, o.Error)
+	}
+	return MutationExitCode(o)
+}
+
+func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
+	for _, target := range o.Targets {
+		if target.Pending != nil {
+			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
+				target.TargetID, target.Pending.Stage, target.Pending.Summary, target.Pending.Remediation)
+		}
+	}
+	if o.Error != nil {
+		fmt.Fprintln(stderr, o.Error)
+	}
+	if !o.Accepted {
+		return ExitRejected
+	}
+	return ExitOK
+}
+
 // DiagnosticExitCode maps a diagnostic command and its actionable flag to a
 // process exit code. status is always informational (exit 0); doctor exits 1
 // only when its findings are actionable.
@@ -159,7 +182,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return ExitRejected
 		}
 		out := deps.Mutator.Init(ctx)
-		code := MutationExitCode(out)
+		code := mutationExitCode(out, stderr)
 		if out.Accepted && out.PendingCount() == 0 {
 			writeInitInstructions(stdout)
 		}
@@ -174,7 +197,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintln(stderr, "hook:", err)
 			return ExitRejected
 		}
-		return MutationExitCode(deps.Mutator.HandleEvent(ctx, event))
+		return mutationExitCode(deps.Mutator.HandleEvent(ctx, event), stderr)
 	case "status":
 		jsonOut, ok := parseBoolFlags(args[1:], "--json")
 		if !ok {
@@ -190,7 +213,11 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintln(stderr, "reconcile: invalid arguments")
 			return ExitRejected
 		}
-		return MutationExitCode(deps.Mutator.Reconcile(ctx, dryRun))
+		out := deps.Mutator.Reconcile(ctx, dryRun)
+		if dryRun {
+			return dryRunExitCode(out, stderr)
+		}
+		return mutationExitCode(out, stderr)
 	case "sync":
 		fromPolytoken, force, ok := parseSyncFlags(args[1:])
 		if !ok {
@@ -201,7 +228,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintln(stderr, "sync requires --from-polytoken")
 			return ExitRejected
 		}
-		return MutationExitCode(deps.Mutator.Sync(ctx, force))
+		return mutationExitCode(deps.Mutator.Sync(ctx, force), stderr)
 	case "state":
 		return runState(ctx, args[1:], deps, stderr)
 	case "doctor":
@@ -278,7 +305,7 @@ func runStateSet(ctx context.Context, args []string, deps Dependencies, stderr i
 		fmt.Fprintln(stderr, err)
 		return ExitRejected
 	}
-	return MutationExitCode(deps.Mutator.Set(ctx, provider, patch))
+	return mutationExitCode(deps.Mutator.Set(ctx, provider, patch), stderr)
 }
 
 func runStateClear(ctx context.Context, args []string, deps Dependencies, stderr io.Writer) int {
@@ -307,7 +334,7 @@ func runStateClear(ctx context.Context, args []string, deps Dependencies, stderr
 		fmt.Fprintln(stderr, err)
 		return ExitRejected
 	}
-	return MutationExitCode(deps.Mutator.Clear(ctx, selector))
+	return mutationExitCode(deps.Mutator.Clear(ctx, selector), stderr)
 }
 
 // parseBoolFlags reports whether every token in args is one of the allowed

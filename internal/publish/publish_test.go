@@ -44,6 +44,29 @@ func TestLockSerializesAndTimesOut(t *testing.T) {
 	}
 }
 
+// TestLockReleaseLeavesPathButAllowsReacquire verifies the lock pathname is
+// persistent while the advisory lock itself is released with the file descriptor.
+func TestLockReleaseLeavesPathButAllowsReacquire(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "apply.lock")
+	first := newFileLock(path)
+	unlock, err := first.Lock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unlock(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("lock pathname disappeared: %v", err)
+	}
+	second := newFileLock(path)
+	unlockSecond, err := second.Lock(context.Background())
+	if err != nil {
+		t.Fatalf("released lock could not be reacquired: %v", err)
+	}
+	defer unlockSecond()
+}
+
 // TestLockFileMode0600 verifies the advisory lock file is created restrictive.
 func TestLockFileMode0600(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "x.lock")
