@@ -33,6 +33,7 @@ import (
 // returned with a failure or timeout.
 type commandSpy struct {
 	Args   [][]string
+	Envs   []map[string]string
 	FailAt int
 	Block  bool
 	Stderr []byte
@@ -41,9 +42,18 @@ type commandSpy struct {
 
 func newSpy() *commandSpy { return &commandSpy{FailAt: -1} }
 
-func (s *commandSpy) Run(ctx context.Context, name string, args []string, max int64) (stdout, stderr []byte, exit int, err error) {
+func (s *commandSpy) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error) {
 	cp := append([]string(nil), args...)
 	s.Args = append(s.Args, cp)
+	if env != nil {
+		copyEnv := make(map[string]string, len(env))
+		for key, value := range env {
+			copyEnv[key] = value
+		}
+		s.Envs = append(s.Envs, copyEnv)
+	} else {
+		s.Envs = append(s.Envs, nil)
+	}
 	idx := s.calls
 	s.calls++
 	canned := append([]byte(nil), s.Stderr...)
@@ -67,6 +77,27 @@ var sanitize = DefaultSanitize
 // newRunner wires a Runner with the default output cap and production redactor.
 func newRunner(c CommandRunner) Runner {
 	return Runner{Binary: "/opt/polytoken", Commands: c, MaxOutput: 4096, Sanitize: sanitize}
+}
+
+func TestExecRunnerPreservesInheritedEnvironmentWhenOverriding(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh unavailable")
+	}
+	t.Setenv("POLYTOKEN_INHERITED_ENV", "inherited")
+	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s:%s \"$POLYTOKEN_INHERITED_ENV\" \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
+	if err != nil || exit != 0 || string(out) != "inherited:present" {
+		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	}
+}
+
+func TestExecRunnerPassesExplicitEnvironment(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh unavailable")
+	}
+	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
+	if err != nil || exit != 0 || string(out) != "present" {
+		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	}
 }
 
 // candidate returns a lightweight staging candidate (no-op cleanup) for tests
@@ -107,7 +138,7 @@ func realCandidate(t *testing.T) staging.Candidate {
 func TestValidateExactCommandsAndOrder(t *testing.T) {
 	spy := newSpy()
 	r := Runner{Binary: "/opt/polytoken", Commands: spy, MaxOutput: 4096, Sanitize: sanitize}
-	c := staging.Candidate{ConfigDir: "/private/config", WorkingDir: "/private/work"}
+	c := staging.Candidate{Root: "/private/root", ConfigDir: "/private/config", UserConfigDir: "/private/user", WorkingDir: "/private/work"}
 
 	got := r.Validate(context.Background(), c, time.Second)
 	if !got.ConfigValid || !got.StartupValid {
@@ -115,8 +146,14 @@ func TestValidateExactCommandsAndOrder(t *testing.T) {
 	}
 
 	want := [][]string{
-		{"--config-dir", "/private/config", "--working-dir", "/private/work", "config", "validate"},
-		{"--config-dir", "/private/config", "--working-dir", "/private/work", "doctor"},
+		{"--config-dir", "/private/config", "--working-dir", "/private/work", "config", "validate", "--user"},
+		{"--working-dir", "/private/work", "doctor"},
+	}
+	if spy.Envs[0]["XDG_CONFIG_HOME"] != "/private/user" || spy.Envs[0]["HOME"] != "/private/root" {
+		t.Fatalf("config validate environment=%v", spy.Envs[0])
+	}
+	if spy.Envs[1]["XDG_CONFIG_HOME"] != "/private/user" || spy.Envs[1]["HOME"] != "/private/root" {
+		t.Fatalf("doctor environment=%v", spy.Envs[1])
 	}
 	if !reflect.DeepEqual(spy.Args, want) {
 		t.Fatalf("args\ngot=%v\nwant=%v", spy.Args, want)
@@ -137,6 +174,22 @@ func TestConfigFailureSkipsDoctor(t *testing.T) {
 	}
 	if got.ConfigValid {
 		t.Fatalf("ConfigValid should be false on config failure: %+v", got)
+	}
+}
+
+func TestSilentCommandFailureIncludesExitStatus(t *testing.T) {
+	spy := &commandSpy{FailAt: 0}
+	got := newRunner(spy).Validate(context.Background(), candidate(), time.Second)
+	if got.Error == nil || got.Error.Summary != "config validate: exited with status 1" {
+		t.Fatalf("summary=%q want silent exit diagnostic", got.Error.Summary)
+	}
+}
+
+func TestWhitespaceOnlyCommandFailureIncludesExitStatus(t *testing.T) {
+	spy := &commandSpy{FailAt: 0, Stderr: []byte("\n \t\n")}
+	got := newRunner(spy).Validate(context.Background(), candidate(), time.Second)
+	if got.Error == nil || got.Error.Summary != "config validate: exited with status 1" {
+		t.Fatalf("summary=%q want whitespace-only output to use exit diagnostic", got.Error.Summary)
 	}
 }
 
@@ -273,7 +326,7 @@ func TestExecRunnerDirectInvocation(t *testing.T) {
 	big := strings.Repeat("x", 5000)
 	r := ExecRunner{}
 
-	stdout, stderr, exit, err := r.Run(context.Background(), "/bin/echo", []string{big}, max)
+	stdout, stderr, exit, err := r.Run(context.Background(), "/bin/echo", []string{big}, max, nil)
 	if err != nil || exit != 0 {
 		t.Fatalf("echo: exit=%d err=%v", exit, err)
 	}

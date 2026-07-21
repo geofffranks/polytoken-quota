@@ -116,12 +116,13 @@ const (
 
 // transactionInput carries the kind-specific arguments into the common path.
 type transactionInput struct {
-	Event    *hook.Event
-	DryRun   bool
-	Force    bool
-	Provider string
-	Patch    state.ProviderPatch
-	Selector state.Selector
+	Event       *hook.Event
+	DryRun      bool
+	KeepStaging bool
+	Force       bool
+	Provider    string
+	Patch       state.ProviderPatch
+	Selector    state.Selector
 }
 
 // Rejected/stale outcomes are non-mutating and exit 1.
@@ -154,8 +155,8 @@ func (c *Coordinator) HandleEvent(ctx context.Context, e hook.Event) Outcome {
 // Reconcile regenerates candidates from the current policy and persisted state.
 // With dryRun it reports managed-field diffs and validation intent without
 // mutating state or targets, while still locking and recovering first.
-func (c *Coordinator) Reconcile(ctx context.Context, dryRun bool) Outcome {
-	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun})
+func (c *Coordinator) Reconcile(ctx context.Context, dryRun, keepStaging bool) Outcome {
+	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun, KeepStaging: keepStaging})
 }
 
 // Sync imports current managed fields as desired intent (guarded unless forced),
@@ -230,10 +231,14 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State) O
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	desired := proposed
+	c.step("load-sources")
+	if _, err := c.Targets.ResolveTargets(desired); err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
 	if err := c.PolicyWriter.CreateAtomic(ctx, proposed); err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	desired := proposed
 	observed := recovered
 	next := observed
 	if next.Revision == 0 {
@@ -300,8 +305,11 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	if in.KeepStaging && !in.DryRun {
+		return Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}
+	}
 	if in.DryRun {
-		outcomes := c.processTargets(ctx, desired, observed, observed, targets, false)
+		outcomes := c.processTargets(ctx, desired, observed, observed, targets, false, in.KeepStaging)
 		return Outcome{Accepted: true, Revision: observed.Revision, Targets: outcomes}
 	}
 	next := observed
@@ -331,13 +339,13 @@ func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, i
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	if err := c.PolicyWriter.ReplaceAtomic(ctx, imported); err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
 	desired := imported
 	c.step("load-sources")
 	targets, err := c.Targets.ResolveTargets(desired)
 	if err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
+	if err := c.PolicyWriter.ReplaceAtomic(ctx, imported); err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
 	next := observed
@@ -386,7 +394,7 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	c.step("publish-targets")
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
@@ -410,11 +418,12 @@ func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, 
 // processTargets runs the detailed per-target pipeline (render → stage →
 // validate → publish), emitting a trace step for each stage and target. When
 // publish is false (dry-run) no publish or state mutation occurs.
-func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool) []TargetOutcome {
+func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool, retain ...bool) []TargetOutcome {
+	keepStaging := len(retain) > 0 && retain[0]
 	timeout := c.validationTimeout(desired)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging))
 	}
 	return outcomes
 }
@@ -426,7 +435,7 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 // (render:/stage:/validate:/publish:/record-pending: suffixed with the target
 // id); the coarse Set/Clear path passes false so the whole batch reports only
 // the batch-level reconcile/publish-targets steps emitted by its caller.
-func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed bool) TargetOutcome {
+func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging bool) TargetOutcome {
 	id := targetID(rt)
 	step := func(name string) {
 		if detailed {
@@ -449,12 +458,22 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	// candidate so the staged files survive into publish (applyOne renames the
 	// temp files to their live paths). The Coordinator owns the candidate's
 	// lifecycle and removes the staging root on every exit path after staging.
-	defer func() { _ = candidate.Cleanup() }()
+	cleanupCandidate := true
+	defer func() {
+		if cleanupCandidate {
+			_ = candidate.Cleanup()
+		}
+	}()
 	step("validate")
 	result := c.Validate.Validate(ctx, candidate, timeout)
 	if !result.StartupValid {
 		step("record-pending")
-		return pendingValidate(id, next.Revision, c.now(), result)
+		outcome := pendingValidate(id, next.Revision, c.now(), result)
+		if keepStaging {
+			cleanupCandidate = false
+			outcome.StagingRoot = candidate.Root
+		}
+		return outcome
 	}
 	if publish {
 		step("publish")

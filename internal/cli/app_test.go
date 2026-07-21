@@ -58,7 +58,7 @@ func (s *depsSpy) HandleEvent(context.Context, hook.Event) service.Outcome {
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) Reconcile(context.Context, bool) service.Outcome {
+func (s *depsSpy) Reconcile(context.Context, bool, bool) service.Outcome {
 	s.Mutations++
 	return service.Outcome{Accepted: true}
 }
@@ -135,6 +135,24 @@ func TestStateAdaptersPassTypedValues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(spy.ClearSelector, state.Selector{All: true}) {
 		t.Fatalf("selector=%+v", spy.ClearSelector)
+	}
+}
+
+func TestKeepStagingRequiresDryRun(t *testing.T) {
+	stderr := new(strings.Builder)
+	spy := &outcomeSpy{outcome: service.Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}}
+	code := Run(context.Background(), []string{"reconcile", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+	if code != ExitRejected || !strings.Contains(stderr.String(), "requires --dry-run") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestDryRunReportsRetainedStagingPath(t *testing.T) {
+	stderr := new(strings.Builder)
+	spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{TargetID: "global", StagingRoot: "/tmp/staged"}}}}
+	code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+	if code != ExitOK || !strings.Contains(stderr.String(), "staged candidate retained at: /tmp/staged") {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 	}
 }
 
@@ -255,7 +273,7 @@ type outcomeSpy struct{ outcome service.Outcome }
 
 func (s *outcomeSpy) Init(context.Context) service.Outcome                    { return s.outcome }
 func (s *outcomeSpy) HandleEvent(context.Context, hook.Event) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Reconcile(context.Context, bool) service.Outcome         { return s.outcome }
+func (s *outcomeSpy) Reconcile(context.Context, bool, bool) service.Outcome   { return s.outcome }
 func (s *outcomeSpy) Sync(context.Context, bool) service.Outcome              { return s.outcome }
 func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.Outcome {
 	return s.outcome

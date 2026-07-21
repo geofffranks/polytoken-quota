@@ -6,11 +6,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +47,7 @@ type config struct {
 	Retention    time.Duration
 	LockWait     time.Duration
 	ValidateWait time.Duration
+	PolytokenEnv map[string]string
 }
 
 func resolveConfig() (config, error) {
@@ -64,8 +68,27 @@ func resolveConfig() (config, error) {
 		globalDir = filepath.Join(h, ".config", "polytoken")
 	}
 	bin := os.Getenv("POLYTOKEN_BINARY")
-	if bin == "" {
+	if bin != "" {
+		info, err := os.Stat(bin)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			return config{}, fmt.Errorf("resolve explicit polytoken binary %q: not executable", bin)
+		}
+	} else {
 		bin = defaultPolytokenBinary
+		if _, err := os.Stat(bin); err != nil {
+			bin, err = exec.LookPath("polytoken")
+			if err != nil {
+				return config{}, fmt.Errorf("resolve polytoken binary: %w", err)
+			}
+		}
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return config{}, fmt.Errorf("resolve polytoken env file: %w", err)
+	}
+	polytokenEnv, err := loadPolytokenEnv(filepath.Join(h, ".config", "polytoken.env"), os.Environ())
+	if err != nil {
+		return config{}, err
 	}
 	return config{
 		Home:         home,
@@ -81,11 +104,80 @@ func resolveConfig() (config, error) {
 		Retention:    7 * 24 * time.Hour,
 		LockWait:     10 * time.Second,
 		ValidateWait: 30 * time.Second,
+		PolytokenEnv: polytokenEnv,
 	}, nil
 }
 
 // defaultPolytokenBinary is the supported pinned Polytoken contract binary.
-const defaultPolytokenBinary = "/home/linuxbrew/.linuxbrew/bin/polytoken"
+var defaultPolytokenBinary = "/home/linuxbrew/.linuxbrew/bin/polytoken"
+
+func inheritedEnvironment(inherited []string) map[string]string {
+	env := make(map[string]string, len(inherited))
+	for _, kv := range inherited {
+		key, value, ok := strings.Cut(kv, "=")
+		if ok && key != "" {
+			env[key] = value
+		}
+	}
+	return env
+}
+
+func loadPolytokenEnv(path string, inherited []string) (map[string]string, error) {
+	env := inheritedEnvironment(inherited)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return env, nil
+		}
+		return nil, fmt.Errorf("read polytoken env file: %w", err)
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	line := 0
+	for scanner.Scan() {
+		line++
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		text = strings.TrimSpace(strings.TrimPrefix(text, "export "))
+		key, value, ok := strings.Cut(text, "=")
+		if !ok || !validEnvKey(key) {
+			return nil, fmt.Errorf("invalid polytoken env file line %d", line)
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			decoded, err := strconv.Unquote(value)
+			if value[0] == '\'' {
+				decoded = value[1 : len(value)-1]
+				err = nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("invalid polytoken env file line %d", line)
+			}
+			value = decoded
+		}
+		if existing, exists := env[key]; !exists || existing == "" {
+			env[key] = value
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read polytoken env file: %w", err)
+	}
+	return env, nil
+}
+
+func validEnvKey(key string) bool {
+	if key == "" || (key[0] < 'A' || key[0] > 'Z') && (key[0] < 'a' || key[0] > 'z') && key[0] != '_' {
+		return false
+	}
+	for _, r := range key[1:] {
+		if (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
+}
 
 // newCoordinator constructs a fully-wired *service.Coordinator with all real
 // production dependencies. Every field is wired so no command nil-panics.
@@ -109,6 +201,7 @@ func newCoordinator(cfg config) *service.Coordinator {
 	runner := validate.Runner{
 		Binary:   cfg.PolytokenBin,
 		Commands: validate.ExecRunner{},
+		Env:      cfg.PolytokenEnv,
 	}
 
 	builder := staging.Builder{

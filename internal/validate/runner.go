@@ -11,8 +11,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,7 +37,7 @@ const (
 // bytes, the process exit code (0 on success, -1 when unavailable), and any
 // error. It is injectable so tests drive the validator without a real binary.
 type CommandRunner interface {
-	Run(ctx context.Context, name string, args []string, max int64) (stdout, stderr []byte, exit int, err error)
+	Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error)
 }
 
 // CommandError is the sanitized, persisted record of one failed stage. Summary
@@ -64,6 +67,7 @@ type Runner struct {
 	Commands  CommandRunner
 	MaxOutput int64
 	Sanitize  func([]byte) string
+	Env       map[string]string
 }
 
 // defaultMaxOutput bounds the combined stdout+stderr captured per command.
@@ -84,19 +88,19 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	defer cancel()
 
 	// Stage 1: config validate.
-	out, errOut, exit, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max)
+	out, errOut, exit, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
-		return Result{Error: r.fail(ConfigValidate, out, errOut, timedOut)}
+		return Result{Error: r.fail(ConfigValidate, out, errOut, exit, timedOut)}
 	}
 
 	// Stage 2: doctor (only after config validation passed).
-	out, errOut, exit, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max)
+	out, errOut, exit, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
-		return Result{ConfigValid: true, Error: r.fail(Doctor, out, errOut, timedOut)}
+		return Result{ConfigValid: true, Error: r.fail(Doctor, out, errOut, exit, timedOut)}
 	}
 
 	_ = c.Cleanup()
@@ -104,11 +108,11 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 }
 
 // fail builds a sanitized CommandError for one failed stage.
-func (r Runner) fail(stage Stage, stdout, stderr []byte, timedOut bool) *CommandError {
+func (r Runner) fail(stage Stage, stdout, stderr []byte, exit int, timedOut bool) *CommandError {
 	combined := append(append([]byte(nil), stdout...), stderr...)
 	return &CommandError{
 		Stage:       stage,
-		Summary:     summarize(stage, r.sanitizer()(combined)),
+		Summary:     summarize(stage, r.sanitizer()(combined), exit),
 		TimedOut:    timedOut,
 		Remediation: remediation(stage, timedOut),
 	}
@@ -131,21 +135,34 @@ func (r Runner) sanitizer() func([]byte) string {
 // configValidateArgs and doctorArgs are the exact, ordered argv passed to the
 // Polytoken binary for each stage. Global flags precede the subcommand.
 func configValidateArgs(c staging.Candidate) []string {
-	return []string{"--config-dir", c.ConfigDir, "--working-dir", c.WorkingDir, "config", "validate"}
+	return []string{"--config-dir", c.ConfigDir, "--working-dir", c.WorkingDir, "config", "validate", "--user"}
 }
 
 func doctorArgs(c staging.Candidate) []string {
-	return []string{"--config-dir", c.ConfigDir, "--working-dir", c.WorkingDir, "doctor"}
+	return []string{"--working-dir", c.WorkingDir, "doctor"}
+}
+
+func doctorEnv(base map[string]string, c staging.Candidate) map[string]string {
+	env := make(map[string]string, len(base)+2)
+	for key, value := range base {
+		env[key] = value
+	}
+	env["XDG_CONFIG_HOME"] = c.UserConfigDir
+	env["HOME"] = c.Root
+	return env
 }
 
 // summarize prefixes the sanitized output with the coarse command name so the
 // persisted record identifies which step failed.
-func summarize(stage Stage, sanitized string) string {
+func summarize(stage Stage, sanitized string, exit int) string {
 	cmd := coarseCommand(stage)
-	if sanitized == "" {
-		return cmd
+	if strings.TrimSpace(sanitized) != "" {
+		return cmd + ": " + sanitized
 	}
-	return cmd + ": " + sanitized
+	if exit >= 0 {
+		return fmt.Sprintf("%s: exited with status %d", cmd, exit)
+	}
+	return cmd + ": command failed without diagnostic output"
 }
 
 func coarseCommand(stage Stage) string {
@@ -183,11 +200,14 @@ func remediation(stage Stage, timedOut bool) string {
 type ExecRunner struct{}
 
 // Run invokes name with args directly under ctx.
-func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64) (stdout, stderr []byte, exit int, err error) {
+func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error) {
 	if max <= 0 {
 		max = defaultMaxOutput
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
+	if env != nil {
+		cmd.Env = mergedEnvironment(env)
+	}
 	budget := &captureBudget{remaining: max}
 	out, errw := &boundedWriter{budget: budget}, &boundedWriter{budget: budget}
 	cmd.Stdout = out
@@ -204,6 +224,27 @@ func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64
 		return stdout, stderr, exit, runErr
 	}
 	return stdout, stderr, 0, nil
+}
+
+func mergedEnvironment(overrides map[string]string) []string {
+	base := os.Environ()
+	seen := make(map[string]bool, len(overrides))
+	out := make([]string, 0, len(base)+len(overrides))
+	for _, kv := range base {
+		key, _, ok := strings.Cut(kv, "=")
+		if value, replace := overrides[key]; replace {
+			out = append(out, key+"="+value)
+			seen[key] = true
+		} else if ok {
+			out = append(out, kv)
+		}
+	}
+	for key, value := range overrides {
+		if !seen[key] {
+			out = append(out, key+"="+value)
+		}
+	}
+	return out
 }
 
 // captureBudget is the shared remaining byte budget for one command's combined

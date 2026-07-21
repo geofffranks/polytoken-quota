@@ -45,7 +45,7 @@ import (
 // passes without an external dependency.
 type fakeCommandRunner struct{}
 
-func (fakeCommandRunner) Run(context.Context, string, []string, int64) (stdout, stderr []byte, exit int, err error) {
+func (fakeCommandRunner) Run(context.Context, string, []string, int64, map[string]string) (stdout, stderr []byte, exit int, err error) {
 	return nil, nil, 0, nil
 }
 

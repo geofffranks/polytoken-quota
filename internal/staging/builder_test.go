@@ -213,6 +213,13 @@ func TestBuildCompleteRootAndNeutralWorkdir(t *testing.T) {
 			t.Fatalf("missing effective definition %s: %v", rel, err)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(c.UserConfigDir, "polytoken", "config.yaml")); err != nil {
+		t.Fatalf("missing staged user config: %v", err)
+	}
+	userProject, err := os.ReadFile(filepath.Join(c.UserConfigDir, "polytoken", "subagents", "project.md"))
+	if err != nil || !bytes.Contains(userProject, []byte("- zai/glm")) {
+		t.Fatalf("user config did not receive plan edit: err=%v content=%s", err, userProject)
+	}
 	// The plan edit rewrote the project definition's model + fallback.
 	pj, err := os.ReadFile(filepath.Join(c.ConfigDir, "subagents", "project.md"))
 	if err != nil {
@@ -450,6 +457,15 @@ func TestConflictingLiveIsolation(t *testing.T) {
 
 // TestAuthInertRedactsSecrets proves AuthInert removes source secrets and leaves
 // an inert placeholder.
+func TestAuthInertRejectsSecretBearingAuxiliaryFile(t *testing.T) {
+	live := layeredFixture(t)
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "credentials.json"), `{"token":"secret"}`)
+	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
+	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan); err == nil {
+		t.Fatal("AuthInert accepted secret-bearing auxiliary file")
+	}
+}
+
 func TestAuthInertRedactsSecrets(t *testing.T) {
 	live := layeredFixture(t)
 	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)

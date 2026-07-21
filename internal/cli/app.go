@@ -32,7 +32,7 @@ const (
 type Mutator interface {
 	Init(context.Context) service.Outcome
 	HandleEvent(context.Context, hook.Event) service.Outcome
-	Reconcile(context.Context, bool) service.Outcome
+	Reconcile(context.Context, bool, bool) service.Outcome
 	Sync(context.Context, bool) service.Outcome
 	Set(context.Context, string, state.ProviderPatch) service.Outcome
 	Clear(context.Context, state.Selector) service.Outcome
@@ -94,6 +94,9 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 		if target.Pending != nil {
 			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
 				target.TargetID, target.Pending.Stage, target.Pending.Summary, target.Pending.Remediation)
+		}
+		if target.StagingRoot != "" {
+			fmt.Fprintf(stderr, "staged candidate retained at: %s\n", target.StagingRoot)
 		}
 	}
 	if o.Error != nil {
@@ -208,12 +211,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		writeStatus(stdout, report, jsonOut)
 		return DiagnosticExitCode(StatusCommand, false)
 	case "reconcile":
-		dryRun, ok := parseBoolFlags(args[1:], "--dry-run")
+		dryRun, keepStaging, ok := parseReconcileFlags(args[1:])
 		if !ok {
 			fmt.Fprintln(stderr, "reconcile: invalid arguments")
 			return ExitRejected
 		}
-		out := deps.Mutator.Reconcile(ctx, dryRun)
+		out := deps.Mutator.Reconcile(ctx, dryRun, keepStaging)
 		if dryRun {
 			return dryRunExitCode(out, stderr)
 		}
@@ -351,6 +354,20 @@ func parseBoolFlags(args []string, allowed ...string) (present, ok bool) {
 		present = true
 	}
 	return present, true
+}
+
+func parseReconcileFlags(args []string) (dryRun, keepStaging, ok bool) {
+	for _, a := range args {
+		switch a {
+		case "--dry-run":
+			dryRun = true
+		case "--keep-staging":
+			keepStaging = true
+		default:
+			return false, false, false
+		}
+	}
+	return dryRun, keepStaging, true
 }
 
 func parseSyncFlags(args []string) (fromPolytoken, force, ok bool) {

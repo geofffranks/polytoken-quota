@@ -14,6 +14,7 @@ package service
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,6 +31,13 @@ import (
 )
 
 const validTargetKey = "valid"
+
+type testSourceReader struct{}
+
+func (testSourceReader) Global(context.Context) (policy.SourceSet, error) {
+	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", CodexBarProviders: []string{"codex"}, PolytokenProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
+}
+func (testSourceReader) Projects(context.Context) ([]policy.SourceSet, error) { return nil, nil }
 
 // --- coordinator spy --------------------------------------------------------
 
@@ -48,6 +56,8 @@ type coordinatorSpy struct {
 	invalidTargets    map[string]bool
 	desiredExists     bool
 	files             map[string]string
+	stageRoot         string
+	resolveErr        error
 }
 
 func newCoordinatorSpy(specs ...string) *coordinatorSpy {
@@ -98,7 +108,7 @@ func (s *coordinatorSpy) Now() time.Time { return time.Date(2026, 7, 19, 12, 0, 
 
 type failingValidator struct{ result validate.Result }
 
-func (v failingValidator) Validate(context.Context, staging.Candidate, time.Duration) validate.Result {
+func (v failingValidator) Validate(_ context.Context, _ staging.Candidate, _ time.Duration) validate.Result {
 	return v.result
 }
 
@@ -139,6 +149,9 @@ func (s *coordinatorSpy) Save(st state.State) error {
 
 // --- TargetRegistry ---
 func (s *coordinatorSpy) ResolveTargets(policy.Desired) ([]RegisteredTarget, error) {
+	if s.resolveErr != nil {
+		return nil, s.resolveErr
+	}
 	return s.targetList, nil
 }
 
@@ -153,7 +166,11 @@ func (s *coordinatorSpy) Stage(_ context.Context, res target.Resolved, plan reco
 	if id == "" {
 		id = plan.TargetID
 	}
-	return staging.Candidate{TargetID: id}, nil
+	root := s.stageRoot
+	if root == "" {
+		root = "/tmp/synthetic-stage"
+	}
+	return staging.Candidate{Root: root, TargetID: id}, nil
 }
 
 // --- Validator ---
@@ -233,7 +250,7 @@ func TestRejectedInputDoesNotMutate(t *testing.T) {
 
 func TestDryRunIsNonMutating(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	out := spy.Coordinator.Reconcile(context.Background(), true)
+	out := spy.Coordinator.Reconcile(context.Background(), true, false)
 	if out.Error != nil || spy.StateSaves != 0 || spy.Publishes != 0 || spy.ValidationIntents == 0 {
 		t.Fatalf("out=%+v saves=%d publishes=%d intents=%d", out, spy.StateSaves, spy.Publishes, spy.ValidationIntents)
 	}
@@ -251,7 +268,7 @@ func TestPendingValidationCarriesAttemptTimestampAndDiagnostics(t *testing.T) {
 		},
 	}}
 
-	out := spy.Coordinator.Reconcile(context.Background(), false)
+	out := spy.Coordinator.Reconcile(context.Background(), false, false)
 	if out.PendingCount() != 1 {
 		t.Fatalf("out=%+v", out)
 	}
@@ -264,6 +281,31 @@ func TestPendingValidationCarriesAttemptTimestampAndDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDryRunKeepStagingCleansSuccessfulCandidate(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.stageRoot = t.TempDir()
+	out := spy.Coordinator.Reconcile(context.Background(), true, true)
+	if out.PendingCount() != 0 || out.Targets[0].StagingRoot != "" {
+		t.Fatalf("out=%+v", out)
+	}
+}
+
+func TestDryRunKeepStagingRetainsFailedCandidate(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.stageRoot = t.TempDir()
+	spy.Coordinator.Validate = failingValidator{result: validate.Result{Error: &validate.CommandError{
+		Stage: validate.ConfigValidate, Summary: "config validate: invalid model",
+	}}}
+	out := spy.Coordinator.Reconcile(context.Background(), true, true)
+	if out.PendingCount() != 1 || out.Targets[0].StagingRoot == "" {
+		t.Fatalf("out=%+v", out)
+	}
+	if _, err := os.Stat(out.Targets[0].StagingRoot); err != nil {
+		t.Fatalf("retained staging root=%q: %v", out.Targets[0].StagingRoot, err)
+	}
+	_ = os.RemoveAll(out.Targets[0].StagingRoot)
+}
+
 func TestDryRunPendingValidationCarriesAttemptTimestamp(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	when := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
@@ -272,12 +314,32 @@ func TestDryRunPendingValidationCarriesAttemptTimestamp(t *testing.T) {
 		Stage: validate.ConfigValidate, Summary: "config validate: invalid model",
 	}}}
 
-	out := spy.Coordinator.Reconcile(context.Background(), true)
+	out := spy.Coordinator.Reconcile(context.Background(), true, false)
 	if out.PendingCount() != 1 || !out.Targets[0].Pending.AttemptedAt.Equal(when) {
 		t.Fatalf("out=%+v", out)
 	}
 	if spy.StateSaves != 0 || spy.Publishes != 0 {
 		t.Fatalf("dry-run mutated state: saves=%d publishes=%d", spy.StateSaves, spy.Publishes)
+	}
+}
+
+func TestInitTargetResolutionFailureDoesNotCreateDesired(t *testing.T) {
+	spy := newCoordinatorSpy()
+	spy.resolveErr = errors.New("resolve targets failed")
+	spy.Coordinator.Sources = testSourceReader{}
+	out := spy.Coordinator.Init(context.Background())
+	if out.Accepted || out.Error == nil || spy.files["desired.yaml"] != "" {
+		t.Fatalf("out=%+v files=%v", out, spy.files)
+	}
+}
+
+func TestSyncTargetResolutionFailureDoesNotReplaceDesired(t *testing.T) {
+	spy := newCoordinatorSpy()
+	spy.resolveErr = errors.New("resolve targets failed")
+	spy.Coordinator.Sources = testSourceReader{}
+	out := spy.Coordinator.Sync(context.Background(), true)
+	if out.Accepted || out.Error == nil || spy.files["desired.yaml"] != "" {
+		t.Fatalf("out=%+v files=%v", out, spy.files)
 	}
 }
 
@@ -338,7 +400,7 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 	}{
 		{"init", func(c *Coordinator) Outcome { return c.Init(ctx) }},
 		{"event", func(c *Coordinator) Outcome { return c.HandleEvent(ctx, event(hook.QuotaLow, 3)) }},
-		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false) }},
+		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false) }},
 		{"sync", func(c *Coordinator) Outcome { return c.Sync(ctx, true) }},
 		{"set", func(c *Coordinator) Outcome { return c.Set(ctx, "codex", state.ProviderPatch{Quota: &low}) }},
 		{"clear", func(c *Coordinator) Outcome { return c.Clear(ctx, state.Selector{All: true}) }},

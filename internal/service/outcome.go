@@ -13,6 +13,9 @@ type TargetOutcome struct {
 	AppliedRevision   uint64
 	// Pending is non-nil when the target could not be fully reconciled.
 	Pending *state.ApplyFailure
+	// StagingRoot is populated only when an explicitly requested dry-run retains
+	// a failed staging candidate for diagnosis.
+	StagingRoot string
 }
 
 // Outcome is the result of a mutation operation. Accepted is false when the

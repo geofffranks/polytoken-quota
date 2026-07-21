@@ -53,11 +53,12 @@ const (
 // Root is the parent cleaned up alongside both. Cleanup removes Root and is
 // idempotent.
 type Candidate struct {
-	Root       string
-	ConfigDir  string
-	WorkingDir string
-	TargetID   string
-	cleanup    func() error
+	Root          string
+	ConfigDir     string
+	WorkingDir    string
+	UserConfigDir string
+	TargetID      string
+	cleanup       func() error
 }
 
 // Cleanup removes the staging root and neutral working directory. It is
@@ -130,28 +131,30 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 
 	root := stageRoot(b.TempRoot, res.ID)
 	configDir := filepath.Join(root, configSubdir)
+	userConfigDir := filepath.Join(root, userConfigSubdir)
 	workDir := filepath.Join(root, workSubdir)
 	if err := os.MkdirAll(configDir, dirPerm); err != nil {
 		return Candidate{}, fmt.Errorf("staging: create config dir: %w", err)
 	}
 	cleanup := newCleanup(root)
-	if err := b.stage(ctx, configDir, workDir, res, plan); err != nil {
+	if err := b.stage(ctx, configDir, userConfigDir, workDir, res, plan); err != nil {
 		_ = cleanup()
 		return Candidate{}, err
 	}
 	return Candidate{
-		Root:       root,
-		ConfigDir:  configDir,
-		WorkingDir: workDir,
-		TargetID:   res.ID,
-		cleanup:    cleanup,
+		Root:          root,
+		ConfigDir:     configDir,
+		WorkingDir:    workDir,
+		UserConfigDir: userConfigDir,
+		TargetID:      res.ID,
+		cleanup:       cleanup,
 	}, nil
 }
 
 // stage fills configDir with the merged effective config and definitions,
 // applies the plan edits, and creates the neutral workDir. Any error leaves the
 // caller responsible for removing root.
-func (b Builder) stage(ctx context.Context, configDir, workDir string, res target.Resolved, plan reconcile.Plan) error {
+func (b Builder) stage(ctx context.Context, configDir, userConfigDir, workDir string, res target.Resolved, plan reconcile.Plan) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -176,8 +179,17 @@ func (b Builder) stage(ctx context.Context, configDir, workDir string, res targe
 	if err := writeStaged(filepath.Join(configDir, stagedConfigFile), cfgBytes); err != nil {
 		return err
 	}
+	if err := writeStaged(filepath.Join(userConfigDir, "polytoken", stagedConfigFile), cfgBytes); err != nil {
+		return err
+	}
 	for rel, data := range mergeFiles(global.Files, project.Files) {
+		if b.AuthMode == AuthInert && secretBearingFile(rel) {
+			return fmt.Errorf("staging: refusing secret-bearing auxiliary file %q in AuthInert mode", rel)
+		}
 		if err := writeStaged(filepath.Join(configDir, filepath.FromSlash(rel)), data); err != nil {
+			return err
+		}
+		if err := writeStaged(filepath.Join(userConfigDir, "polytoken", filepath.FromSlash(rel)), data); err != nil {
 			return err
 		}
 	}
@@ -186,6 +198,9 @@ func (b Builder) stage(ctx context.Context, configDir, workDir string, res targe
 	}
 	if err := applyPlanEdits(configDir, plan); err != nil {
 		return fmt.Errorf("apply edits: %w", err)
+	}
+	if err := applyPlanEdits(filepath.Join(userConfigDir, "polytoken"), plan); err != nil {
+		return fmt.Errorf("apply user edits: %w", err)
 	}
 	if err := os.MkdirAll(workDir, dirPerm); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
@@ -430,6 +445,16 @@ func readLayer(dir string) (Layer, error) {
 	return Layer{Config: cfg, Files: files}, nil
 }
 
+func secretBearingFile(rel string) bool {
+	base := strings.ToLower(filepath.Base(rel))
+	for _, marker := range []string{".env", "credential", "secret", "token", "auth"} {
+		if strings.Contains(base, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // writeStaged writes data to path, creating parent directories with dirPerm and
 // the file with filePerm.
 func writeStaged(path string, data []byte) error {
@@ -485,6 +510,7 @@ func sanitizeID(id string) string {
 
 const (
 	configSubdir     = "config"
+	userConfigSubdir = "user-config"
 	workSubdir       = "work"
 	stagedConfigFile = "config.yaml"
 	dirPerm          = 0o700
