@@ -412,6 +412,10 @@ func (m FSMaterializer) Project(ctx context.Context, res target.Resolved) (Layer
 // readLayer reads config.yaml plus every other regular file under dir, keyed by
 // forward-slash relative path. config.yaml at the dir root is returned as
 // Config; a nested file named config.yaml is treated as an ordinary file.
+// Ephemeral runtime directories (read-once, skill-once, superpowers), the
+// prompt_history file, and backup copies (*.bak) are excluded — they are not
+// configuration and backup files may carry raw secrets that bypass AuthInert
+// redaction.
 func readLayer(dir string) (Layer, error) {
 	cfg, err := os.ReadFile(filepath.Join(dir, stagedConfigFile))
 	if err != nil {
@@ -423,20 +427,34 @@ func readLayer(dir string) (Layer, error) {
 			return walkErr
 		}
 		if d.IsDir() {
+			if path == dir {
+				return nil
+			}
+			rel, rerr := filepath.Rel(dir, path)
+			if rerr != nil {
+				return rerr
+			}
+			if isExcludedDir(filepath.ToSlash(rel)) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if filepath.Base(path) == stagedConfigFile && filepath.Dir(path) == dir {
+			return nil
+		}
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			return rerr
+		}
+		relSlash := filepath.ToSlash(rel)
+		if shouldExcludeFile(relSlash) {
 			return nil
 		}
 		data, rerr := os.ReadFile(path)
 		if rerr != nil {
 			return rerr
 		}
-		rel, rerr := filepath.Rel(dir, path)
-		if rerr != nil {
-			return rerr
-		}
-		files[filepath.ToSlash(rel)] = data
+		files[relSlash] = data
 		return nil
 	})
 	if err != nil {
@@ -445,14 +463,90 @@ func readLayer(dir string) (Layer, error) {
 	return Layer{Config: cfg, Files: files}, nil
 }
 
+// excludedDirs lists top-level directory names under the config root that hold
+// ephemeral runtime state rather than Polytoken configuration. Walking into
+// these is skipped entirely.
+var excludedDirs = map[string]bool{
+	"read-once":   true, // session-tracking JSONL
+	"skill-once":  true, // session-tracking JSONL
+	"superpowers": true, // runtime state scripts
+}
+
+// isExcludedDir reports whether rel (a forward-slash path relative to the config
+// root) is inside a top-level excluded directory.
+func isExcludedDir(rel string) bool {
+	top := rel
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		top = rel[:i]
+	}
+	return excludedDirs[top]
+}
+
+// shouldExcludeFile reports whether a file (forward-slash path relative to the
+// config root) should be skipped because it is ephemeral runtime state or a
+// backup copy, not live configuration.
+func shouldExcludeFile(rel string) bool {
+	if isExcludedDir(rel) {
+		return true
+	}
+	base := filepath.Base(rel)
+	if base == "prompt_history" {
+		return true
+	}
+	// Backup copies contain raw config with real secrets and bypass AuthInert
+	// redaction — never stage them.
+	if strings.HasSuffix(base, ".bak") {
+		return true
+	}
+	if strings.Contains(base, ".bak-") {
+		return true
+	}
+	return false
+}
+
 func secretBearingFile(rel string) bool {
 	base := strings.ToLower(filepath.Base(rel))
-	for _, marker := range []string{".env", "credential", "secret", "token", "auth"} {
+	// Distinctive markers — substring match is safe and precise.
+	for _, marker := range []string{".env", "credential", "secret"} {
 		if strings.Contains(base, marker) {
 			return true
 		}
 	}
+	// Short markers that embed in benign words (e.g. "token" in "polytoken",
+	// "auth" in "authorize") — require word boundaries so only standalone
+	// occurrences match.
+	for _, marker := range []string{"token", "auth"} {
+		if wordBoundaryContains(base, marker) {
+			return true
+		}
+	}
 	return false
+}
+
+// wordBoundaryContains reports whether s contains word as a token bounded by
+// non-alphabetic characters (or the start/end of the string). This prevents
+// "token" from matching inside "polytoken" while still matching "access_token"
+// or "token.json". s is assumed already lowercased.
+func wordBoundaryContains(s, word string) bool {
+	idx := 0
+	for {
+		pos := strings.Index(s[idx:], word)
+		if pos < 0 {
+			return false
+		}
+		absPos := idx + pos
+		end := absPos + len(word)
+		leftOK := absPos == 0 || !isLowerAlpha(s[absPos-1])
+		rightOK := end == len(s) || !isLowerAlpha(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		idx = absPos + 1
+	}
+}
+
+func isLowerAlpha(b byte) bool {
+	return b >= 'a' && b <= 'z'
 }
 
 // writeStaged writes data to path, creating parent directories with dirPerm and

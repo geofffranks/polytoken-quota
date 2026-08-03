@@ -591,3 +591,145 @@ func TestTimeoutContextIsHonored(t *testing.T) {
 	}
 	assertGone(t, "timeout-window", root)
 }
+
+// --- secretBearingFile word-boundary tests ----------------------------------
+
+func TestSecretBearingFileWordBoundary(t *testing.T) {
+	// Benign filenames that contain a marker as a substring of a larger word.
+	// These must NOT be flagged — the old code false-positived them.
+	benign := []string{
+		// filepath.Base is all that matters; "polytoken" embeds "token" but
+		// must not be flagged. (Full path kept short to avoid tripping the
+		// TestNoProcessControl source guard.)
+		"ref/polytoken-tools.md",
+		"superpowers/session-start-polytoken",
+		"facets/authorize.md",
+		"subagents/authors.md",
+		"facets/polyauth.md",
+	}
+	for _, f := range benign {
+		if secretBearingFile(f) {
+			t.Errorf("secretBearingFile(%q) = true; want false (benign)", f)
+		}
+	}
+
+	// Genuinely secret-bearing filenames — these MUST be flagged.
+	dangerous := []string{
+		"credentials.json",
+		".env",
+		"production.env",
+		"access_token.json",
+		"token.json",
+		"secret.key",
+		"secrets.yaml",
+		"auth.json",
+		"auth_tokens.yaml",
+		"deploy/.env",
+		"config/token",
+	}
+	for _, f := range dangerous {
+		if !secretBearingFile(f) {
+			t.Errorf("secretBearingFile(%q) = false; want true (secret-bearing)", f)
+		}
+	}
+}
+
+// --- readLayer exclusion tests ----------------------------------------------
+
+func TestReadLayerExcludesNonConfigPaths(t *testing.T) {
+	dir := t.TempDir()
+	testutil.WriteFile(t, filepath.Join(dir, "config.yaml"), "models: {}\n")
+	// Config files that MUST be staged.
+	testutil.WriteFile(t, filepath.Join(dir, "subagents", "reviewer.md"), "# reviewer")
+	testutil.WriteFile(t, filepath.Join(dir, "facets", "scribe.md"), "# scribe")
+	testutil.WriteFile(t, filepath.Join(dir, "skills", "debug", "SKILL.md"), "# debug")
+	// Ephemeral runtime state that MUST be excluded.
+	testutil.WriteFile(t, filepath.Join(dir, "read-once", "session-abc.jsonl"), "{}")
+	testutil.WriteFile(t, filepath.Join(dir, "skill-once", "session-def.jsonl"), "{}")
+	testutil.WriteFile(t, filepath.Join(dir, "superpowers", "session-start"), "#!/bin/sh")
+	testutil.WriteFile(t, filepath.Join(dir, "prompt_history"), "history data")
+	// Backup files that MUST be excluded (contain raw secrets).
+	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.bak"), "providers:\n  api_key: leaked\n")
+	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.20260101T000000Z.bak"), "providers:\n  api_key: leaked\n")
+	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.bak-20260101"), "providers:\n  api_key: leaked\n")
+
+	layer, err := readLayer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	must := []string{
+		"subagents/reviewer.md",
+		"facets/scribe.md",
+		"skills/debug/SKILL.md",
+	}
+	for _, rel := range must {
+		if _, ok := layer.Files[rel]; !ok {
+			t.Errorf("config file %q was excluded; it must be staged", rel)
+		}
+	}
+	excluded := []string{
+		"read-once/session-abc.jsonl",
+		"skill-once/session-def.jsonl",
+		"superpowers/session-start",
+		"prompt_history",
+		"config.yaml.bak",
+		"config.yaml.20260101T000000Z.bak",
+		"config.yaml.bak-20260101",
+	}
+	for _, rel := range excluded {
+		if _, ok := layer.Files[rel]; ok {
+			t.Errorf("non-config file %q was staged; it must be excluded", rel)
+		}
+	}
+}
+
+// TestStagingAcceptsPolytokenNamedFiles proves staging succeeds when the config
+// dir contains files whose names embed "token" inside "polytoken" — the bug that
+// blocked `polytoken-quota sync --from-polytoken` in the wild.
+func TestStagingAcceptsPolytokenNamedFiles(t *testing.T) {
+	live := layeredFixture(t)
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "polytoken-tools.md"), "# tools")
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "superpowers", "session-start-polytoken"), "#!/bin/sh")
+	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	if err != nil {
+		t.Fatalf("staging rejected benign polytoken-named file: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+}
+
+// TestStagingExcludesBackupWithSecrets proves backup config files containing
+// real secrets are never staged in AuthInert mode.
+func TestStagingExcludesBackupWithSecrets(t *testing.T) {
+	live := layeredFixture(t)
+	leaked := "real-leaked-secret-9999"
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "config.yaml.bak"),
+		"providers:\n  codex:\n    api_key: "+leaked+"\n")
+	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	if err != nil {
+		t.Fatalf("staging failed: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	// The backup must not exist in staging.
+	if _, err := os.Stat(filepath.Join(c.ConfigDir, "config.yaml.bak")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("backup file was staged (should be excluded)")
+	}
+	// And its secret must not appear anywhere in the staged config dir.
+	err = filepath.Walk(c.ConfigDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.Contains(data, []byte(leaked)) {
+			t.Errorf("leaked secret found in staged file %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
