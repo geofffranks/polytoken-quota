@@ -264,6 +264,53 @@ func TestFilesystemSourceReaderUsesOnlyRegisteredProjects(t *testing.T) {
 	}
 }
 
+func TestFilesystemSourceReaderExcludesBackupAndEphemeralFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("models: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defContent := []byte("---\npolytoken:\n  model: codex/gpt\n---\nbody\n")
+	// Real definition — must be discovered.
+	if err := os.MkdirAll(filepath.Join(root, "subagents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "subagents", "agent.md"), defContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Backup copies with valid frontmatter — must NOT be discovered.
+	for _, bak := range []string{"agent.md.bak", "agent.md.bak-20260802", "agent.md.20260802T000000Z.bak"} {
+		if err := os.WriteFile(filepath.Join(root, "subagents", bak), defContent, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Definition-like file inside ephemeral dirs — must NOT be discovered.
+	for _, dir := range []string{"read-once", "skill-once", "superpowers"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, dir, "fake.md"), defContent, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// prompt_history at root — must not be discovered.
+	if err := os.WriteFile(filepath.Join(root, "prompt_history"), defContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := FilesystemSourceReader{GlobalDir: root}
+	got, err := reader.Global(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, d := range got.Definitions {
+		paths = append(paths, d.Path)
+	}
+	if len(paths) != 1 || paths[0] != "subagents/agent.md" {
+		t.Fatalf("expected only [subagents/agent.md], got %v", paths)
+	}
+}
+
 func TestWriterCreateAtomicRejectsExistingDesired(t *testing.T) {
 	path := writeDesired(t, "existing")
 	before, _ := os.ReadFile(path)

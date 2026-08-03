@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -154,6 +155,23 @@ func discoverManagedFiles(root string) ([]string, error) {
 			return nil
 		}
 		if d.IsDir() {
+			if path != root {
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				if isIgnoredDir(filepath.ToSlash(rel)) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		if isIgnoredFile(relSlash) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -163,11 +181,7 @@ func discoverManagedFiles(root string) ([]string, error) {
 		if _, ok, err := readManagedDefinition(data); err != nil {
 			return err
 		} else if ok {
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			found = append(found, filepath.ToSlash(rel))
+			found = append(found, relSlash)
 		}
 		return nil
 	})
@@ -176,6 +190,43 @@ func discoverManagedFiles(root string) ([]string, error) {
 	}
 	sort.Strings(found)
 	return found, nil
+}
+
+// ignoredDirs are top-level directories under the config root that hold ephemeral
+// runtime state, not Polytoken configuration. They must never contribute
+// definition files. This MUST stay in sync with staging.excludedDirs.
+var ignoredDirs = map[string]bool{
+	"read-once":   true,
+	"skill-once":  true,
+	"superpowers": true,
+}
+
+func isIgnoredDir(rel string) bool {
+	top := rel
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		top = rel[:i]
+	}
+	return ignoredDirs[top]
+}
+
+// isIgnoredFile reports whether a file (forward-slash relative path) is a backup
+// copy or ephemeral artifact that must not be treated as a managed definition.
+// Backup copies are especially dangerous: they carry stale managed fields that
+// would pollute the reconciliation plan and then fail in staging (the file is
+// excluded from staging but the plan still references it).
+// This MUST stay in sync with staging.shouldExcludeFile.
+func isIgnoredFile(rel string) bool {
+	if isIgnoredDir(rel) {
+		return true
+	}
+	base := filepath.Base(rel)
+	if base == "prompt_history" {
+		return true
+	}
+	if strings.HasSuffix(base, ".bak") || strings.Contains(base, ".bak-") {
+		return true
+	}
+	return false
 }
 
 func ChainIf(s string) Chain {
