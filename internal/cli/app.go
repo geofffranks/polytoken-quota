@@ -18,6 +18,7 @@ import (
 	"github.com/geofffranks/codexbar-hooks/internal/hook"
 	"github.com/geofffranks/codexbar-hooks/internal/service"
 	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/codexbar-hooks/internal/validate"
 )
 
 // Process exit codes.
@@ -36,6 +37,9 @@ type Mutator interface {
 	Sync(context.Context, bool) service.Outcome
 	Set(context.Context, string, state.ProviderPatch) service.Outcome
 	Clear(context.Context, state.Selector) service.Outcome
+	Disable(context.Context, string) service.Outcome
+	Enable(context.Context, string) service.Outcome
+	Reset(context.Context) service.Outcome
 }
 
 // statusAdvisoryFragments holds the running-session advisory text split across
@@ -83,8 +87,17 @@ func MutationExitCode(o service.Outcome) int {
 }
 
 func mutationExitCode(o service.Outcome, stderr io.Writer) int {
+	for _, target := range o.Targets {
+		if target.Pending != nil {
+			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
+				validate.DefaultSanitize([]byte(target.TargetID)),
+				validate.DefaultSanitize([]byte(target.Pending.Stage)),
+				validate.DefaultSanitize([]byte(target.Pending.Summary)),
+				validate.DefaultSanitize([]byte(target.Pending.Remediation)))
+		}
+	}
 	if o.Error != nil {
-		fmt.Fprintln(stderr, o.Error)
+		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(o.Error.Error())))
 	}
 	return MutationExitCode(o)
 }
@@ -93,7 +106,10 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 	for _, target := range o.Targets {
 		if target.Pending != nil {
 			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
-				target.TargetID, target.Pending.Stage, target.Pending.Summary, target.Pending.Remediation)
+				validate.DefaultSanitize([]byte(target.TargetID)),
+				validate.DefaultSanitize([]byte(target.Pending.Stage)),
+				validate.DefaultSanitize([]byte(target.Pending.Summary)),
+				validate.DefaultSanitize([]byte(target.Pending.Remediation)))
 		}
 		if target.StagingRoot != "" {
 			fmt.Fprintf(stderr, "staged candidate retained at: %s\n", target.StagingRoot)
@@ -232,6 +248,26 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return ExitRejected
 		}
 		return mutationExitCode(deps.Mutator.Sync(ctx, force), stderr)
+	case "disable":
+		provider, ok := parseSingleProvider(args[1:])
+		if !ok {
+			fmt.Fprintln(stderr, "disable requires exactly one provider")
+			return ExitRejected
+		}
+		return mutationExitCode(deps.Mutator.Disable(ctx, provider), stderr)
+	case "enable":
+		provider, ok := parseSingleProvider(args[1:])
+		if !ok {
+			fmt.Fprintln(stderr, "enable requires exactly one provider")
+			return ExitRejected
+		}
+		return mutationExitCode(deps.Mutator.Enable(ctx, provider), stderr)
+	case "reset":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "reset takes no arguments")
+			return ExitRejected
+		}
+		return mutationExitCode(deps.Mutator.Reset(ctx), stderr)
 	case "state":
 		return runState(ctx, args[1:], deps, stderr)
 	case "doctor":
@@ -248,6 +284,13 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		usage(stderr)
 		return ExitRejected
 	}
+}
+
+func parseSingleProvider(args []string) (string, bool) {
+	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return "", false
+	}
+	return args[0], true
 }
 
 // runState dispatches the state subcommands.
@@ -406,8 +449,8 @@ func renderStatus(r service.StatusReport) (text, jsonText string) {
 		fmt.Fprintf(&sb, "revision: %d\n", r.Revision)
 	}
 	for _, p := range r.Providers {
-		fmt.Fprintf(&sb, "  %s: quota=%s availability=%s mode=%s\n",
-			p.Provider, p.Quota, p.Availability, p.Mode)
+		fmt.Fprintf(&sb, "  %s: quota=%s availability=%s mode=%s reason=%s\n",
+			p.Provider, p.Quota, p.Availability, p.Mode, p.Reason)
 	}
 	for _, tg := range r.Targets {
 		label := "applied"

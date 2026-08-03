@@ -29,6 +29,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -112,6 +113,9 @@ const (
 	txSync
 	txSet
 	txClear
+	txDisable
+	txEnable
+	txReset
 )
 
 // transactionInput carries the kind-specific arguments into the common path.
@@ -175,6 +179,24 @@ func (c *Coordinator) Clear(ctx context.Context, sel state.Selector) Outcome {
 	return c.transact(ctx, txClear, transactionInput{Selector: sel})
 }
 
+// Disable marks one configured provider as manually disabled, reconciles all
+// targets, and publishes the accepted state even when targets remain pending.
+func (c *Coordinator) Disable(ctx context.Context, provider string) Outcome {
+	return c.transact(ctx, txDisable, transactionInput{Provider: provider})
+}
+
+// Enable clears one configured provider's manual disable and reconciles all
+// targets using the current automatic provider state.
+func (c *Coordinator) Enable(ctx context.Context, provider string) Outcome {
+	return c.transact(ctx, txEnable, transactionInput{Provider: provider})
+}
+
+// Reset clears every manual provider disable while preserving automatic state,
+// then reconciles and publishes all targets.
+func (c *Coordinator) Reset(ctx context.Context) Outcome {
+	return c.transact(ctx, txReset, transactionInput{})
+}
+
 // --- the common locked transaction path -------------------------------------
 
 // transact is the single entry point for every mutation. It acquires the lock,
@@ -214,6 +236,8 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		return c.transactSync(ctx, recovered, in)
 	case txSet, txClear:
 		return c.transactSetClear(ctx, recovered, in, kind)
+	case txDisable, txEnable, txReset:
+		return c.transactManual(ctx, recovered, in, kind)
 	}
 	return Outcome{Error: errors.New("service: unknown transaction kind")}
 }
@@ -351,6 +375,74 @@ func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, i
 	next := observed
 	next.Revision = observed.Revision + 1
 	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
+	next = c.recordTargetOutcomes(next, outcomes)
+	c.step("save-state")
+	if err := c.State.Save(next); err != nil {
+		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+	}
+	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
+}
+
+// transactManual applies a manual provider transition and reconciles all targets
+// with the same coarse trace used by Set/Clear.
+func (c *Coordinator) transactManual(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind) Outcome {
+	c.step("load-policy")
+	desired, err := c.Policy.LoadPolicy()
+	if err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
+	if kind != txReset {
+		if in.Provider == "" {
+			return Outcome{Accepted: false, Error: errors.New("service: manual provider command requires a provider")}
+		}
+		configured := false
+		for _, mapping := range desired.Providers {
+			if slices.Contains(mapping.CodexBarProviders, in.Provider) || slices.Contains(mapping.PolytokenProviders, in.Provider) {
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			return Outcome{Accepted: false, Error: fmt.Errorf("service: provider %q is not configured", in.Provider)}
+		}
+	}
+	c.step("load-state")
+	observed := recovered
+	var next state.State
+	switch kind {
+	case txDisable:
+		c.step("manual-disable")
+		next, err = state.DisableProvider(observed, in.Provider, c.now())
+	case txEnable:
+		c.step("manual-enable")
+		next, err = state.EnableProvider(observed, in.Provider, c.now())
+	case txReset:
+		c.step("manual-reset")
+		next, err = state.ResetManualDisables(observed, c.now())
+	default:
+		return Outcome{Accepted: false, Error: errors.New("service: unknown manual transition")}
+	}
+	if err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
+	next.Revision = observed.Revision + 1
+	c.step("reconcile")
+	targets, err := c.Targets.ResolveTargets(desired)
+	if err != nil {
+		pending := pendingOutcome("manual-resolution", next.Revision, "resolve_targets", err)
+		outcomes := []TargetOutcome{pending}
+		next = c.recordTargetOutcomes(next, outcomes)
+		if saveErr := c.State.Save(next); saveErr != nil {
+			return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: fmt.Errorf("%w (state save: %v)", err, saveErr)}
+		}
+		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+	}
+	timeout := c.validationTimeout(desired)
+	c.step("publish-targets")
+	outcomes := make([]TargetOutcome, 0, len(targets))
+	for _, rt := range targets {
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false))
+	}
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
@@ -645,20 +737,24 @@ func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcom
 		TargetID:          id,
 		AttemptedRevision: rev,
 		Pending: &state.ApplyFailure{
-			TargetID:          id,
-			Stage:             stage,
-			Summary:           err.Error(),
+			TargetID:          sanitizeFailure(id),
+			Stage:             sanitizeFailure(stage),
+			Summary:           sanitizeFailure(err.Error()),
 			AttemptedRevision: rev,
 			LiveStatus:        "last-known-good",
 		},
 	}
 }
 
+func sanitizeFailure(s string) string {
+	return validate.DefaultSanitize([]byte(s))
+}
+
 func validationRemediation(result validate.Result) string {
 	if result.Error == nil {
 		return "re-run reconcile after resolving the validation failure"
 	}
-	return result.Error.Remediation
+	return sanitizeFailure(result.Error.Remediation)
 }
 
 // pendingValidate records a target whose staged candidate failed validation.
@@ -673,9 +769,9 @@ func pendingValidate(id string, rev uint64, attemptedAt time.Time, result valida
 		TargetID:          id,
 		AttemptedRevision: rev,
 		Pending: &state.ApplyFailure{
-			TargetID:          id,
-			Stage:             stage,
-			Summary:           summary,
+			TargetID:          sanitizeFailure(id),
+			Stage:             sanitizeFailure(stage),
+			Summary:           sanitizeFailure(summary),
 			Remediation:       validationRemediation(result),
 			AttemptedRevision: rev,
 			AttemptedAt:       attemptedAt,

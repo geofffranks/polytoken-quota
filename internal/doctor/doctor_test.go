@@ -330,7 +330,78 @@ func TestPendingTargetIsActionable(t *testing.T) {
 	}
 }
 
+func TestManualDisabledProviderIsInformational(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
+		"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true},
+	}, Targets: map[string]state.TargetState{}}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	if r.Actionable() {
+		t.Fatal("manual disable should not be actionable")
+	}
+	if len(r.Findings) != 1 || r.Findings[0].Code != "manual-disabled" || r.Findings[0].Severity != Info {
+		t.Fatalf("findings=%+v", r.Findings)
+	}
+	if !strings.Contains(r.Findings[0].Message, "codex") || !strings.Contains(r.Findings[0].Remediation, "enable codex") {
+		t.Fatalf("finding=%+v", r.Findings[0])
+	}
+}
+
+func TestManualDisabledFindingsAreSortedAndSanitized(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
+		"zai path": {ManualDisabled: true}, "codex\nsecret": {ManualDisabled: true},
+	}, Targets: map[string]state.TargetState{}}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	if len(r.Findings) != 2 {
+		t.Fatalf("findings=%+v", r.Findings)
+	}
+	if strings.Contains(r.Findings[0].Message, "\n") || strings.Contains(r.Findings[0].Message, "secret") {
+		t.Fatalf("provider text leaked: %+v", r.Findings[0])
+	}
+	if r.Findings[0].Message > r.Findings[1].Message {
+		t.Fatalf("findings not sorted: %+v", r.Findings)
+	}
+}
+
 // TestNilInspectorsAreSafe proves Run does not panic when inspectors are nil.
+func TestDoctorSurfacesPersistedManualResolutionFailure(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
+		"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true},
+	}, Targets: map[string]state.TargetState{
+		"manual-resolution": {Pending: &state.ApplyFailure{TargetID: "manual-resolution", Stage: "resolve_targets", Summary: "target resolution failed", Remediation: "fix policy"}},
+	}}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	if !r.Actionable() || !slices.Contains(findingCodes(r), "target-pending") {
+		t.Fatalf("report did not surface persisted failure: %+v", r)
+	}
+}
+
 func TestNilInspectorsAreSafe(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.json")

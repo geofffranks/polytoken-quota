@@ -15,7 +15,7 @@ import (
 //	available  AND low       => reserve
 //	available  AND normal    => normal
 func EffectiveMode(ps ProviderState) Mode {
-	if ps.Availability == Unavailable || ps.Quota == QuotaExhausted {
+	if ps.ManualDisabled || ps.Availability == Unavailable || ps.Quota == QuotaExhausted {
 		return ModeDisabled
 	}
 	if ps.Availability == Available && ps.Quota == QuotaLow {
@@ -254,6 +254,60 @@ func ClearProvider(s State, sel Selector, at time.Time) (State, error) {
 		}
 		providers[k] = v
 	}
+	next := s
+	next.Providers = providers
+	return next, nil
+}
+
+// DisableProvider marks one provider as manually disabled without changing its
+// automatic quota or availability observations.
+func DisableProvider(s State, provider string, at time.Time) (State, error) {
+	if provider == "" {
+		return s, errors.New("state: disable requires a provider")
+	}
+	return updateManualDisable(s, provider, true, at)
+}
+
+// EnableProvider clears one provider's manual disable without changing its
+// automatic quota or availability observations.
+func EnableProvider(s State, provider string, at time.Time) (State, error) {
+	if provider == "" {
+		return s, errors.New("state: enable requires a provider")
+	}
+	return updateManualDisable(s, provider, false, at)
+}
+
+// ResetManualDisables clears manual disables for every tracked provider while
+// preserving automatic quota and availability observations and metadata.
+func ResetManualDisables(s State, at time.Time) (State, error) {
+	providers := make(map[string]ProviderState, len(s.Providers))
+	for provider, ps := range s.Providers {
+		if ps.ManualDisabled {
+			ps.ManualDisabled = false
+			ps.ManualDisabledAt = at
+		}
+		providers[provider] = ps
+	}
+	next := s
+	next.Providers = providers
+	return next, nil
+}
+
+func updateManualDisable(s State, provider string, disabled bool, at time.Time) (State, error) {
+	providers := make(map[string]ProviderState, len(s.Providers)+1)
+	for k, v := range s.Providers {
+		providers[k] = v
+	}
+	ps := providers[provider]
+	if ps.Quota == "" {
+		ps.Quota = QuotaNormal
+	}
+	if ps.Availability == "" {
+		ps.Availability = Available
+	}
+	ps.ManualDisabled = disabled
+	ps.ManualDisabledAt = at
+	providers[provider] = ps
 	next := s
 	next.Providers = providers
 	return next, nil

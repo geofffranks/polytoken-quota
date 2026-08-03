@@ -32,10 +32,13 @@ var _ Mutator = (*service.Coordinator)(nil)
 // depsSpy is a test double that records Mutator/Diagnoser invocations. It
 // satisfies both Mutator and Diagnoser.
 type depsSpy struct {
-	Mutations     int
-	SetProvider   string
-	SetPatch      state.ProviderPatch
-	ClearSelector state.Selector
+	Mutations       int
+	SetProvider     string
+	SetPatch        state.ProviderPatch
+	ClearSelector   state.Selector
+	DisableProvider string
+	EnableProvider  string
+	ResetCalled     bool
 }
 
 func newDepsSpy() *depsSpy { return &depsSpy{} }
@@ -81,6 +84,24 @@ func (s *depsSpy) Clear(_ context.Context, selector state.Selector) service.Outc
 	return service.Outcome{Accepted: true}
 }
 
+func (s *depsSpy) Disable(_ context.Context, provider string) service.Outcome {
+	s.Mutations++
+	s.DisableProvider = provider
+	return service.Outcome{Accepted: true}
+}
+
+func (s *depsSpy) Enable(_ context.Context, provider string) service.Outcome {
+	s.Mutations++
+	s.EnableProvider = provider
+	return service.Outcome{Accepted: true}
+}
+
+func (s *depsSpy) Reset(context.Context) service.Outcome {
+	s.Mutations++
+	s.ResetCalled = true
+	return service.Outcome{Accepted: true}
+}
+
 func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return service.StatusReport{} }
 
 func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
@@ -116,6 +137,77 @@ func TestCommandTree(t *testing.T) {
 				t.Fatalf("invalid syntax mutated %d times", spy.Mutations)
 			}
 		})
+	}
+}
+
+func TestManualProviderCommandsDispatchTypedMutations(t *testing.T) {
+	cases := []struct {
+		args        []string
+		wantDisable string
+		wantEnable  string
+		wantReset   bool
+	}{
+		{args: []string{"disable", "codex"}, wantDisable: "codex"},
+		{args: []string{"enable", "zai"}, wantEnable: "zai"},
+		{args: []string{"reset"}, wantReset: true},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args, "_"), func(t *testing.T) {
+			spy := newDepsSpy()
+			if got := Run(context.Background(), tc.args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != ExitOK {
+				t.Fatalf("exit=%d", got)
+			}
+			if spy.DisableProvider != tc.wantDisable || spy.EnableProvider != tc.wantEnable || spy.ResetCalled != tc.wantReset {
+				t.Fatalf("disable=%q enable=%q reset=%v", spy.DisableProvider, spy.EnableProvider, spy.ResetCalled)
+			}
+		})
+	}
+}
+
+func TestManualProviderCommandSyntaxRejectsWithoutMutation(t *testing.T) {
+	for _, args := range [][]string{
+		{"disable"}, {"disable", "codex", "extra"}, {"disable", "--bad"},
+		{"enable"}, {"enable", "zai", "extra"}, {"enable", "--bad"},
+		{"reset", "extra"}, {"reset", "--bad"},
+	} {
+		spy := newDepsSpy()
+		if got := Run(context.Background(), args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != ExitRejected {
+			t.Errorf("args=%v exit=%d want=%d", args, got, ExitRejected)
+		}
+		if spy.Mutations != 0 {
+			t.Errorf("args=%v mutated %d times", args, spy.Mutations)
+		}
+	}
+}
+
+func TestMutationExitReportsPendingTargetImmediately(t *testing.T) {
+	stderr := new(strings.Builder)
+	spy := &outcomeSpy{outcome: service.Outcome{
+		Accepted: true,
+		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+			Stage: "doctor", Summary: "startup validation failed", Remediation: "run reconcile",
+		}}},
+	}}
+	code := Run(context.Background(), []string{"disable", "codex"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+	if code != ExitPending {
+		t.Fatalf("exit=%d want=%d", code, ExitPending)
+	}
+	for _, want := range []string{"target global pending", "stage=doctor", "startup validation failed", "run reconcile"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %q", want, stderr.String())
+		}
+	}
+}
+
+func TestMutationExitDoesNotPrintUnsanitizedPendingDetails(t *testing.T) {
+	secret := "SECRET_TOKEN_123"
+	stderr := new(strings.Builder)
+	spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{
+		TargetID: "global", Pending: &state.ApplyFailure{Stage: "publish", Summary: "token=" + secret, Remediation: "/home/dev/private"},
+	}}}}
+	Run(context.Background(), []string{"disable", "codex"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), "/home/dev/private") {
+		t.Fatalf("unsanitized pending details leaked: %q", stderr.String())
 	}
 }
 
@@ -255,6 +347,17 @@ func TestStatusAlwaysWarnsAboutRunningSessions(t *testing.T) {
 	}
 }
 
+func TestStatusRendersManualDisableReason(t *testing.T) {
+	r := service.StatusReport{Providers: []service.ProviderStatus{{
+		Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available,
+		Mode: state.ModeDisabled, ManualDisabled: true, Reason: "manual_disabled",
+	}}}
+	text, jsonText := renderStatus(r)
+	if !strings.Contains(text, "reason=manual_disabled") || !strings.Contains(jsonText, "manual_disabled") {
+		t.Fatalf("text=%q json=%q", text, jsonText)
+	}
+}
+
 // TestStatusPendingDriftAlwaysExitsZero proves status exits 0 even when its
 // report contains pending targets or drift, while an actionable doctor report
 // exits 1.
@@ -279,6 +382,9 @@ func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.O
 	return s.outcome
 }
 func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome { return s.outcome }
+func (s *outcomeSpy) Disable(context.Context, string) service.Outcome       { return s.outcome }
+func (s *outcomeSpy) Enable(context.Context, string) service.Outcome        { return s.outcome }
+func (s *outcomeSpy) Reset(context.Context) service.Outcome                 { return s.outcome }
 func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport {
 	return service.StatusReport{}
 }

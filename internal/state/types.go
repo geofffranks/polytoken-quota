@@ -82,6 +82,8 @@ type Selector struct {
 type ProviderState struct {
 	Quota               Quota
 	Availability        Availability
+	ManualDisabled      bool
+	ManualDisabledAt    time.Time
 	QuotaAt             time.Time
 	AvailabilityAt      time.Time
 	QuotaArrival        uint64

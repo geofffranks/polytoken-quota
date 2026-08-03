@@ -279,3 +279,76 @@ func TestClearProviderResetsBaseline(t *testing.T) {
 		}
 	}
 }
+
+func TestManualDisableOverridesAutomaticStateAndSurvivesHooks(t *testing.T) {
+	at := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	next, err := DisableProvider(seedState(), "codex", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := next.Providers["codex"]
+	if !ps.ManualDisabled || !ps.ManualDisabledAt.Equal(at) {
+		t.Fatalf("manual state=%+v", ps)
+	}
+	if got := EffectiveMode(ps); got != ModeDisabled {
+		t.Fatalf("mode=%s want %s", got, ModeDisabled)
+	}
+	next, accepted, _, err := ApplyEvent(next, event(hook.QuotaReset, 100), Arrival{Sequence: 1})
+	if err != nil || !accepted {
+		t.Fatalf("hook accepted=%v err=%v", accepted, err)
+	}
+	if !next.Providers["codex"].ManualDisabled {
+		t.Fatal("quota hook cleared manual disable")
+	}
+}
+
+func TestEnableProviderResumesAutomaticState(t *testing.T) {
+	at := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	s, _, _, _ := ApplyEvent(seedState(), event(hook.QuotaLow, 10), Arrival{Sequence: 1})
+	s, err := DisableProvider(s, "codex", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := EnableProvider(s, "codex", at.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := next.Providers["codex"]
+	if ps.ManualDisabled || !ps.ManualDisabledAt.Equal(at.Add(time.Minute)) {
+		t.Fatalf("manual state=%+v", ps)
+	}
+	if got := EffectiveMode(ps); got != ModeReserve {
+		t.Fatalf("mode=%s want %s", got, ModeReserve)
+	}
+}
+
+func TestResetManualDisablesPreservesAutomaticObservations(t *testing.T) {
+	at := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	s, _, _, _ := ApplyEvent(seedState(), event(hook.QuotaReached, 10), Arrival{Sequence: 1})
+	s, _, _, _ = ApplyEvent(s, event(hook.ProviderUnavailable, 11), Arrival{Sequence: 2})
+	original := s.Providers["codex"]
+	s.Providers["zai"] = ProviderState{Quota: QuotaNormal, Availability: Available}
+	s, err := DisableProvider(s, "codex", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := ResetManualDisables(s, at.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps := next.Providers["codex"]
+	if ps.ManualDisabled {
+		t.Fatal("reset left manual disable active")
+	}
+	if !next.Providers["zai"].ManualDisabledAt.IsZero() {
+		t.Fatalf("reset changed inactive manual timestamp: %+v", next.Providers["zai"])
+	}
+	if ps.Quota != original.Quota || ps.Availability != original.Availability ||
+		!ps.QuotaAt.Equal(original.QuotaAt) || !ps.AvailabilityAt.Equal(original.AvailabilityAt) ||
+		ps.QuotaArrival != original.QuotaArrival || ps.AvailabilityArrival != original.AvailabilityArrival {
+		t.Fatalf("reset changed automatic observations: before=%+v after=%+v", original, ps)
+	}
+	if got := EffectiveMode(ps); got != ModeDisabled {
+		t.Fatalf("mode=%s want %s", got, ModeDisabled)
+	}
+}

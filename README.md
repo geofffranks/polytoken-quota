@@ -118,6 +118,28 @@ The `root` and definition paths identify the files to manage; use absolute paths
 projects. `sync --from-polytoken` replaces the policy with current managed values, while `--force`
 overrides its degraded/ambiguous-drift guard.
 
+## Manual provider controls
+
+When CodexBar does not reliably deliver a provider event, use the top-level manual controls:
+
+```sh
+polytoken-quota disable codex
+polytoken-quota enable codex
+polytoken-quota reset
+```
+
+`disable` and `enable` accept only providers configured in `desired.yaml`. A manual disable is
+durable, takes precedence over automatic quota/availability state, and is not cleared by later hook
+events. `enable` clears only that override and resumes the latest automatic state; the provider may
+still be unavailable or out of quota. `reset` clears all manual overrides without erasing automatic
+observations or their timestamps.
+
+These commands reconcile all registered targets through the normal validation and publication path.
+If a target cannot apply, the command prints its sanitized stage, summary, and remediation
+immediately and exits `2` after persisting the pending failure for later `status`/`doctor` output.
+Manual disables themselves are informational in `doctor`, and `status` reports
+`reason=manual_disabled`. Existing Polytoken sessions may still need a user reload or restart.
+
 ## Commands
 
 | Command | Description |
@@ -127,6 +149,9 @@ overrides its degraded/ambiguous-drift guard.
 | `status [--json]` | Show current quota/availability state and drift. |
 | `reconcile [--dry-run]` | Reconcile managed Polytoken fields toward desired state. |
 | `sync --from-polytoken [--force]` | Sync desired state from the live Polytoken config. |
-| `state set <provider> [--quota X] [--availability Y]` | Set a provider's managed state. |
-| `state clear <provider> \| --all` | Clear a provider's (or all) managed state. |
+| `state set <provider> [--quota X] [--availability Y]` | Set a provider's managed automatic state. |
+| `state clear <provider> \| --all` | Clear a provider's (or all) automatic state. |
+| `disable <provider>` | Manually disable a configured provider. |
+| `enable <provider>` | Clear a manual disable and resume automatic state. |
+| `reset` | Clear all manual disables while preserving automatic observations. |
 | `doctor [--json]` | Run health and drift diagnostics. |

@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/geofffranks/codexbar-hooks/internal/state"
@@ -138,6 +139,22 @@ func Run(ctx context.Context, deps Dependencies) Report {
 			findings = append(findings, pendingTargetFinding(id, ts))
 		}
 	}
+	providers := make([]string, 0, len(st.Providers))
+	for provider := range st.Providers {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		if st.Providers[provider].ManualDisabled {
+			cleanProvider := safeIdentifier(provider)
+			findings = append(findings, Finding{
+				Code:        "manual-disabled",
+				Message:     fmt.Sprintf("provider %q is manually disabled", cleanProvider),
+				Remediation: fmt.Sprintf("run \\\"polytoken-quota enable %s\\\" to resume automatic state", cleanProvider),
+				Severity:    Info,
+			})
+		}
+	}
 
 	// Age recovered history by the configured retention window.
 	now := time.Now()
@@ -151,6 +168,19 @@ func Run(ctx context.Context, deps Dependencies) Report {
 	pruned := state.PruneRecovered(st, now, retention)
 
 	return Report{Findings: findings, Recovered: pruned.Recovered}
+}
+
+func safeIdentifier(value string) string {
+	if value == "" {
+		return "<invalid>"
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' || r == '/' {
+			continue
+		}
+		return "<invalid>"
+	}
+	return value
 }
 
 // pendingTargetFinding builds a target-pending finding from a persisted

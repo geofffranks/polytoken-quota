@@ -23,11 +23,29 @@ type Diagnoser interface {
 // ProviderStatus is one provider's quota/availability/mode axis in a status
 // report.
 type ProviderStatus struct {
-	Provider     string             `json:"provider"`
-	Quota        state.Quota        `json:"quota"`
-	Availability state.Availability `json:"availability"`
-	Mode         state.Mode         `json:"mode"`
-	LastEvent    string             `json:"last_event,omitempty"`
+	Provider       string             `json:"provider"`
+	Quota          state.Quota        `json:"quota"`
+	Availability   state.Availability `json:"availability"`
+	Mode           state.Mode         `json:"mode"`
+	ManualDisabled bool               `json:"manual_disabled"`
+	Reason         string             `json:"reason"`
+	LastEvent      string             `json:"last_event,omitempty"`
+}
+
+func providerReason(ps state.ProviderState) string {
+	if ps.ManualDisabled {
+		return "manual_disabled"
+	}
+	if ps.Availability == state.Unavailable {
+		return "unavailable"
+	}
+	if ps.Quota == state.QuotaExhausted {
+		return "quota_exhausted"
+	}
+	if ps.Quota == state.QuotaLow {
+		return "quota_low"
+	}
+	return "normal"
 }
 
 // TargetStatus is one target's attempted/applied revision in a status report.
@@ -77,10 +95,12 @@ func (c *Coordinator) Status(_ context.Context, _ bool) StatusReport {
 	for _, name := range sortedProviderNames(observed.Providers) {
 		ps := observed.Providers[name]
 		report.Providers = append(report.Providers, ProviderStatus{
-			Provider:     name,
-			Quota:        ps.Quota,
-			Availability: ps.Availability,
-			Mode:         state.EffectiveMode(ps),
+			Provider:       name,
+			Quota:          ps.Quota,
+			Availability:   ps.Availability,
+			Mode:           state.EffectiveMode(ps),
+			ManualDisabled: ps.ManualDisabled,
+			Reason:         providerReason(ps),
 		})
 	}
 

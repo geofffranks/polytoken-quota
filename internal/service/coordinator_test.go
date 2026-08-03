@@ -50,6 +50,7 @@ type coordinatorSpy struct {
 	Coordinator       // named field; NOT embedded, so no field promotion clashes
 	Trace             []string
 	StateSaves        int
+	LastSaved         state.State
 	Publishes         int
 	ValidationIntents int
 	targetList        []RegisteredTarget
@@ -119,7 +120,12 @@ func (s *coordinatorSpy) Lock(context.Context) (func() error, error) {
 
 // --- PolicyLoader ---
 func (s *coordinatorSpy) LoadPolicy() (policy.Desired, error) {
-	return policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{}}, nil
+	return policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
+		"codex-mapping": {
+			CodexBarProviders: []string{"codex"},
+			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+		},
+	}}, nil
 }
 func (s *coordinatorSpy) DesiredExists() bool { return s.desiredExists }
 
@@ -143,6 +149,7 @@ func (s *coordinatorSpy) LoadState() (state.State, error) {
 }
 func (s *coordinatorSpy) Save(st state.State) error {
 	s.StateSaves++
+	s.LastSaved = st
 	s.files["state.json"] = "saved"
 	return nil
 }
@@ -379,12 +386,72 @@ func TestSetAndClearUseSingleLockedTransactionCycle(t *testing.T) {
 			out := tc.call(&spy.Coordinator)
 			want := []string{"lock", "load-state", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
 			if !reflect.DeepEqual(spy.Trace, want) {
-				t.Fatalf("got =%v\nwant=%v", spy.Trace, want)
+				t.Fatalf("trace=%v want=%v", spy.Trace, want)
 			}
 			if !out.Accepted || count(spy.Trace, "lock") != 1 || count(spy.Trace, "recover") != 1 || count(spy.Trace, "save-state") != 1 {
 				t.Fatalf("out=%+v trace=%v", out, spy.Trace)
 			}
 		})
+	}
+}
+
+func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
+	cases := []struct {
+		name       string
+		call       func(*Coordinator) Outcome
+		transition string
+	}{
+		{"disable", func(c *Coordinator) Outcome { return c.Disable(context.Background(), "codex") }, "manual-disable"},
+		{"enable", func(c *Coordinator) Outcome { return c.Enable(context.Background(), "codex") }, "manual-enable"},
+		{"reset", func(c *Coordinator) Outcome { return c.Reset(context.Background()) }, "manual-reset"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+			out := tc.call(&spy.Coordinator)
+			want := []string{"lock", "load-state", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
+			if !reflect.DeepEqual(spy.Trace, want) {
+				t.Fatalf("trace=%v want=%v", spy.Trace, want)
+			}
+			if !out.Accepted || spy.StateSaves != 1 || spy.Publishes != 1 {
+				t.Fatalf("out=%+v saves=%d publishes=%d", out, spy.StateSaves, spy.Publishes)
+			}
+		})
+	}
+}
+
+func TestManualProviderCommandsRejectUnknownProviderWithoutMutation(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	out := spy.Coordinator.Disable(context.Background(), "unknown")
+	if out.Accepted || out.Error == nil || spy.StateSaves != 0 || spy.Publishes != 0 || count(spy.Trace, "reconcile") != 0 {
+		t.Fatalf("out=%+v trace=%v saves=%d publishes=%d", out, spy.Trace, spy.StateSaves, spy.Publishes)
+	}
+}
+
+func TestManualDisablePersistsWhenTargetApplicationIsPending(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", "invalid")
+	out := spy.Coordinator.Disable(context.Background(), "codex")
+	if !out.Accepted || out.PendingCount() != 1 || spy.StateSaves != 1 {
+		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
+	}
+	if out.Targets[0].Pending == nil || out.Targets[0].Pending.Stage != "doctor" {
+		t.Fatalf("pending=%+v", out.Targets[0].Pending)
+	}
+}
+
+func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
+	spy := newCoordinatorSpy()
+	spy.resolveErr = errors.New("target resolution failed")
+	out := spy.Coordinator.Disable(context.Background(), "codex")
+	if !out.Accepted || out.Error == nil || out.PendingCount() != 1 || spy.StateSaves != 1 {
+		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
+	}
+	if !spy.LastSaved.Providers["codex"].ManualDisabled {
+		t.Fatalf("saved state lost manual disable: %+v", spy.LastSaved)
+	}
+	pending := spy.LastSaved.Targets["manual-resolution"]
+	if pending.Pending == nil || pending.Pending.Stage != "resolve_targets" {
+		t.Fatalf("saved pending=%+v", pending)
 	}
 }
 
