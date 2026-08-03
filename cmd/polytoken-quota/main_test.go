@@ -13,13 +13,10 @@ func TestResolveConfigRejectsInvalidExplicitPolytokenBinary(t *testing.T) {
 	}
 }
 
-func TestResolveConfigUsesPolytokenFromPATHWhenPinnedPathUnavailable(t *testing.T) {
+func TestResolveConfigUsesPolytokenFromPATHWhenNoExplicitBinary(t *testing.T) {
 	t.Setenv("POLYTOKEN_QUOTA_HOME", "")
 	t.Setenv("POLYTOKEN_CONFIG_DIR", "")
 	t.Setenv("POLYTOKEN_BINARY", "")
-	oldDefault := defaultPolytokenBinary
-	defaultPolytokenBinary = filepath.Join(t.TempDir(), "missing", "polytoken")
-	t.Cleanup(func() { defaultPolytokenBinary = oldDefault })
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	binDir := t.TempDir()

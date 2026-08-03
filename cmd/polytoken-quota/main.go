@@ -29,8 +29,8 @@ import (
 
 // config resolves every path and setting the Coordinator needs from the
 // environment. The utility root defaults to $HOME/.polytoken-quota and is
-// overridable via POLYTOKEN_QUOTA_HOME. The Polytoken binary defaults to the
-// supported pinned path and is overridable via POLYTOKEN_BINARY. The global
+// overridable via POLYTOKEN_QUOTA_HOME. The Polytoken binary is resolved from
+// PATH and is overridable via POLYTOKEN_BINARY. The global
 // Polytoken configuration directory defaults to $HOME/.config/polytoken and is
 // overridable via POLYTOKEN_CONFIG_DIR.
 type config struct {
@@ -74,12 +74,10 @@ func resolveConfig() (config, error) {
 			return config{}, fmt.Errorf("resolve explicit polytoken binary %q: not executable", bin)
 		}
 	} else {
-		bin = defaultPolytokenBinary
-		if _, err := os.Stat(bin); err != nil {
-			bin, err = exec.LookPath("polytoken")
-			if err != nil {
-				return config{}, fmt.Errorf("resolve polytoken binary: %w", err)
-			}
+		var err error
+		bin, err = exec.LookPath("polytoken")
+		if err != nil {
+			return config{}, fmt.Errorf("resolve polytoken binary: %w", err)
 		}
 	}
 	h, err := os.UserHomeDir()
@@ -107,9 +105,6 @@ func resolveConfig() (config, error) {
 		PolytokenEnv: polytokenEnv,
 	}, nil
 }
-
-// defaultPolytokenBinary is the supported pinned Polytoken contract binary.
-var defaultPolytokenBinary = "/home/linuxbrew/.linuxbrew/bin/polytoken"
 
 func inheritedEnvironment(inherited []string) map[string]string {
 	env := make(map[string]string, len(inherited))

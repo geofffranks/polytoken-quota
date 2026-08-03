@@ -17,10 +17,10 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 - **Module path:** `github.com/geofffranks/codexbar-hooks`
 - **Supported targets (GOOS/GOARCH):** `darwin/arm64`, `darwin/amd64`,
   `linux/amd64`, `linux/arm64`
-- **Polytoken contract binary:** `/home/linuxbrew/.linuxbrew/bin/polytoken`
-  (`0.5.0-unstable.10`). Publication is gated on passing its complete-root contract
-  tests. Version policy: minimum-current plus a per-binary contract — the supported
-  binary is pinned at `0.5.0-unstable.10`.
+- **Polytoken contract binary:** resolved from `PATH` (currently
+  `/home/dev/.local/bin/polytoken`, `0.5.9`), overridable via `POLYTOKEN_BINARY`.
+  Publication is gated on passing its complete-root contract tests. Version policy:
+  minimum-current — keep the supported binary at the latest stable release.
 - **CodexBar minimum:** `0.44.0` (hook contract).
 
 ## Install / release convention

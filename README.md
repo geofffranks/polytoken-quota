@@ -23,7 +23,7 @@ reload before they see reconciled choices. It never stores provider credentials 
 |-----------|---------|-------|
 | Go toolchain | `go1.26.5` | Exact version match (`go env GOVERSION`). |
 | CodexBar | `0.44.0` | Hook contract. |
-| Polytoken | `0.5.0-unstable.10` | Supported validation contract. |
+| Polytoken | `0.5.9` | Supported validation contract (resolved from `PATH`). |
 
 ## Install and initial setup
 
