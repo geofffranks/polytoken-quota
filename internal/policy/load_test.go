@@ -231,6 +231,94 @@ func TestLoadOperationalBounds(t *testing.T) {
 // TestLoadRoutingQuota proves the routing/quota sections parse correctly:
 // routing enabled flag, per-provider quota config (adapter, freshness, balance
 // group, weight, off-peak schedule).
+func TestLoadPeakScheduleForSingaporeBusinessHours(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    polytoken_providers: [codex]
+    models: [codex/gpt-5]
+    quota:
+      adapter: codex
+      schedule:
+        timezone: Asia/Singapore
+        peak:
+          - days: [mon, tue, wed, thu, fri]
+            start: "14:00"
+            end: "18:00"
+global:
+  id: global
+  root: /tmp/polytoken
+  full: [codex/gpt-5]
+`
+	got, err := loadBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load peak schedule: %v", err)
+	}
+	if got.Providers["codex"].Quota == nil || got.Providers["codex"].Quota.Schedule == nil {
+		t.Fatal("peak schedule was not loaded")
+	}
+	schedule := got.Providers["codex"].Quota.Schedule
+	peak := time.Date(2026, 1, 5, 15, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	outside := time.Date(2026, 1, 5, 13, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	if schedule.IsOffPeak(peak) {
+		t.Fatal("15:00 Singapore time should be peak, not off-peak")
+	}
+	if !schedule.IsOffPeak(outside) {
+		t.Fatal("13:00 Singapore time should be off-peak")
+	}
+}
+
+func TestLoadRejectsLegacyOffPeakScheduleKey(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    polytoken_providers: [codex]
+    models: [codex/gpt-5]
+    quota:
+      adapter: codex
+      schedule:
+        timezone: UTC
+        off_peak:
+          - days: [mon]
+            start: "00:00"
+            end: "08:00"
+global:
+  id: global
+  root: /tmp/polytoken
+  full: [codex/gpt-5]
+`
+	_, err := loadBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "peak") {
+		t.Fatalf("load error = %v, want peak migration error", err)
+	}
+}
+
+func TestLoadRejectsBothPeakAndOffPeakScheduleKeys(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    polytoken_providers: [codex]
+    models: [codex/gpt-5]
+    quota:
+      adapter: codex
+      schedule:
+        timezone: UTC
+        peak: []
+        off_peak: []
+global:
+  id: global
+  root: /tmp/polytoken
+  full: [codex/gpt-5]
+`
+	_, err := loadBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("load error = %v, want both-keys error", err)
+	}
+}
+
 func TestLoadRoutingQuota(t *testing.T) {
 	yaml := `version: 1
 providers:
@@ -243,10 +331,10 @@ providers:
       freshness_ttl: 45m
       schedule:
         timezone: America/Los_Angeles
-        off_peak:
+        peak:
           - days: [mon, tue, wed, thu, fri]
-            start: "00:00"
-            end: "08:00"
+            start: "08:00"
+            end: "24:00"
       balance_group: primary
       weight: 3
 routing:

@@ -70,11 +70,11 @@ providers:
       balance_group: primary
       weight: 2
       schedule:
-        timezone: America/Los_Angeles
-        off_peak:
-          - days: [Saturday, Sunday]
-            start: "00:00"
-            end: "24:00"
+        timezone: Asia/Singapore
+        peak:
+          - days: [mon, tue, wed, thu, fri]
+            start: "14:00"
+            end: "18:00"
   zai:
     codexbar_providers: [zai]
     polytoken_providers: [zai]
@@ -111,7 +111,7 @@ Quota fields are:
 - `freshness_ttl`: how long a successful snapshot remains eligible; defaults to `30m`.
 - `balance_group`: isolates ranking comparisons between provider groups; defaults to `default`.
 - `weight`: deterministic tie-break weight; defaults to `1`.
-- `schedule`: optional IANA timezone and `off_peak` windows. Each window has `days`, `start`, and `end`.
+- `schedule`: optional IANA timezone and `peak` windows. Each window has lowercase `days` (`mon` through `sun`), `start`, and `end`. Peak windows are written in the provider's local timezone; outside them the provider is treated as off-peak for ranking.
 
 `routing.enabled` defaults to `false`. Enabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. `sync --from-polytoken` replaces the policy with current managed values, while `--force` overrides its degraded/ambiguous-drift guard.
 
@@ -148,7 +148,7 @@ polytoken-quota quota status
 polytoken-quota routing explain
 ```
 
-When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Provider failures preserve the last good snapshot and are reported by `status`, `quota status`, and `doctor`.
+When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status`, `quota status`, and `doctor`.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 
