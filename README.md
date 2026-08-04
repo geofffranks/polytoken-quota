@@ -143,10 +143,12 @@ Exit codes are `0` for an accepted clean result, `1` for a rejected request or d
 Quota polling and routing are disabled by default. Run a one-shot check manually or schedule it with an external scheduler:
 
 ```sh
-polytoken-quota quota check
+polytoken-quota quota check --reconcile
 polytoken-quota quota status
 polytoken-quota routing explain
 ```
+
+Use `quota check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `quota check` refreshes quota state only.
 
 When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status`, `quota status`, and `doctor`.
 
@@ -168,7 +170,7 @@ Example launchd user agent (adjust the binary and utility-home paths):
 <plist version="1.0"><dict>
   <key>Label</key><string>com.example.polytoken-quota</string>
   <key>ProgramArguments</key><array>
-    <string>/usr/local/bin/polytoken-quota</string><string>quota</string><string>check</string>
+    <string>/usr/local/bin/polytoken-quota</string><string>quota</string><string>check</string><string>--reconcile</string>
   </array>
   <key>StartInterval</key><integer>1800</integer>
 </dict></plist>
@@ -180,7 +182,7 @@ Example systemd user timer:
 # ~/.config/systemd/user/polytoken-quota.service
 [Service]
 Type=oneshot
-ExecStart=%h/go/bin/polytoken-quota quota check
+ExecStart=%h/go/bin/polytoken-quota quota check --reconcile
 
 # ~/.config/systemd/user/polytoken-quota.timer
 [Timer]
@@ -192,7 +194,7 @@ Persistent=true
 Example cron entry (run `crontab -e`):
 
 ```cron
-*/30 * * * * /usr/local/bin/polytoken-quota quota check
+*/30 * * * * /usr/local/bin/polytoken-quota quota check --reconcile
 ```
 
 Changing quota policy or enabling routing may change the choices seen by existing Polytoken sessions. The utility never controls those sessions; a user restart or reload may be required. Quota polling never persists credentials, raw provider responses, auth headers, or account IDs. Only bounded, sanitized quota observations and error summaries are stored in the utility state.
