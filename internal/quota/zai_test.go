@@ -42,6 +42,32 @@ func freshZai(t *testing.T, doer HTTPDoer) *ZaiSource {
 	return zaiTestSource(t, doer, &fakeResolver{val: zaiTestKey}, ZaiEvidence(zaiTestNow))
 }
 
+type recordingZaiResolver struct {
+	ref CredentialRef
+	val string
+}
+
+func (r *recordingZaiResolver) Resolve(ref CredentialRef) (string, error) {
+	r.ref = ref
+	return r.val, nil
+}
+
+func TestZaiUsesCanonicalAPIKeyEnvironmentName(t *testing.T) {
+	resolver := &recordingZaiResolver{val: zaiTestKey}
+	src := zaiTestSource(t, &recordingDoer{}, resolver, ZaiEvidence(zaiTestNow))
+
+	got, err := src.resolveCredentials()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != zaiTestKey {
+		t.Fatalf("key = %q, want test key", got)
+	}
+	if resolver.ref.Kind != CredentialEnv || resolver.ref.Locator != "ZAI_API_KEY" {
+		t.Fatalf("credential ref = %#v, want env ZAI_API_KEY", resolver.ref)
+	}
+}
+
 // Inline response bodies matching the recorded contract shapes. The nextResetTime
 // value (1768507567547) is the millisecond sample documented in the contract
 // evidence; the numerics are placeholders.
@@ -601,7 +627,7 @@ func TestZaiRedactionAuthFailure(t *testing.T) {
 func TestZaiRedactionCredentialError(t *testing.T) {
 	// A resolver error echoing the key must produce a generic diagnostic.
 	doer := &recordingDoer{resp: bodyResponse(200, []byte(zaiProBody))}
-	src := zaiTestSource(t, doer, &fakeResolver{err: errors.New("env Z_AI_API_KEY=" + zaiTestKey)}, ZaiEvidence(zaiTestNow))
+	src := zaiTestSource(t, doer, &fakeResolver{err: errors.New("env ZAI_API_KEY=" + zaiTestKey)}, ZaiEvidence(zaiTestNow))
 
 	snap, err := src.Fetch(context.Background())
 	if err == nil {

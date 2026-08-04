@@ -35,8 +35,8 @@ const (
 
 	// zaiProviderName is the evidence-registry key and adapter identifier.
 	zaiProviderName = "zai"
-	// zaiAPIKeyEnv is the env var the transient Bearer key resolves from.
-	zaiAPIKeyEnv = "Z_AI_API_KEY"
+	// zaiAPIKeyEnv is the canonical env var the transient Bearer key resolves from.
+	zaiAPIKeyEnv = "ZAI_API_KEY"
 )
 
 // ZaiSource polls the z.ai (BigModel) quota API behind the evidence gate. It
@@ -200,16 +200,16 @@ func (z *ZaiSource) fail(reason string) QuotaSnapshot {
 // --- Credential resolution (transient) ------------------------------------
 
 // resolveCredentials reads the Bearer API key transiently via the credential
-// resolver from Z_AI_API_KEY. The key is used for the immediate request only.
+// resolver from ZAI_API_KEY. The key is used for the immediate request only.
 // Errors are generic and never include the key value.
 func (z *ZaiSource) resolveCredentials() (string, error) {
 	raw, err := z.Credentials.Resolve(CredentialRef{Kind: CredentialEnv, Locator: zaiAPIKeyEnv})
 	if err != nil {
-		return "", errors.New("zai: could not resolve Z_AI_API_KEY")
+		return "", errors.New("zai: could not resolve ZAI_API_KEY")
 	}
 	key := cleanZaiKey(raw)
 	if key == "" {
-		return "", errors.New("zai: Z_AI_API_KEY is empty")
+		return "", errors.New("zai: ZAI_API_KEY is empty")
 	}
 	return key, nil
 }
