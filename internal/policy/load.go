@@ -386,14 +386,36 @@ type quotaWire struct {
 	Schedule     *scheduleWire `yaml:"schedule"`
 }
 
-// scheduleWire is the on-disk shape of an off-peak schedule.
+// scheduleWire is the on-disk shape of a peak schedule. Peak windows are
+// complemented into the internal off-peak representation used by ranking.
 type scheduleWire struct {
-	Timezone string              `yaml:"timezone"`
-	OffPeak  []offPeakWindowWire `yaml:"off_peak"`
+	Timezone string           `yaml:"timezone"`
+	Peak     []peakWindowWire `yaml:"peak"`
+	OffPeak  []peakWindowWire `yaml:"off_peak"` // legacy key detected for migration errors
+	peakSet  bool
+	offSet   bool
 }
 
-// offPeakWindowWire is one off-peak window.
-type offPeakWindowWire struct {
+func (s *scheduleWire) UnmarshalYAML(value *yaml.Node) error {
+	type plain scheduleWire
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*s = scheduleWire(decoded)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "peak":
+			s.peakSet = true
+		case "off_peak":
+			s.offSet = true
+		}
+	}
+	return nil
+}
+
+// peakWindowWire is one peak time window.
+type peakWindowWire struct {
 	Days  []string `yaml:"days"`
 	Start string   `yaml:"start"`
 	End   string   `yaml:"end"`
@@ -446,13 +468,33 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 // scheduleFromWire validates and builds a routing.Schedule from its wire form,
 // delegating timezone/day/time validation to routing.ParseSchedule.
 func scheduleFromWire(mappingID string, w *scheduleWire) (*routing.Schedule, error) {
-	windows := make([]routing.OffPeakWindow, len(w.OffPeak))
-	for i, ow := range w.OffPeak {
-		days := make([]routing.DayOfWeek, len(ow.Days))
-		for j, d := range ow.Days {
+	if w.offSet {
+		if w.peakSet {
+			return nil, fmt.Errorf("policy: mapping %q defines both schedule.peak and legacy schedule.off_peak; remove schedule.off_peak", mappingID)
+		}
+		return nil, fmt.Errorf("policy: mapping %q uses legacy schedule.off_peak; replace it with schedule.peak", mappingID)
+	}
+	windows := make([]routing.OffPeakWindow, 0, len(w.Peak))
+	for _, pw := range w.Peak {
+		days := make([]routing.DayOfWeek, len(pw.Days))
+		for j, d := range pw.Days {
 			days[j] = routing.DayOfWeek(d)
 		}
-		windows[i] = routing.OffPeakWindow{Days: days, Start: ow.Start, End: ow.End}
+		if pw.Start == "00:00" && pw.End == "24:00" {
+			continue
+		}
+		// A peak window is converted to off-peak windows before and after it.
+		// The complement is represented per day; cross-midnight peak windows are
+		// rejected until the config can express their complement unambiguously.
+		if pw.Start >= pw.End {
+			return nil, fmt.Errorf("policy: mapping %q peak window %q-%q must not cross midnight", mappingID, pw.Start, pw.End)
+		}
+		if pw.Start != "00:00" {
+			windows = append(windows, routing.OffPeakWindow{Days: days, Start: "00:00", End: pw.Start})
+		}
+		if pw.End != "24:00" {
+			windows = append(windows, routing.OffPeakWindow{Days: days, Start: pw.End, End: "24:00"})
+		}
 	}
 	s, err := routing.ParseSchedule(w.Timezone, windows)
 	if err != nil {
