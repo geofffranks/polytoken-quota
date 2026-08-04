@@ -150,6 +150,15 @@ polytoken-quota routing explain
 
 When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status`, `quota status`, and `doctor`.
 
+Routing uses a deterministic lexicographic ranking, not a blended score:
+
+1. Providers must be eligible: their mode is `normal` or `reserve`, their snapshot is fresh, and it contains usable remaining quota.
+2. Eligible providers stay grouped by `balance_group`; groups appear in their first configured order and do not interleave.
+3. Within each group, off-peak providers come before peak providers, then higher effective headroom, lower comparable weekly usage, sooner quota reset, higher `weight`, and finally alphabetical provider ID.
+4. If weekly-usage units are missing or incomparable for any provider in a group, that comparison is skipped for the whole group rather than guessed. Ineligible providers remain at the end and are never disabled by routing.
+
+For example, if `codex` and `zai` are both eligible in the same balance group, `codex` is ranked first during its configured off-peak hours even when it has 40% headroom and `zai` has 80%. Outside those hours, the higher-headroom `zai` ranks first. If both are in the same schedule state and have equal headroom, the provider with lower comparable weekly usage wins; if usage cannot be compared, the reset time, weight, and provider ID decide the tie.
+
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 
 Example launchd user agent (adjust the binary and utility-home paths):
