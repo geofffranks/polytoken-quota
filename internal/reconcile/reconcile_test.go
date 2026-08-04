@@ -155,7 +155,7 @@ func TestDesiredChainOnlyStablePartition(t *testing.T) {
 	setMode(&s, "zai", state.ModeDisabled)
 	setMode(&s, "codex", state.ModeReserve)
 	setMode(&s, "minime", state.ModeNormal)
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestScalarUsesFirstSurvivorOnly(t *testing.T) {
 
 func TestEmptyChainFailsWithoutEdits(t *testing.T) {
 	d, s, target := allDisabledFixture()
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	var empty EmptyChainError
 	if !errors.As(err, &empty) || len(p.Edits) != 0 {
 		t.Fatalf("plan=%+v err=%v", p, err)
@@ -198,7 +198,7 @@ func buildScalarFixture(t *testing.T) Plan {
 	setMode(&s, "reserve", state.ModeReserve)
 	setMode(&s, "gone", state.ModeDisabled)
 	target.Full = policy.Chain{"healthy/a", "reserve/c", "gone/b"}
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestSuffixNormalizationPreservesSpelling(t *testing.T) {
 	d, s, target := fixture("codex/gpt-5.6-sol(medium)", "minime/gemma")
 	setMode(&s, "codex", state.ModeNormal)
 	setMode(&s, "minime", state.ModeNormal)
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestSuffixNormalizationPreservesSpelling(t *testing.T) {
 
 	// Disabling the codex provider removes the suffixed entry via base match.
 	setMode(&s, "codex", state.ModeDisabled)
-	p2, err := Build(d, s, target)
+	p2, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestDisabledRemoved(t *testing.T) {
 	setMode(&s, "a", state.ModeNormal)
 	setMode(&s, "b", state.ModeDisabled)
 	setMode(&s, "c", state.ModeNormal)
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestStablePartitionPreservesRelativeOrder(t *testing.T) {
 			for k, m := range tc.modes {
 				setMode(&s, k, m)
 			}
-			p, err := Build(d, s, target)
+			p, err := Build(d, s, target, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -345,7 +345,7 @@ func TestBaselineIntentionalDisable(t *testing.T) {
 
 	// Healthy provider: baselines restored.
 	s := state.State{Revision: 3}
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestBaselineIntentionalDisable(t *testing.T) {
 
 	// Disabled provider: every model disabled regardless of baseline.
 	setMode(&s, "codex", state.ModeDisabled)
-	p2, err := Build(d, s, target)
+	p2, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestFacetPrimaryFallbackProjection(t *testing.T) {
 	setMode(&s, "a", state.ModeNormal)
 	setMode(&s, "b", state.ModeNormal)
 	setMode(&s, "c", state.ModeNormal)
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +409,7 @@ func TestFacetSingleSurvivorClearsFallback(t *testing.T) {
 	d, s, target := fixture("a/x", "b/x")
 	setMode(&s, "a", state.ModeNormal)
 	setMode(&s, "b", state.ModeDisabled)
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestScalarFieldsFirstSurvivorNoFallback(t *testing.T) {
 	setMode(&s, "c", state.ModeDisabled)
 	target.Full = policy.Chain{"a/x", "b/x", "c/x"}
 	target.Classifier = policy.Chain{"a/x", "b/x", "c/x"}
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +484,7 @@ func TestNoModelFromAnotherChain(t *testing.T) {
 			{Path: "two.md", Chain: policy.Chain{"b/1", "b/2"}},
 		},
 	}
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestNoModelFromAnotherChain(t *testing.T) {
 // and produces no live edit.
 func TestEmptyChainNamesTargetFieldFile(t *testing.T) {
 	d, s, target := allDisabledFixture()
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	var empty EmptyChainError
 	if !errors.As(err, &empty) {
 		t.Fatalf("not EmptyChainError: %v", err)
@@ -541,7 +541,7 @@ func TestEmptyDefinitionChainFailsNamingFile(t *testing.T) {
 	d, s, target := fixture("a/x")
 	setMode(&s, "a", state.ModeDisabled)
 	// Only the definition chain is populated; scalar chains are unmanaged (empty).
-	p, err := Build(d, s, target)
+	p, err := Build(d, s, target, nil)
 	var empty EmptyChainError
 	if !errors.As(err, &empty) {
 		t.Fatalf("not EmptyChainError: %v", err)
@@ -566,7 +566,7 @@ func TestEnabledEditsWithoutChains(t *testing.T) {
 		},
 	}}
 	target := policy.Target{ID: "t", Root: "/r"}
-	p, err := Build(d, state.State{Revision: 1}, target)
+	p, err := Build(d, state.State{Revision: 1}, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

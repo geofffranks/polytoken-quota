@@ -1,0 +1,24 @@
+{
+  "plan_type": "pro",
+  "rate_limit": {
+    "primary_window":   { "used_percent": 22, "reset_at": 1766948068, "limit_window_seconds": 18000 },
+    "secondary_window": { "used_percent": 43, "reset_at": 1767407914, "limit_window_seconds": 604800 }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "GPT-5.3-Codex-Spark",
+      "metered_feature": "gpt_5_3_codex_spark",
+      "rate_limit": {
+        "primary_window":   { "used_percent": 15, "reset_at": 1766948068, "limit_window_seconds": 18000 },
+        "secondary_window": { "used_percent": 30, "reset_at": 1767407914, "limit_window_seconds": 604800 }
+      }
+    },
+    {
+      "limit_name": "Another-Model",
+      "metered_feature": "another_model",
+      "rate_limit": {
+        "primary_window": { "used_percent": 5, "reset_at": 1766948068, "limit_window_seconds": 18000 }
+      }
+    }
+  ]
+}

@@ -43,7 +43,7 @@ func TestStoreRoundTripPreservesAllFields(t *testing.T) {
 	st := Store{Path: p, Now: func() time.Time { return now }, RecoveredRetention: 24 * time.Hour}
 
 	original := State{
-		Schema:   1,
+		Schema:   CurrentSchema,
 		Revision: 42,
 		Providers: map[string]ProviderState{
 			"codex": {Quota: QuotaExhausted, Availability: Available, QuotaAt: now, QuotaArrival: 7},
@@ -82,7 +82,7 @@ func TestStoreRoundTripPreservesAllFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Schema != 1 || loaded.Revision != 42 {
+	if loaded.Schema != CurrentSchema || loaded.Revision != 42 {
 		t.Fatalf("schema=%d revision=%d", loaded.Schema, loaded.Revision)
 	}
 	codex := loaded.Providers["codex"]

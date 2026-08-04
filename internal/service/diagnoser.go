@@ -10,6 +10,9 @@ import (
 	"context"
 
 	"github.com/geofffranks/codexbar-hooks/internal/doctor"
+	"github.com/geofffranks/codexbar-hooks/internal/policy"
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
 	"github.com/geofffranks/codexbar-hooks/internal/state"
 )
 
@@ -56,18 +59,33 @@ type TargetStatus struct {
 	Pending           bool   `json:"pending"`
 }
 
+// ChainOrderReport carries the desired vs effective model order for one managed
+// chain, so status can show how routing has reordered survivors.
+type ChainOrderReport struct {
+	TargetID  string   `json:"target_id"`
+	Chain     string   `json:"chain"`
+	Desired   []string `json:"desired"`
+	Effective []string `json:"effective"`
+}
+
 // StatusReport is the result of the status command. It carries the provider
 // axes, effective modes, last events, current revision, per-target
-// attempted/applied revisions, concise pending/drift summary, and the
-// unconditional running-session advisory.
+// attempted/applied revisions, concise pending/drift summary, routing ranking
+// and effective order (when routing is enabled), per-provider quota state, and
+// the unconditional running-session advisory.
 type StatusReport struct {
-	JSON                   bool             `json:"-"`
-	Revision               uint64           `json:"revision"`
-	Providers              []ProviderStatus `json:"providers,omitempty"`
-	Targets                []TargetStatus   `json:"targets,omitempty"`
-	Pending                int              `json:"pending"`
-	Drift                  bool             `json:"drift"`
-	RunningSessionAdvisory string           `json:"running_session_advisory"`
+	JSON                   bool                  `json:"-"`
+	Revision               uint64                `json:"revision"`
+	Providers              []ProviderStatus      `json:"providers,omitempty"`
+	Targets                []TargetStatus        `json:"targets,omitempty"`
+	Pending                int                   `json:"pending"`
+	Drift                  bool                  `json:"drift"`
+	RoutingEnabled         bool                  `json:"routing_enabled"`
+	Ranking                []RankEntryReport     `json:"ranking,omitempty"`
+	EffectiveOrders        []ChainOrderReport    `json:"effective_orders,omitempty"`
+	Quota                  []QuotaSnapshotReport `json:"quota,omitempty"`
+	Problem                bool                  `json:"problem"`
+	RunningSessionAdvisory string                `json:"running_session_advisory"`
 }
 
 // Compile-time assertions that *Coordinator implements both Mutator (via its
@@ -118,6 +136,58 @@ func (c *Coordinator) Status(_ context.Context, _ bool) StatusReport {
 		}
 	}
 
+	// Quota projections are composed from the same read-only service method used
+	// by `quota status`, ensuring status and quota status cannot diverge.
+	quotaReport := c.QuotaStatus(context.Background())
+	report.Quota = quotaReport.Providers
+	report.Problem = quotaReport.Problem
+
+	// Routing projections are only shown when policy loading succeeds. Disabled
+	// routing is explicit and intentionally carries no ranking entries.
+	if c.Policy != nil {
+		if desired, perr := c.Policy.LoadPolicy(); perr == nil {
+			report.RoutingEnabled = desired.Routing.Enabled
+			if desired.Routing.Enabled {
+				rankLookup, ranking := ComputeRanking(desired, observed, c.now())
+				for _, entry := range ranking.Entries {
+					report.Ranking = append(report.Ranking, RankEntryReport{
+						MappingID:   entry.MappingID,
+						Rank:        entry.Rank,
+						OffPeak:     entry.OffPeak,
+						Eligible:    entry.Eligible,
+						Explanation: entry.Explanation,
+					})
+				}
+				appendChainOrders := func(target policy.Target) {
+					chains := []struct {
+						name  string
+						chain policy.Chain
+					}{
+						{"full", target.Full}, {"mini", target.Mini},
+						{"nano", target.Nano}, {"classifier", target.Classifier},
+					}
+					for _, ch := range chains {
+						if len(ch.chain) == 0 {
+							continue
+						}
+						effective, err := reconcile.EffectiveOrder(desired, observed, ch.chain, rankLookup)
+						if err != nil {
+							continue
+						}
+						report.EffectiveOrders = append(report.EffectiveOrders, ChainOrderReport{
+							TargetID: target.ID, Chain: ch.name,
+							Desired: append([]string(nil), ch.chain...), Effective: effective,
+						})
+					}
+				}
+				appendChainOrders(desired.Global)
+				for _, target := range desired.Projects {
+					appendChainOrders(target)
+				}
+			}
+		}
+	}
+
 	// Drift: any target whose attempted revision exceeds its applied revision is
 	// not yet fully reconciled with the live files.
 	for _, ts := range observed.Targets {
@@ -152,6 +222,23 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	}
 	if c.DoctorInspectors.Publisher != nil {
 		deps.Publisher = c.DoctorInspectors.Publisher
+	}
+	// Wire the quota/routing inspector when the diagnostic state store is
+	// available (it needs to load observed quota snapshots/attempts). The
+	// policy loader is shared with the transaction path; the journal path
+	// enables the interrupted-reconcile check.
+	if c.DiagnosticState.Path != "" {
+		var evidence *quota.EvidenceRegistry
+		if provider, ok := c.QuotaPoller.(quotaEvidenceProvider); ok {
+			evidence = provider.EvidenceRegistry()
+		}
+		deps.Quota = quotaDoctorInspector{
+			state:       c.DiagnosticState,
+			policy:      c.Policy,
+			journalPath: c.JournalPath,
+			now:         c.now,
+			evidence:    evidence,
+		}
 	}
 	return doctor.Run(ctx, deps)
 }

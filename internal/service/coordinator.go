@@ -71,6 +71,15 @@ type Coordinator struct {
 	// live/publish). Each is nil-safe: an unset inspector contributes no
 	// findings, so Doctor never panics before full inspector wiring.
 	DoctorInspectors DoctorInspectors
+	// QuotaPoller polls provider quota adapters for the QuotaCheck transaction.
+	// It is nil-safe: QuotaCheck reports an error when it is unset. Production
+	// wires the real adapter-backed poller; tests inject a fake.
+	QuotaPoller QuotaPoller
+	// JournalPath is the write-ahead apply journal path used by the doctor's
+	// quota inspector to detect an interrupted quota-check reconcile (a journal
+	// left on disk). It is nil-safe: when empty the reconcile-pending check is
+	// skipped.
+	JournalPath string
 	// tracer is the observability seam that records each transaction step. It
 	// is nil in production; tests inject a recording tracer.
 	tracer Tracer
@@ -116,6 +125,7 @@ const (
 	txDisable
 	txEnable
 	txReset
+	txQuotaCheck
 )
 
 // transactionInput carries the kind-specific arguments into the common path.
@@ -127,6 +137,9 @@ type transactionInput struct {
 	Provider    string
 	Patch       state.ProviderPatch
 	Selector    state.Selector
+	// Reconcile is set by QuotaCheck to trigger the full stage/validate/publish
+	// flow after observations are applied.
+	Reconcile bool
 }
 
 // Rejected/stale outcomes are non-mutating and exit 1.
@@ -197,6 +210,16 @@ func (c *Coordinator) Reset(ctx context.Context) Outcome {
 	return c.transact(ctx, txReset, transactionInput{})
 }
 
+// QuotaCheck polls configured provider quota adapters and persists the
+// observations through the locked transaction path. A failed attempt never
+// replaces the last usable QuotaSnapshot; provider failures are isolated. With
+// reconcile true it also runs the full stage/validate/publish pipeline against
+// the freshly observed state. The provider filter, when non-empty, restricts
+// polling to one mapping.
+func (c *Coordinator) QuotaCheck(ctx context.Context, provider string, reconcile bool) Outcome {
+	return c.transact(ctx, txQuotaCheck, transactionInput{Provider: provider, Reconcile: reconcile})
+}
+
 // --- the common locked transaction path -------------------------------------
 
 // transact is the single entry point for every mutation. It acquires the lock,
@@ -238,6 +261,8 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		return c.transactSetClear(ctx, recovered, in, kind)
 	case txDisable, txEnable, txReset:
 		return c.transactManual(ctx, recovered, in, kind)
+	case txQuotaCheck:
+		return c.transactQuotaCheck(ctx, recovered, in)
 	}
 	return Outcome{Error: errors.New("service: unknown transaction kind")}
 }
@@ -535,7 +560,8 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		}
 	}
 	step("render")
-	plan, err := c.Builder.Build(desired, next, rt.Policy)
+	ranks, _ := ComputeRanking(desired, next, c.now())
+	plan, err := c.Builder.Build(desired, next, rt.Policy, ranks)
 	if err != nil {
 		step("record-pending")
 		return pendingOutcome(id, next.Revision, "render", err)

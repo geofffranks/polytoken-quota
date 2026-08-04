@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
 )
 
 // PruneRecovered removes recovered errors whose ResolvedAt is at or before the
@@ -25,9 +27,102 @@ func PruneRecovered(s State, now time.Time, retention time.Duration) State {
 	return next
 }
 
+// usageHistoryWeeks is the maximum number of weekly usage samples retained:
+// the current week plus four prior weeks.
+const usageHistoryWeeks = 5
+
+// weekStart returns the Monday 00:00 UTC boundary of the week containing t. It
+// is the deterministic week boundary used for usage-history pruning.
+func weekStart(t time.Time) time.Time {
+	tt := t.UTC()
+	// Weekday: Sunday=0, Monday=1, ..., Saturday=6. Days since Monday:
+	// Monday->0, Tuesday->1, ..., Sunday->6.
+	daysSinceMonday := (int(tt.Weekday()) + 6) % 7
+	return time.Date(tt.Year(), tt.Month(), tt.Day()-daysSinceMonday, 0, 0, 0, 0, time.UTC)
+}
+
+// PruneUsageHistory bounds UsageHistory.Weeks to the current week plus four
+// prior weeks (at most usageHistoryWeeks entries), using the Monday 00:00 UTC
+// week boundary. It never mutates the input state. A nil UsageHistory is
+// returned unchanged.
+func PruneUsageHistory(s State, now time.Time) State {
+	if s.UsageHistory == nil || len(s.UsageHistory.Weeks) == 0 {
+		return s
+	}
+	cutoff := weekStart(now).AddDate(0, 0, -(usageHistoryWeeks-1)*7)
+	kept := make([]UsageSample, 0, len(s.UsageHistory.Weeks))
+	for _, w := range s.UsageHistory.Weeks {
+		if !w.WeekStart.Before(cutoff) {
+			kept = append(kept, w)
+		}
+	}
+	next := s
+	next.UsageHistory = &UsageHistory{Weeks: kept}
+	return next
+}
+
+// sanitizeSnapshots runs quota.SanitizeError over every provider snapshot's
+// Error field so no raw secret-bearing string can reach the persisted file. It
+// never mutates the input state.
+func sanitizeSnapshots(s State) State {
+	changed := false
+	providers := s.Providers
+	for k, ps := range providers {
+		snap, snapChanged := sanitizeSnap(ps.QuotaSnapshot)
+		attempt, attemptChanged := sanitizeSnap(ps.QuotaAttempt)
+		if !snapChanged && !attemptChanged {
+			continue
+		}
+		if !changed {
+			// Copy the map lazily on first mutation.
+			providers = make(map[string]ProviderState, len(providers))
+			for kk, vv := range s.Providers {
+				providers[kk] = vv
+			}
+			changed = true
+		}
+		ps.QuotaSnapshot = snap
+		ps.QuotaAttempt = attempt
+		providers[k] = ps
+	}
+	if !changed {
+		return s
+	}
+	next := s
+	next.Providers = providers
+	return next
+}
+
+func sanitizeSnap(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
+	if snap == nil || snap.Error == "" {
+		return snap, false
+	}
+	cleaned := quota.SanitizeError(strErr(snap.Error))
+	if cleaned == snap.Error {
+		return snap, false
+	}
+	out := *snap
+	out.Error = cleaned
+	return &out, true
+}
+
+// strErr adapts a plain string to an error so it can flow through
+// quota.SanitizeError.
+type strErr string
+
+func (e strErr) Error() string { return string(e) }
+
 // Load reads and decodes the state file. A missing file returns a fresh, empty
-// state with initialized maps and no error. Nil maps from a sparse file are
-// normalized to empty maps so callers can assign without panicking.
+// state (Schema CurrentSchema) with initialized maps and no error.
+//
+// Schema handling is additive and backward-compatible: schemas 0 and 1 are
+// legacy v1 documents and are migrated in memory to CurrentSchema (the new
+// quota/routing/history fields default to nil/zero); schema CurrentSchema is
+// loaded as-is. Any newer, unknown schema fails closed — Load returns an error
+// rather than silently accepting a format it does not know. Nil maps from a
+// sparse file are normalized to empty maps so callers can assign without
+// panicking. Migration is in memory only; the file is rewritten to CurrentSchema
+// on the next accepted Save.
 func (st Store) Load() (State, error) {
 	data, err := os.ReadFile(st.Path)
 	if err != nil {
@@ -40,6 +135,12 @@ func (st Store) Load() (State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return State{}, fmt.Errorf("state: parse %s: %w", st.Path, err)
 	}
+	if s.Schema > CurrentSchema {
+		return State{}, fmt.Errorf("state: unsupported schema %d in %s (current %d)", s.Schema, st.Path, CurrentSchema)
+	}
+	// Legacy v1 (schema 0/1) or current (2): normalize to the current schema.
+	// The additive fields are absent in v1 documents and decode to nil/zero.
+	s.Schema = CurrentSchema
 	if s.Providers == nil {
 		s.Providers = map[string]ProviderState{}
 	}
@@ -60,6 +161,9 @@ func (st Store) Load() (State, error) {
 // blocks, or unmanaged source content.
 func (st Store) Save(s State) error {
 	s = PruneRecovered(s, st.now(), st.RecoveredRetention)
+	s = PruneUsageHistory(s, st.now())
+	s = sanitizeSnapshots(s)
+	s.Schema = CurrentSchema
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return fmt.Errorf("state: encode: %w", err)
@@ -149,6 +253,7 @@ func (st Store) now() time.Time {
 
 func newState() State {
 	return State{
+		Schema:    CurrentSchema,
 		Providers: map[string]ProviderState{},
 		Targets:   map[string]TargetState{},
 	}

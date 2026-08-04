@@ -34,8 +34,8 @@ func FuzzReconcileDuplicateIdempotent(f *testing.F) {
 			chain = append(chain, chain[0])
 			target.Full = chain
 		}
-		a, ea := Build(d, s, target)
-		b, eb := Build(d, s, target)
+		a, ea := Build(d, s, target, nil)
+		b, eb := Build(d, s, target, nil)
 		if fmt.Sprint(ea) != fmt.Sprint(eb) || !reflect.DeepEqual(a, b) {
 			t.Fatal("Build is not idempotent under duplicate entries")
 		}
@@ -47,7 +47,7 @@ func FuzzReconcileDuplicateIdempotent(f *testing.F) {
 		}
 		// Repeated Build with the SAME inputs (no duplication) must also match.
 		d2, s2, target2 := fuzzFixture(modes)
-		c, ec := Build(d2, s2, target2)
+		c, ec := Build(d2, s2, target2, nil)
 		if fmt.Sprint(ec) != fmt.Sprint(ea) || !reflect.DeepEqual(c, a) {
 			t.Fatal("Build is not deterministic across equal fixtures")
 		}
@@ -63,11 +63,11 @@ func TestReconcileStablePartitionIsDeterministic(t *testing.T) {
 	target.Full = append(policy.Chain(nil), names...)
 	setMode(&s, "b", state.ModeReserve)
 	setMode(&s, "d", state.ModeReserve)
-	p1, err := Build(d, s, target)
+	p1, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p2, err := Build(d, s, target)
+	p2, err := Build(d, s, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

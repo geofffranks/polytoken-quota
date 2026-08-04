@@ -63,8 +63,10 @@ type TargetRegistry interface {
 
 // Reconciler builds a reconciliation plan for one target. It wraps
 // reconcile.Build, which is a pure function of desired policy plus observed state.
+// ranks carries the optional routing overlay (nil when routing is disabled); the
+// coordinator computes real ranks from the routing policy in a later task.
 type Reconciler interface {
-	Build(desired policy.Desired, observed state.State, t policy.Target) (reconcile.Plan, error)
+	Build(desired policy.Desired, observed state.State, t policy.Target, ranks reconcile.RankLookup) (reconcile.Plan, error)
 }
 
 // Stager materializes an isolated validation staging candidate for one target.

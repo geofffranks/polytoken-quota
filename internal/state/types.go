@@ -8,7 +8,17 @@
 // and equal-timestamp events are ordered deterministically.
 package state
 
-import "time"
+import (
+	"time"
+
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
+)
+
+// CurrentSchema is the on-disk state schema version this build reads and writes.
+// Load accepts older known schemas (0/1) by migrating them in memory to
+// CurrentSchema and rejects any newer, unknown schema by failing closed. Save
+// always persists CurrentSchema.
+const CurrentSchema = 2
 
 // Mode is the reconciler-internal effective operating mode derived from a
 // provider's independent quota and availability axes. It is never persisted to
@@ -88,6 +98,25 @@ type ProviderState struct {
 	AvailabilityAt      time.Time
 	QuotaArrival        uint64
 	AvailabilityArrival uint64
+
+	// Additive (v2) quota-polling fields. Both snapshots are nil until the
+	// first poll. QuotaSnapshot is the last successful/usable observation;
+	// QuotaAttempt is the latest attempt including failures. The event-derived
+	// Quota/Availability axes above are unchanged and remain authoritative for
+	// the state machine.
+	QuotaSnapshot *quota.QuotaSnapshot
+	QuotaAttempt  *quota.QuotaSnapshot
+	// Routing records the last routing-policy decision metadata for this
+	// provider. It is a value type (always present, zero-valued until ranked).
+	Routing ProviderRouting
+}
+
+// ProviderRouting records routing-policy decision metadata for a single
+// provider. It carries only sanitized, non-secret bookkeeping.
+type ProviderRouting struct {
+	LastRank            int // last computed global rank (0-based)
+	LastDecisionAt      time.Time
+	LastAppliedRevision uint64
 }
 
 // ApplyFailure describes a target that could not be fully reconciled. It is the
@@ -131,6 +160,32 @@ type State struct {
 	Targets       map[string]TargetState
 	RefreshFailed []Diagnostic
 	Recovered     []ApplyFailure
+
+	// Additive (v2) routing/usage history. Both are nil until the first
+	// computation/observation.
+	RoutingHistory *RoutingHistory
+	UsageHistory   *UsageHistory
+}
+
+// RoutingHistory records the last good global provider ranking computed by the
+// routing policy. It carries only sanitized mapping IDs — never credentials.
+type RoutingHistory struct {
+	LastGoodGlobalRank []string // mapping IDs in rank order
+	ComputedAt         time.Time
+}
+
+// UsageSample is one week's normalized usage share aggregated across polls. The
+// map keys are mapping IDs; values are normalized shares.
+type UsageSample struct {
+	WeekStart   time.Time
+	Totals      map[string]float64
+	SampleCount int
+}
+
+// UsageHistory is the bounded rolling usage history (current week plus four
+// prior weeks — at most five entries). Save prunes to that bound.
+type UsageHistory struct {
+	Weeks []UsageSample
 }
 
 // Store is the sanitized, atomic persistence layer for State. Save prunes

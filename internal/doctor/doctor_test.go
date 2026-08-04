@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
 	"github.com/geofffranks/codexbar-hooks/internal/state"
 )
 
@@ -412,5 +413,213 @@ func TestNilInspectorsAreSafe(t *testing.T) {
 	})
 	if r.Actionable() {
 		t.Fatal("empty report must not be actionable")
+	}
+}
+
+// --- quota diagnostic tests (Task 9 Part A) ---------------------------------
+
+// quotaInspectorStub returns a fixed set of findings, recording that it was
+// called.
+type quotaInspectorStub struct {
+	called   bool
+	findings []Finding
+}
+
+func (s *quotaInspectorStub) Findings(context.Context) []Finding {
+	s.called = true
+	return s.findings
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// freshSnapshot builds a QuotaSnapshot with the given status and checked-at.
+func freshSnapshot(status quota.SourceStatus, checkedAt time.Time) *quota.QuotaSnapshot {
+	return &quota.QuotaSnapshot{
+		MappingID:    "codex",
+		CheckedAt:    checkedAt,
+		Status:       status,
+		Availability: quota.QuotaAvailable,
+		Windows:      []quota.QuotaWindow{{Name: "daily", UsagePercent: ptrFloat(20)}},
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
+// TestQuotaFindingsStaleSnapshot verifies a snapshot past its freshness TTL
+// produces a warning finding with the expected code and message.
+func TestQuotaFindingsStaleSnapshot(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	checked := now.Add(-2 * time.Hour)
+	probes := []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		FreshnessTTL:   30 * time.Minute,
+		Snapshot:       freshSnapshot(quota.SourceFresh, checked),
+		Supported:      true,
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-stale-snapshot" || findings[0].Severity != Warning {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "stale") || !strings.Contains(findings[0].Message, "30m") {
+		t.Fatalf("message=%q", findings[0].Message)
+	}
+}
+
+// TestQuotaFindingsPartialData verifies a SourcePartial snapshot produces an
+// info finding.
+func TestQuotaFindingsPartialData(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	probes := []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		FreshnessTTL:   30 * time.Minute,
+		Snapshot:       freshSnapshot(quota.SourcePartial, now),
+		Supported:      true,
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-partial" || findings[0].Severity != Info {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "partial") {
+		t.Fatalf("message=%q", findings[0].Message)
+	}
+}
+
+func TestQuotaFindingsFreshUnusableSnapshotIsActionable(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	for _, snap := range []*quota.QuotaSnapshot{
+		{MappingID: "codex", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Name: "daily"}}},
+		{MappingID: "codex", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaUnknown, Windows: []quota.QuotaWindow{{Name: "daily", UsagePercent: ptrFloat(20)}}},
+	} {
+		findings := QuotaFindings([]QuotaProbe{{Provider: "codex", HasQuotaConfig: true, FreshnessTTL: time.Hour, Snapshot: snap, Supported: true}}, false, now)
+		if len(findings) != 1 || findings[0].Severity != Warning {
+			t.Fatalf("snapshot=%+v findings=%+v, want one warning", snap, findings)
+		}
+	}
+}
+
+// TestQuotaFindingsUnsupportedAdapter verifies a provider with a quota config
+// but an unsupported adapter produces a warning finding.
+func TestQuotaFindingsUnsupportedAdapter(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	probes := []QuotaProbe{{
+		Provider:       "zai",
+		HasQuotaConfig: true,
+		Supported:      false,
+		SupportReason:  "provider zai contract evidence expired; re-verify and update",
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-adapter-unsupported" || findings[0].Severity != Warning {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "adapter unsupported") {
+		t.Fatalf("message=%q", findings[0].Message)
+	}
+}
+
+// TestQuotaFindingsFailedAttempt verifies a SourceFailed attempt produces a
+// warning finding with the sanitized error summary.
+func TestQuotaFindingsFailedAttempt(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	probes := []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		Supported:      true,
+		Attempt: &quota.QuotaSnapshot{
+			Status: quota.SourceFailed,
+			Error:  "codex: server error (HTTP 503)",
+		},
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-attempt-failed" || findings[0].Severity != Warning {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "HTTP 503") {
+		t.Fatalf("message=%q", findings[0].Message)
+	}
+}
+
+// TestQuotaFindingsReconcilePending verifies the pending-reconcile flag produces
+// a warning finding.
+func TestQuotaFindingsReconcilePending(t *testing.T) {
+	findings := QuotaFindings(nil, true, time.Now())
+	if len(findings) != 1 || findings[0].Code != "quota-reconcile-pending" || findings[0].Severity != Warning {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "interrupted") {
+		t.Fatalf("message=%q", findings[0].Message)
+	}
+}
+
+// TestQuotaFindingsSanitized verifies that secret-bearing strings in probe data
+// are stripped from finding messages (defense in depth).
+func TestQuotaFindingsSanitized(t *testing.T) {
+	probes := []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		Supported:      true,
+		Attempt: &quota.QuotaSnapshot{
+			Status: quota.SourceFailed,
+			Error:  "bearer sk-secret-token-here api_key=sk-live-1234567890wxyz",
+		},
+	}}
+	findings := QuotaFindings(probes, false, time.Now())
+	for _, f := range findings {
+		for _, secret := range []string{"sk-secret-token-here", "sk-live-1234567890wxyz"} {
+			if strings.Contains(f.Message, secret) {
+				t.Fatalf("secret %q leaked in finding: %s", secret, f.Message)
+			}
+		}
+	}
+}
+
+// TestQuotaFindingsHealthyProviderNoFinding verifies a healthy provider with a
+// fresh snapshot, supported adapter, and no failed attempt produces no finding.
+func TestQuotaFindingsHealthyProviderNoFinding(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	probes := []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		FreshnessTTL:   30 * time.Minute,
+		Snapshot:       freshSnapshot(quota.SourceFresh, now),
+		Supported:      true,
+		Attempt:        freshSnapshot(quota.SourceFresh, now),
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 0 {
+		t.Fatalf("healthy provider produced findings: %+v", findings)
+	}
+}
+
+// TestDoctorRunWiresQuotaInspector verifies Run consults the injected
+// QuotaInspector and folds its findings into the report.
+func TestDoctorRunWiresQuotaInspector(t *testing.T) {
+	qi := &quotaInspectorStub{findings: []Finding{{
+		Code: "quota-attempt-failed", Severity: Warning, Message: "provider codex quota attempt failed: HTTP 503",
+	}}}
+	deps := doctorFixture(t)
+	deps.Quota = qi
+	r := Run(context.Background(), deps)
+	if !qi.called {
+		t.Fatal("quota inspector was not called")
+	}
+	if !slices.Contains(findingCodes(r), "quota-attempt-failed") {
+		t.Fatalf("quota finding missing from report: %v", findingCodes(r))
+	}
+	if !r.Actionable() {
+		t.Fatal("warning quota finding must be actionable")
+	}
+}
+
+// TestDoctorRunNilQuotaInspectorSafe verifies Run does not panic when the quota
+// inspector is nil.
+func TestDoctorRunNilQuotaInspectorSafe(t *testing.T) {
+	r := Run(context.Background(), doctorFixture(t))
+	// No panic, and no quota findings (inspector is nil).
+	for _, f := range r.Findings {
+		if strings.HasPrefix(f.Code, "quota-") {
+			t.Fatalf("unexpected quota finding with nil inspector: %+v", f)
+		}
 	}
 }

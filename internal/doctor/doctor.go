@@ -100,6 +100,7 @@ type Dependencies struct {
 	Targets   TargetInspector
 	Validator LiveValidator
 	Publisher PublishInspector
+	Quota     QuotaInspector
 	Now       func() time.Time
 }
 
@@ -122,6 +123,9 @@ func Run(ctx context.Context, deps Dependencies) Report {
 	}
 	if deps.Publisher != nil {
 		findings = append(findings, deps.Publisher.Findings(ctx)...)
+	}
+	if deps.Quota != nil {
+		findings = append(findings, deps.Quota.Findings(ctx)...)
 	}
 
 	// Surface every persisted pending target error as an actionable finding.

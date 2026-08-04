@@ -15,8 +15,8 @@ func FuzzReconcile(f *testing.F) {
 	f.Add(uint8(0))
 	f.Fuzz(func(t *testing.T, modes uint8) {
 		d, s, target := fuzzFixture(modes)
-		a, e1 := Build(d, s, target)
-		b, e2 := Build(d, s, target)
+		a, e1 := Build(d, s, target, nil)
+		b, e2 := Build(d, s, target, nil)
 		if fmt.Sprint(e1) != fmt.Sprint(e2) || !reflect.DeepEqual(a, b) {
 			t.Fatal("nondeterministic")
 		}

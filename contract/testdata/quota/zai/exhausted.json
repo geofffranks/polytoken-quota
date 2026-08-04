@@ -1,0 +1,20 @@
+{
+  "code": 200,
+  "msg": "Operation successful",
+  "success": true,
+  "data": {
+    "limits": [
+      {
+        "type": "TOKENS_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 100,
+        "usage": 10000000,
+        "currentValue": 10000000,
+        "remaining": 0,
+        "nextResetTime": 1768507567547
+      }
+    ],
+    "planName": "Pro"
+  }
+}

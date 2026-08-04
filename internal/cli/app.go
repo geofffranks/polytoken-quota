@@ -40,6 +40,7 @@ type Mutator interface {
 	Disable(context.Context, string) service.Outcome
 	Enable(context.Context, string) service.Outcome
 	Reset(context.Context) service.Outcome
+	QuotaCheck(context.Context, string, bool) service.Outcome
 }
 
 // statusAdvisoryFragments holds the running-session advisory text split across
@@ -67,6 +68,12 @@ const (
 type Dependencies struct {
 	Mutator   Mutator
 	Diagnoser service.Diagnoser
+	// RankExplainer computes the read-only routing ranking (routing explain).
+	RankExplainer service.RankingExplainer
+	// QuotaStater projects read-only quota snapshots (quota status).
+	QuotaStater service.QuotaStater
+	// RoutingToggler toggles desired.yaml's routing.enabled (routing enable/disable).
+	RoutingToggler service.RoutingToggler
 	// Environment returns the supported CODEXBAR_* environment snapshot passed
 	// to hook.Decode. Production wraps os.Environ (filtering to CODEXBAR_*);
 	// tests inject a fixed map.
@@ -74,13 +81,13 @@ type Dependencies struct {
 }
 
 // MutationExitCode maps a mutation Outcome to a process exit code: rejected
-// mutations exit 1, accepted mutations with pending targets exit 2, fully
-// applied mutations exit 0.
+// mutations exit 1, accepted mutations with pending targets or a provider
+// problem exit 2, fully applied mutations exit 0.
 func MutationExitCode(o service.Outcome) int {
 	if !o.Accepted {
 		return ExitRejected
 	}
-	if o.PendingCount() > 0 {
+	if o.PendingCount() > 0 || o.Problem {
 		return ExitPending
 	}
 	return ExitOK
@@ -125,10 +132,12 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 }
 
 // DiagnosticExitCode maps a diagnostic command and its actionable flag to a
-// process exit code. status is always informational (exit 0); doctor exits 1
-// only when its findings are actionable.
+// process exit code. Status quota problems exit 2; doctor findings exit 1.
 func DiagnosticExitCode(command DiagnosticCommand, actionable bool) int {
 	if command == StatusCommand {
+		if actionable {
+			return ExitPending
+		}
 		return ExitOK
 	}
 	if actionable {
@@ -225,7 +234,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		report := deps.Diagnoser.Status(ctx, jsonOut)
 		writeStatus(stdout, report, jsonOut)
-		return DiagnosticExitCode(StatusCommand, false)
+		return DiagnosticExitCode(StatusCommand, report.Problem)
 	case "reconcile":
 		dryRun, keepStaging, ok := parseReconcileFlags(args[1:])
 		if !ok {
@@ -270,6 +279,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return mutationExitCode(deps.Mutator.Reset(ctx), stderr)
 	case "state":
 		return runState(ctx, args[1:], deps, stderr)
+	case "routing":
+		return runRouting(ctx, args[1:], deps, stdout, stderr)
+	case "quota":
+		return runQuota(ctx, args[1:], deps, stdout, stderr)
 	case "doctor":
 		jsonOut, ok := parseBoolFlags(args[1:], "--json")
 		if !ok {
@@ -436,6 +449,10 @@ func renderStatus(r service.StatusReport) (text, jsonText string) {
 	// mutates the caller's StatusReport. The text path reads r unchanged.
 	jsonReport := r
 	jsonReport.RunningSessionAdvisory = RunningSessionAdvisory
+	if !jsonReport.RoutingEnabled {
+		jsonReport.Ranking = nil
+		jsonReport.EffectiveOrders = nil
+	}
 
 	data, err := json.Marshal(jsonReport)
 	if err != nil {
@@ -452,13 +469,39 @@ func renderStatus(r service.StatusReport) (text, jsonText string) {
 		fmt.Fprintf(&sb, "  %s: quota=%s availability=%s mode=%s reason=%s\n",
 			p.Provider, p.Quota, p.Availability, p.Mode, p.Reason)
 	}
+	for _, p := range r.Quota {
+		fmt.Fprintf(&sb, "  quota %s: status=%s availability=%s checked_at=%s\n", p.MappingID, p.Status, p.Availability, formatTime(p.CheckedAt))
+		for _, win := range p.Windows {
+			fmt.Fprintf(&sb, "    window %s: %s\n", win.Name, formatWindow(win))
+		}
+		if p.Attempt != nil {
+			if p.Attempt.Error != "" {
+				fmt.Fprintf(&sb, "    attempt: status=%s error=%s\n", p.Attempt.Status, validate.DefaultSanitize([]byte(p.Attempt.Error)))
+			} else {
+				fmt.Fprintf(&sb, "    attempt: status=%s checked_at=%s\n", p.Attempt.Status, formatTime(p.Attempt.CheckedAt))
+			}
+		}
+		if !p.LastDecisionAt.IsZero() {
+			fmt.Fprintf(&sb, "    routing metadata: last_rank=%d last_decision=%s\n", p.LastRank, formatTime(p.LastDecisionAt))
+		}
+	}
+	if r.RoutingEnabled {
+		fmt.Fprintln(&sb, "routing: enabled")
+		for _, e := range r.Ranking {
+			fmt.Fprintf(&sb, "  rank %s: #%d eligible=%t off_peak=%t — %s\n", e.MappingID, e.Rank, e.Eligible, e.OffPeak, e.Explanation)
+		}
+		for _, o := range r.EffectiveOrders {
+			fmt.Fprintf(&sb, "  chain %s/%s: desired=%v effective=%v\n", o.TargetID, o.Chain, o.Desired, o.Effective)
+		}
+	} else {
+		fmt.Fprintln(&sb, "routing: disabled")
+	}
 	for _, tg := range r.Targets {
 		label := "applied"
 		if tg.Pending {
 			label = "pending"
 		}
-		fmt.Fprintf(&sb, "  target %s: %s (attempted %d, applied %d)\n",
-			tg.TargetID, label, tg.AttemptedRevision, tg.AppliedRevision)
+		fmt.Fprintf(&sb, "  target %s: %s (attempted %d, applied %d)\n", tg.TargetID, label, tg.AttemptedRevision, tg.AppliedRevision)
 	}
 	switch {
 	case r.Drift:
@@ -505,7 +548,7 @@ func writeDoctor(w io.Writer, r doctor.Report, jsonOut bool) {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
-	fmt.Fprintln(w, "commands: init, hook, status, reconcile, sync, state, doctor")
+	fmt.Fprintln(w, "commands: init, hook, status, reconcile, sync, state, routing, quota, doctor")
 }
 
 // codexbarHookEvents are the six stable CodexBar 0.44.0+ hook event names.

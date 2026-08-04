@@ -95,9 +95,10 @@ func ParseModelRef(entry string) (ModelRef, error) {
 }
 
 // survivor is a desired chain entry that survived disabled filtering, with its
-// effective mode for partitioning.
+// resolved provider mapping and effective mode for partitioning.
 type survivor struct {
 	ref  ModelRef
+	mid  policy.MappingID
 	mode state.Mode
 }
 
@@ -138,39 +139,35 @@ func mappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mod
 	return worst
 }
 
+// RankLookup maps a provider mapping ID to its global rank (0 = best). A mapping
+// absent from the lookup has no rank and preserves its position. It is the
+// routing overlay's only input beyond the desired policy: when routing is
+// disabled (the default) or the lookup is nil, reconciliation is byte-for-byte
+// identical to the pre-routing behavior.
+type RankLookup map[policy.MappingID]int
+
 // Build reconciles one target's desired chains against the observed provider state
 // and returns the abstract managed edits. It is deterministic and never mutates its
 // inputs. A non-empty chain whose survivors are all disabled yields an
 // EmptyChainError and a plan with no edits; an empty desired chain is treated as
 // unmanaged and skipped.
-func Build(desired policy.Desired, observed state.State, target policy.Target) (Plan, error) {
+//
+// When desired.Routing.Enabled is true and ranks is non-empty, the routing overlay
+// reorders survivors within each (normal/reserve) partition by global rank, but
+// only among mappings that share a balance group and both carry a rank. It never
+// adds, removes, or resurrects survivors, and it never mutates the desired policy.
+func Build(desired policy.Desired, observed state.State, target policy.Target, ranks RankLookup) (Plan, error) {
 	plan := Plan{TargetID: target.ID, Revision: observed.Revision}
 
-	// survivors resolves, filters, and stable-partitions a desired chain: disabled
-	// entries are dropped, normal survivors precede reserve survivors, and desired
-	// relative order is preserved within each partition.
+	// survivors resolves, filters, stable-partitions, and (optionally) overlays a
+	// desired chain: disabled entries are dropped, normal survivors precede
+	// reserve survivors, and desired relative order is preserved within each
+	// partition. When routing is enabled and a rank lookup is provided the
+	// routing overlay reorders entries within each partition by global rank
+	// (same balance group, both ranked only); entries that do not meet the
+	// reorder criteria keep their original relative order.
 	survivors := func(c policy.Chain) ([]survivor, error) {
-		var reserve []survivor
-		normal := make([]survivor, 0, len(c))
-		for _, entry := range c {
-			ref, err := ParseModelRef(entry)
-			if err != nil {
-				return nil, err
-			}
-			mid, err := desired.ResolveModel(ref.Base)
-			if err != nil {
-				return nil, err
-			}
-			switch mode := mappingMode(desired, observed, mid); mode {
-			case state.ModeDisabled:
-				continue
-			case state.ModeReserve:
-				reserve = append(reserve, survivor{ref: ref, mode: mode})
-			default:
-				normal = append(normal, survivor{ref: ref, mode: mode})
-			}
-		}
-		return append(normal, reserve...), nil
+		return resolveSurvivors(desired, observed, c, ranks)
 	}
 
 	// Scalar config fields: write only the first survivor, never a fallback.
@@ -262,4 +259,100 @@ func Build(desired policy.Desired, observed state.State, target policy.Target) (
 // revision, used when a chain fails to render.
 func emptyPlan(target policy.Target, observed state.State) Plan {
 	return Plan{TargetID: target.ID, Revision: observed.Revision}
+}
+
+// balanceGroupOf resolves a mapping's effective balance group. A mapping without a
+// quota section (or an empty balance_group) defaults to "default", matching the
+// routing package's convention so two unconfigured mappings compare as the same
+// group.
+func balanceGroupOf(d policy.Desired, id policy.MappingID) string {
+	m, ok := d.Providers[id]
+	if !ok || m.Quota == nil || m.Quota.BalanceGroup == "" {
+		return "default"
+	}
+	return m.Quota.BalanceGroup
+}
+
+// resolveSurvivors resolves, filters (disabled dropped), stable-partitions (normal then reserve),
+// and applies the routing overlay to a desired chain. Both Build and EffectiveOrder call this
+// so their ordering logic never diverges.
+func resolveSurvivors(desired policy.Desired, observed state.State, chain policy.Chain, ranks RankLookup) ([]survivor, error) {
+	var reserve []survivor
+	normal := make([]survivor, 0, len(chain))
+	for _, entry := range chain {
+		ref, err := ParseModelRef(entry)
+		if err != nil {
+			return nil, err
+		}
+		mid, err := desired.ResolveModel(ref.Base)
+		if err != nil {
+			return nil, err
+		}
+		switch mode := mappingMode(desired, observed, mid); mode {
+		case state.ModeDisabled:
+			continue
+		case state.ModeReserve:
+			reserve = append(reserve, survivor{ref: ref, mid: mid, mode: mode})
+		default:
+			normal = append(normal, survivor{ref: ref, mid: mid, mode: mode})
+		}
+	}
+	if desired.Routing.Enabled {
+		applyRoutingOverlay(normal, desired, ranks)
+		applyRoutingOverlay(reserve, desired, ranks)
+	}
+	return append(normal, reserve...), nil
+}
+
+// applyRoutingOverlay reorders survivors in place by their global rank, but only
+// among entries that share a balance group and both carry a rank in the lookup.
+// It uses a stable sort so entries that do not meet the reorder criteria (absent
+// rank, different balance group, or equal rank) keep their original relative
+// order. It never adds or removes an entry.
+func applyRoutingOverlay(sv []survivor, desired policy.Desired, ranks RankLookup) {
+	if len(sv) < 2 || len(ranks) == 0 {
+		return
+	}
+	// Reorder only ranked entries within each balance group. Ranked slots remain
+	// fixed, so unrelated and inter-group entries retain their exact positions.
+	groups := make(map[string][]int)
+	for i, s := range sv {
+		if _, ok := ranks[s.mid]; !ok {
+			continue
+		}
+		g := balanceGroupOf(desired, s.mid)
+		groups[g] = append(groups[g], i)
+	}
+	for _, slots := range groups {
+		if len(slots) < 2 {
+			continue
+		}
+		ordered := append([]survivor(nil), sv[slots[0]])
+		ordered = ordered[:0]
+		for _, i := range slots {
+			ordered = append(ordered, sv[i])
+		}
+		sort.SliceStable(ordered, func(i, j int) bool { return ranks[ordered[i].mid] < ranks[ordered[j].mid] })
+		for i, slot := range slots {
+			sv[slot] = ordered[i]
+		}
+	}
+}
+
+// EffectiveOrder returns the effective (post-overlay) model ordering for a chain
+// alongside the original desired order. It is a read-only projection: it performs
+// the same resolve/filter/partition/overlay as Build but returns only the spellings
+// in order, never mutating desired. When routing is disabled the effective order
+// equals the desired-survivor order. Disabled entries (dropped before the overlay)
+// never appear.
+func EffectiveOrder(desired policy.Desired, observed state.State, chain policy.Chain, ranks RankLookup) ([]string, error) {
+	sv, err := resolveSurvivors(desired, observed, chain, ranks)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(sv))
+	for _, s := range sv {
+		out = append(out, s.ref.Spelling)
+	}
+	return out, nil
 }

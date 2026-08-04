@@ -163,7 +163,7 @@ func (s *coordinatorSpy) ResolveTargets(policy.Desired) ([]RegisteredTarget, err
 }
 
 // --- Reconciler ---
-func (s *coordinatorSpy) Build(_ policy.Desired, _ state.State, t policy.Target) (reconcile.Plan, error) {
+func (s *coordinatorSpy) Build(_ policy.Desired, _ state.State, t policy.Target, _ reconcile.RankLookup) (reconcile.Plan, error) {
 	return reconcile.Plan{TargetID: t.ID}, nil
 }
 

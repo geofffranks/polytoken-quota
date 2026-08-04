@@ -32,24 +32,41 @@ var _ Mutator = (*service.Coordinator)(nil)
 // depsSpy is a test double that records Mutator/Diagnoser invocations. It
 // satisfies both Mutator and Diagnoser.
 type depsSpy struct {
-	Mutations       int
-	SetProvider     string
-	SetPatch        state.ProviderPatch
-	ClearSelector   state.Selector
-	DisableProvider string
-	EnableProvider  string
-	ResetCalled     bool
+	Mutations           int
+	SetProvider         string
+	SetPatch            state.ProviderPatch
+	ClearSelector       state.Selector
+	DisableProvider     string
+	EnableProvider      string
+	ResetCalled         bool
+	RoutingEnabledSet   bool
+	RoutingEnabledValue bool
+	RoutingToggleErr    error
+	QuotaCheckProvider  string
+	QuotaCheckReconcile bool
+	QuotaCheckOutcome   service.Outcome
+	QuotaCheckSet       bool
 }
 
 func newDepsSpy() *depsSpy { return &depsSpy{} }
 
 func (s *depsSpy) Dependencies() Dependencies {
 	return Dependencies{
-		Mutator:     s,
-		Diagnoser:   s,
-		Environment: func() map[string]string { return map[string]string{} },
+		Mutator:        s,
+		Diagnoser:      s,
+		RankExplainer:  s,
+		QuotaStater:    s,
+		RoutingToggler: s,
+		Environment:    func() map[string]string { return map[string]string{} },
 	}
 }
+
+// Compile-time proof that the spy satisfies the read-only and toggling surfaces.
+var (
+	_ service.RankingExplainer = (*depsSpy)(nil)
+	_ service.QuotaStater      = (*depsSpy)(nil)
+	_ service.RoutingToggler   = (*depsSpy)(nil)
+)
 
 func (s *depsSpy) Init(context.Context) service.Outcome {
 	s.Mutations++
@@ -102,9 +119,44 @@ func (s *depsSpy) Reset(context.Context) service.Outcome {
 	return service.Outcome{Accepted: true}
 }
 
+func (s *depsSpy) QuotaCheck(_ context.Context, provider string, reconcile bool) service.Outcome {
+	s.Mutations++
+	s.QuotaCheckProvider = provider
+	s.QuotaCheckReconcile = reconcile
+	if s.QuotaCheckSet {
+		return s.QuotaCheckOutcome
+	}
+	return service.Outcome{Accepted: true}
+}
+
 func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return service.StatusReport{} }
 
 func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
+
+// --- RankingExplainer / QuotaStater / RoutingToggler ---
+
+func (s *depsSpy) RankingExplain(context.Context) service.RankingReport {
+	s.Mutations++
+	return service.RankingReport{Enabled: true, Entries: []service.RankEntryReport{
+		{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak, 80% headroom"},
+	}}
+}
+
+func (s *depsSpy) QuotaStatus(context.Context) service.QuotaStatusReport {
+	s.Mutations++
+	return service.QuotaStatusReport{Revision: 1, Providers: []service.QuotaSnapshotReport{
+		{MappingID: "codex", Status: "fresh", Windows: []service.QuotaWindowReport{{Name: "daily", Remaining: floatPtr(0.8)}}},
+	}}
+}
+
+func (s *depsSpy) SetRoutingEnabled(_ context.Context, enabled bool) error {
+	s.Mutations++
+	s.RoutingEnabledSet = true
+	s.RoutingEnabledValue = enabled
+	return s.RoutingToggleErr
+}
+
+func floatPtr(v float64) *float64 { return &v }
 
 func TestCommandTree(t *testing.T) {
 	cases := []struct {
@@ -276,8 +328,8 @@ func TestExitCodeRouting(t *testing.T) {
 	if got := MutationExitCode(pending); got != ExitPending {
 		t.Fatalf("pending mutation=%d want %d", got, ExitPending)
 	}
-	if got := DiagnosticExitCode(StatusCommand, true); got != ExitOK {
-		t.Fatalf("status=%d", got)
+	if got := DiagnosticExitCode(StatusCommand, true); got != ExitPending {
+		t.Fatalf("actionable status=%d want %d", got, ExitPending)
 	}
 	if got := DiagnosticExitCode(DoctorCommand, true); got != ExitRejected {
 		t.Fatalf("doctor=%d", got)
@@ -347,6 +399,41 @@ func TestStatusAlwaysWarnsAboutRunningSessions(t *testing.T) {
 	}
 }
 
+func TestStatusRendersQuotaAndRoutingExplanations(t *testing.T) {
+	remaining := 0.8
+	r := service.StatusReport{
+		RoutingEnabled:  true,
+		Ranking:         []service.RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "fresh quota"}},
+		EffectiveOrders: []service.ChainOrderReport{{TargetID: "global", Chain: "full", Desired: []string{"zai/gpt", "codex/gpt"}, Effective: []string{"codex/gpt", "zai/gpt"}}},
+		Quota:           []service.QuotaSnapshotReport{{MappingID: "codex", Availability: "available", Status: "fresh", Windows: []service.QuotaWindowReport{{Name: "daily", Remaining: &remaining}}, Attempt: &service.QuotaAttemptReport{Status: "fresh"}, LastRank: 0}},
+	}
+	text, jsonText := renderStatus(r)
+	for _, want := range []string{"routing: enabled", "fresh quota", "desired=", "effective=", "quota codex", "remaining=80%"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text missing %q: %s", want, text)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(jsonText), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	for _, key := range []string{"routing_enabled", "ranking", "effective_orders", "quota", "running_session_advisory"} {
+		if _, ok := parsed[key]; !ok {
+			t.Fatalf("JSON missing %q: %s", key, jsonText)
+		}
+	}
+}
+
+func TestStatusRoutingDisabledOmitsRanking(t *testing.T) {
+	text, jsonText := renderStatus(service.StatusReport{RoutingEnabled: false, Ranking: []service.RankEntryReport{{MappingID: "secret-provider", Explanation: "must not show"}}})
+	if !strings.Contains(text, "routing: disabled") {
+		t.Fatalf("text=%q", text)
+	}
+	if strings.Contains(text, "must not show") || strings.Contains(jsonText, "must not show") {
+		t.Fatalf("ranking leaked while disabled: text=%q json=%q", text, jsonText)
+	}
+}
+
 func TestStatusRendersManualDisableReason(t *testing.T) {
 	r := service.StatusReport{Providers: []service.ProviderStatus{{
 		Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available,
@@ -358,13 +445,17 @@ func TestStatusRendersManualDisableReason(t *testing.T) {
 	}
 }
 
-// TestStatusPendingDriftAlwaysExitsZero proves status exits 0 even when its
-// report contains pending targets or drift, while an actionable doctor report
-// exits 1.
+// TestStatusPendingDriftAlwaysExitsZero proves status exits 0 when its report
+// contains pending targets or drift alone, while actionable quota problems exit
+// 2 and an actionable doctor report exits 1.
 func TestStatusPendingDriftAlwaysExitsZero(t *testing.T) {
-	report := service.StatusReport{Pending: 2, Drift: true}
-	if got := DiagnosticExitCode(StatusCommand, report.Pending > 0 || report.Drift); got != 0 {
-		t.Fatalf("status exit=%d", got)
+	// Pending targets and drift are advisory status conditions, not actionable
+	// quota problems, so they do not affect status's exit code.
+	if got := DiagnosticExitCode(StatusCommand, false); got != 0 {
+		t.Fatalf("pending/drift status exit=%d", got)
+	}
+	if got := DiagnosticExitCode(StatusCommand, true); got != ExitPending {
+		t.Fatalf("problem status exit=%d", got)
 	}
 	if got := DiagnosticExitCode(DoctorCommand, true); got != 1 {
 		t.Fatalf("doctor exit=%d", got)
@@ -381,10 +472,11 @@ func (s *outcomeSpy) Sync(context.Context, bool) service.Outcome              { 
 func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.Outcome {
 	return s.outcome
 }
-func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Disable(context.Context, string) service.Outcome       { return s.outcome }
-func (s *outcomeSpy) Enable(context.Context, string) service.Outcome        { return s.outcome }
-func (s *outcomeSpy) Reset(context.Context) service.Outcome                 { return s.outcome }
+func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome    { return s.outcome }
+func (s *outcomeSpy) Disable(context.Context, string) service.Outcome          { return s.outcome }
+func (s *outcomeSpy) Enable(context.Context, string) service.Outcome           { return s.outcome }
+func (s *outcomeSpy) Reset(context.Context) service.Outcome                    { return s.outcome }
+func (s *outcomeSpy) QuotaCheck(context.Context, string, bool) service.Outcome { return s.outcome }
 func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport {
 	return service.StatusReport{}
 }

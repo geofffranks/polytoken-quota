@@ -64,7 +64,7 @@ var epoch = time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 // file can never be mutated by the failure.
 func TestEmptyChainFailureProducesNoEdits(t *testing.T) {
 	d, observed, target := emptyChainDesired()
-	plan, err := reconcile.Build(d, observed, target)
+	plan, err := reconcile.Build(d, observed, target, nil)
 	var empty reconcile.EmptyChainError
 	if !errors.As(err, &empty) {
 		t.Fatalf("want EmptyChainError, got %v", err)
@@ -153,7 +153,7 @@ func TestPermanentDisableSurvivesHealthyReconcile(t *testing.T) {
 	}}
 	target := policy.Target{ID: "global", Root: "/r"}
 	observed := state.State{Revision: 1} // codex healthy (absent = normal)
-	plan, err := reconcile.Build(d, observed, target)
+	plan, err := reconcile.Build(d, observed, target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

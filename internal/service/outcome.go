@@ -25,6 +25,13 @@ type Outcome struct {
 	Revision uint64
 	Targets  []TargetOutcome
 	Error    error
+	// Problem is true when an accepted observation transition left a pending
+	// provider problem (a failed poll attempt) even when no target is pending.
+	// The CLI maps it to exit code 2 alongside PendingCount. It is set only by
+	// QuotaCheck; other mutators never set it, so their exit codes are unchanged.
+	Problem bool
+	// ProviderAttempts carries sanitized quota polling diagnostics for CLI reports.
+	ProviderAttempts []QuotaAttemptDiagnostic
 }
 
 // PendingCount returns the number of targets that remain pending (not fully

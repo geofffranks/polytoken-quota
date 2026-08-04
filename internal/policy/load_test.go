@@ -227,3 +227,135 @@ func TestLoadOperationalBounds(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadRoutingQuota proves the routing/quota sections parse correctly:
+// routing enabled flag, per-provider quota config (adapter, freshness, balance
+// group, weight, off-peak schedule).
+func TestLoadRoutingQuota(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    polytoken_providers: [codex]
+    models: [codex/m]
+    quota:
+      adapter: codex
+      freshness_ttl: 45m
+      schedule:
+        timezone: America/Los_Angeles
+        off_peak:
+          - days: [mon, tue, wed, thu, fri]
+            start: "00:00"
+            end: "08:00"
+      balance_group: primary
+      weight: 3
+routing:
+  enabled: true
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !d.Routing.Enabled {
+		t.Fatal("routing should be enabled")
+	}
+	q := d.Providers["codex"].Quota
+	if q == nil {
+		t.Fatal("missing codex quota config")
+	}
+	if q.Adapter != "codex" {
+		t.Fatalf("adapter=%q", q.Adapter)
+	}
+	if q.FreshnessTTL != 45*time.Minute {
+		t.Fatalf("freshness=%v", q.FreshnessTTL)
+	}
+	if q.BalanceGroup != "primary" {
+		t.Fatalf("balance_group=%q", q.BalanceGroup)
+	}
+	if q.Weight != 3 {
+		t.Fatalf("weight=%d", q.Weight)
+	}
+	if q.Schedule == nil {
+		t.Fatal("missing schedule")
+	}
+}
+
+// TestLoadRoutingQuotaDefaults proves omitted quota fields get their defaults
+// (freshness 30m) and that quota enabled without a schedule keeps Schedule nil.
+func TestLoadRoutingQuotaDefaults(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    codexbar_providers: [codex]
+    models: [codex/m]
+    quota:
+      adapter: codex
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if d.Routing.Enabled {
+		t.Fatal("routing should default to disabled")
+	}
+	q := d.Providers["codex"].Quota
+	if q == nil {
+		t.Fatal("missing codex quota config")
+	}
+	if q.FreshnessTTL != 30*time.Minute {
+		t.Fatalf("freshness default=%v want 30m", q.FreshnessTTL)
+	}
+	if q.BalanceGroup != "default" {
+		t.Fatalf("balance_group default=%q want %q", q.BalanceGroup, "default")
+	}
+	if q.Weight != 1 {
+		t.Fatalf("weight default=%d want 1", q.Weight)
+	}
+	if q.Schedule != nil {
+		t.Fatalf("schedule should be nil when omitted, got %+v", q.Schedule)
+	}
+}
+
+// TestLoadRoutingQuotaBackwardCompat proves a desired.yaml without routing or
+// quota sections loads with routing disabled and nil quota (backward compat).
+func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
+	d, err := Load("testdata/synthetic_desired.yaml")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if d.Routing.Enabled {
+		t.Fatal("routing should be disabled for legacy fixture")
+	}
+	for id, m := range d.Providers {
+		if m.Quota != nil {
+			t.Fatalf("mapping %q has unexpected quota config %+v", id, m.Quota)
+		}
+	}
+}
+
+// TestLoadRoutingQuotaInvalidSchedule proves a bad schedule (timezone/day/time)
+// rejects policy loading rather than being silently accepted.
+func TestLoadRoutingQuotaInvalidSchedule(t *testing.T) {
+	for _, tc := range []struct{ name, schedule string }{
+		{
+			name:     "bad timezone",
+			schedule: "timezone: Not/A/Zone\n        off_peak: []",
+		},
+		{
+			name:     "bad day",
+			schedule: "timezone: UTC\n        off_peak:\n          - days: [funday]\n            start: \"09:00\"\n            end: \"17:00\"",
+		},
+		{
+			name:     "bad time",
+			schedule: "timezone: UTC\n        off_peak:\n          - days: [mon]\n            start: \"99:00\"\n            end: \"17:00\"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := "version: 1\nproviders:\n  codex:\n    codexbar_providers: [codex]\n    models: [codex/m]\n    quota:\n      adapter: codex\n      schedule:\n        " + tc.schedule + "\n"
+			_, err := Load(writeTemp(t, yaml))
+			if err == nil {
+				t.Fatal("expected schedule rejection, got nil error")
+			}
+		})
+	}
+}

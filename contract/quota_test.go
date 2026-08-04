@@ -1,0 +1,680 @@
+// These tests prove the contract evidence gate's negative path: a provider
+// adapter whose evidence is absent, expired, or incomplete must be unsupported
+// and make NO provider request (fail closed). They are plain Go tests — no
+// external binary or real network is required. A synthetic gated source mirrors
+// how Task 5 adapters will compose the evidence gate.
+//
+// The release evidence check skips cleanly when no provider adapters are
+// configured (the default local-dev case) and asserts every configured adapter
+// has fresh evidence when they are.
+package contract
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
+)
+
+// contractNow is a stable reference time for deterministic gate evaluation.
+var contractNow = time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+// freshEvidence builds a complete, current Evidence record for the contract tests.
+func freshEvidence(provider string) quota.Evidence {
+	return quota.Evidence{
+		Provider:   provider,
+		Endpoint:   "https://api.example.com/v1/quota",
+		Method:     "GET",
+		AuthType:   "oauth-bearer",
+		SchemaNote: "usage and limit fields",
+		RecordedAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		ReviewBy:   time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// --- Synthetic evidence-gated source -------------------------------------
+
+// recordingTransport captures whether Do was called and returns a trivial 200.
+type recordingTransport struct{ calls int }
+
+func (r *recordingTransport) Do(req *http.Request) (*http.Response, error) {
+	r.calls++
+	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}}, nil
+}
+
+// gatedSource is a minimal QuotaSource that gates Fetch on evidence freshness,
+// mirroring how Task 5 provider adapters compose the evidence gate with the
+// bounded HTTP client.
+type gatedSource struct {
+	provider  string
+	reg       *quota.EvidenceRegistry
+	now       time.Time
+	transport *recordingTransport
+}
+
+func (g *gatedSource) MappingID() string { return g.provider }
+
+func (g *gatedSource) Status() quota.SupportStatus {
+	return quota.SupportFromEvidence(g.reg.Status(g.provider, g.now))
+}
+
+func (g *gatedSource) Fetch(ctx context.Context) (quota.QuotaSnapshot, error) {
+	st := g.Status()
+	if !st.Supported {
+		// Fail closed: return an error WITHOUT touching the transport.
+		return quota.QuotaSnapshot{
+			MappingID: g.provider,
+			Status:    quota.SourceFailed,
+			Error:     st.Reason,
+		}, errors.New(st.Reason)
+	}
+	bc := &quota.BoundedClient{Transport: g.transport, Timeout: time.Second, MaxBodyBytes: 1 << 10}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.example.com/v1/quota", nil)
+	if err != nil {
+		return quota.QuotaSnapshot{
+			MappingID: g.provider,
+			Status:    quota.SourceFailed,
+			Error:     "bad request",
+		}, err
+	}
+	if _, err := bc.Do(req); err != nil {
+		return quota.QuotaSnapshot{
+			MappingID: g.provider,
+			Status:    quota.SourceFailed,
+			Error:     quota.SanitizeError(err),
+		}, err
+	}
+	return quota.QuotaSnapshot{
+		MappingID:    g.provider,
+		Availability: quota.QuotaAvailable,
+		Status:       quota.SourceFresh,
+		CheckedAt:    g.now,
+	}, nil
+}
+
+// --- Negative gate: absent / expired / incomplete ------------------------
+
+func TestEvidenceGateAbsentFailsClosed(t *testing.T) {
+	reg := quota.NewEvidenceRegistry() // no evidence registered for "codex"
+	rt := &recordingTransport{}
+	src := &gatedSource{provider: "codex", reg: reg, now: contractNow, transport: rt}
+
+	if src.Status().Supported {
+		t.Fatal("expected unsupported for absent evidence")
+	}
+	snap, err := src.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("expected error for absent evidence")
+	}
+	if snap.Status != quota.SourceFailed {
+		t.Fatalf("snapshot status = %s, want failed", snap.Status)
+	}
+	if rt.calls != 0 {
+		t.Fatalf("transport must not be called when evidence is absent; got %d calls", rt.calls)
+	}
+}
+
+func TestEvidenceGateExpiredFailsClosed(t *testing.T) {
+	reg := quota.NewEvidenceRegistry()
+	e := freshEvidence("codex")
+	e.ReviewBy = contractNow.Add(-24 * time.Hour) // expired yesterday
+	reg.Register(e)
+
+	rt := &recordingTransport{}
+	src := &gatedSource{provider: "codex", reg: reg, now: contractNow, transport: rt}
+
+	if src.Status().Supported {
+		t.Fatal("expected unsupported for expired evidence")
+	}
+	snap, err := src.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("expected error for expired evidence")
+	}
+	if snap.Status != quota.SourceFailed {
+		t.Fatalf("snapshot status = %s, want failed", snap.Status)
+	}
+	if rt.calls != 0 {
+		t.Fatalf("transport must not be called when evidence is expired; got %d calls", rt.calls)
+	}
+}
+
+func TestEvidenceGateIncompleteFailsClosed(t *testing.T) {
+	reg := quota.NewEvidenceRegistry()
+	e := freshEvidence("codex")
+	e.Endpoint = "" // missing required field
+	reg.Register(e)
+
+	rt := &recordingTransport{}
+	src := &gatedSource{provider: "codex", reg: reg, now: contractNow, transport: rt}
+
+	if src.Status().Supported {
+		t.Fatal("expected unsupported for incomplete evidence")
+	}
+	snap, err := src.Fetch(context.Background())
+	if err == nil {
+		t.Fatal("expected error for incomplete evidence")
+	}
+	if snap.Status != quota.SourceFailed {
+		t.Fatalf("snapshot status = %s, want failed", snap.Status)
+	}
+	if rt.calls != 0 {
+		t.Fatalf("transport must not be called when evidence is incomplete; got %d calls", rt.calls)
+	}
+}
+
+// --- Positive gate: fresh evidence proceeds ------------------------------
+
+func TestEvidenceGateFreshProceeds(t *testing.T) {
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(freshEvidence("codex"))
+
+	rt := &recordingTransport{}
+	src := &gatedSource{provider: "codex", reg: reg, now: contractNow, transport: rt}
+
+	if !src.Status().Supported {
+		t.Fatal("expected supported for fresh evidence")
+	}
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error for fresh evidence: %v", err)
+	}
+	if snap.Status != quota.SourceFresh {
+		t.Fatalf("snapshot status = %s, want fresh", snap.Status)
+	}
+	if rt.calls != 1 {
+		t.Fatalf("transport should be called exactly once for fresh evidence; got %d calls", rt.calls)
+	}
+}
+
+// --- Redaction: no secrets in evidence fields or remediation reasons -----
+
+// secretPattern matches bearer tokens, URLs with embedded credentials, and
+// key/value secret assignments. Evidence fields and remediation reasons must
+// never contain these.
+//
+// "bearer" is anchored to whitespace or start-of-string so auth-type category
+// labels like "oauth-bearer" (which are safe, not real tokens) do not trigger a
+// false positive; only a standalone "Bearer <opaque>" token — preceded by
+// whitespace — matches.
+var secretPattern = regexp.MustCompile(
+	`(?i)((?:^|\s)bearer\s+\S+|(?:https?://)[^/\s:@]+:[^/\s@]+@|(?:api[_-]?key|apikey|\btoken\b|secret|password|passwd|account|acct)\s*[=:]\s*\S+)`,
+)
+
+// evidenceFieldsFlattened returns all Evidence field values as a single string
+// for secret scanning.
+func evidenceFieldsFlattened(e quota.Evidence) string {
+	return strings.Join([]string{
+		e.Provider, e.Endpoint, e.Method, e.AuthType, e.SchemaNote, e.FixturePath,
+		e.RecordedAt.Format(time.RFC3339), e.ReviewBy.Format(time.RFC3339),
+	}, " ")
+}
+
+func TestEvidenceAndReasonsAreSecretFree(t *testing.T) {
+	// Collect remediation reasons from every evidence state.
+	var reasons []string
+
+	reg := quota.NewEvidenceRegistry()
+	reasons = append(reasons, reg.Status("codex", contractNow).Reason) // absent
+	reasons = append(reasons, reg.Status("zai", contractNow).Reason)   // absent
+
+	exp := freshEvidence("codex")
+	exp.ReviewBy = contractNow.Add(-24 * time.Hour)
+	regExp := quota.NewEvidenceRegistry()
+	regExp.Register(exp)
+	reasons = append(reasons, regExp.Status("codex", contractNow).Reason) // expired
+
+	for _, m := range []func(*quota.Evidence){
+		func(e *quota.Evidence) { e.Endpoint = "" },
+		func(e *quota.Evidence) { e.AuthType = "" },
+		func(e *quota.Evidence) { e.Method = "" },
+	} {
+		e := freshEvidence("codex")
+		m(&e)
+		regInc := quota.NewEvidenceRegistry()
+		regInc.Register(e)
+		reasons = append(reasons, regInc.Status("codex", contractNow).Reason) // incomplete
+	}
+
+	for i, r := range reasons {
+		if secretPattern.MatchString(r) {
+			t.Fatalf("remediation reason %d contains a secret pattern: %q", i, r)
+		}
+	}
+
+	// Collect sanitized evidence field values and scan them too.
+	var evidenceValues []string
+	evidenceValues = append(evidenceValues, evidenceFieldsFlattened(freshEvidence("codex")))
+	evidenceValues = append(evidenceValues, evidenceFieldsFlattened(freshEvidence("zai")))
+	for i, v := range evidenceValues {
+		if secretPattern.MatchString(v) {
+			t.Fatalf("evidence record %d contains a secret pattern: %q", i, v)
+		}
+	}
+
+	// Negative control: the secret scanner must catch real secrets, so the
+	// guard above is not vacuous. Each of these MUST match.
+	mustCatch := []string{
+		"Bearer eyJhbGciOiJIUzI1NiJ9.secret.payload",
+		"https://user:hunter2@api.example.com/v1",
+		"api_key=sk-1234567890abcdef",
+		"token=ghp_abcDEF123456",
+	}
+	for i, s := range mustCatch {
+		if !secretPattern.MatchString(s) {
+			t.Fatalf("negative control %d failed: scanner did not catch %q", i, s)
+		}
+	}
+}
+
+// --- Release evidence gate -----------------------------------------------
+
+// releaseProviders enumerates the provider adapters expected to carry current
+// contract evidence for a release.
+var releaseProviders = []string{"codex", "zai"}
+
+// configuredProviders returns the provider names that are configured for this
+// environment, read from the PQ_TEST_PROVIDERS env var (comma-separated). When
+// unset or empty (the default local-dev case), no providers are configured.
+func configuredProviders() []string {
+	v := os.Getenv("PQ_TEST_PROVIDERS")
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// buildReleaseRegistry returns an EvidenceRegistry populated with production
+// adapter evidence. Every provider adapter registers its sanitized contract
+// evidence here so the release gate recognizes it as fresh.
+func buildReleaseRegistry() *quota.EvidenceRegistry {
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.CodexEvidence(time.Now()))
+	reg.Register(quota.ZaiEvidence(time.Now()))
+	return reg
+}
+
+func TestReleaseEvidenceGate(t *testing.T) {
+	configured := configuredProviders()
+	if len(configured) == 0 {
+		t.Skip("no providers configured (set PQ_TEST_PROVIDERS=codex,zai to enable the release evidence check)")
+	}
+	reg := buildReleaseRegistry()
+	statuses := quota.ValidateRelease(reg, configured, time.Now())
+	if len(statuses) != len(configured) {
+		t.Fatalf("got %d statuses for %d configured providers", len(statuses), len(configured))
+	}
+	for i, s := range statuses {
+		if s.State != quota.EvidenceFresh {
+			t.Errorf("provider %s: release evidence is %s, want fresh: %s", configured[i], s.State, s.Reason)
+		}
+	}
+}
+
+// --- Codex adapter fixture acceptance -------------------------------------
+//
+// These acceptance tests load the sanitized Codex fixture files from the
+// contract testdata tree, run them through the real CodexSource adapter (behind
+// a fake transport + synthetic credential resolver), and verify the resulting
+// QuotaSnapshot. They are the acceptance tests for the Codex contract evidence.
+
+// codexStubTransport returns a canned response body/status and records calls.
+type codexStubTransport struct {
+	body  []byte
+	code  int
+	calls int
+}
+
+func (t *codexStubTransport) Do(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{
+		StatusCode: t.code,
+		Body:       io.NopCloser(bytes.NewReader(t.body)),
+		Header:     http.Header{},
+	}, nil
+}
+
+// codexAuthResolver returns synthetic auth.json content (no real secrets).
+type codexAuthResolver struct{ fail bool }
+
+func (r *codexAuthResolver) Resolve(quota.CredentialRef) (string, error) {
+	if r.fail {
+		return "", errors.New("missing auth file")
+	}
+	return `{"tokens":{"access_token":"synthetic-token","account_id":"acct-synthetic"},"last_refresh":"2026-01-01T00:00:00Z"}`, nil
+}
+
+func loadCodexFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	path := filepath.Join("testdata", "quota", "codex", name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	return b
+}
+
+// newCodexFixtureSource builds a CodexSource with fresh evidence that returns the
+// given fixture bytes on a 200.
+func newCodexFixtureSource(t *testing.T, body []byte) *quota.CodexSource {
+	t.Helper()
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.CodexEvidence(contractNow))
+	client := &quota.BoundedClient{
+		Transport:    &codexStubTransport{body: body, code: 200},
+		Timeout:      time.Second,
+		MaxBodyBytes: 1 << 20,
+	}
+	return quota.NewCodexSource("codex-acct1", client, &codexAuthResolver{}, "", reg, contractNow)
+}
+
+func contractFindWindow(ws []quota.QuotaWindow, name string) *quota.QuotaWindow {
+	for i := range ws {
+		if ws[i].Name == name {
+			return &ws[i]
+		}
+	}
+	return nil
+}
+
+func TestCodexContractFixtures(t *testing.T) {
+	// pro.json: full response → session/weekly/spend-control, fresh, available.
+	t.Run("pro", func(t *testing.T) {
+		src := newCodexFixtureSource(t, loadCodexFixture(t, "pro.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh {
+			t.Fatalf("status = %s, want fresh", snap.Status)
+		}
+		if snap.Availability != quota.QuotaAvailable {
+			t.Fatalf("availability = %s, want available", snap.Availability)
+		}
+		s := contractFindWindow(snap.Windows, "session")
+		if s == nil || s.UsagePercent == nil || *s.UsagePercent != 22 {
+			t.Fatalf("session window usage_percent = %v", s)
+		}
+		if w := contractFindWindow(snap.Windows, "weekly"); w == nil || w.UsagePercent == nil || *w.UsagePercent != 43 {
+			t.Fatalf("weekly window = %v", w)
+		}
+		sc := contractFindWindow(snap.Windows, "spend-control")
+		if sc == nil || sc.Used == nil || *sc.Used != 7761 || sc.Limit == nil || *sc.Limit != 100000 {
+			t.Fatalf("spend-control window = %v", sc)
+		}
+	})
+
+	// exhausted.json: a window at used_percent 100 → unavailable, exhausted.
+	t.Run("exhausted", func(t *testing.T) {
+		src := newCodexFixtureSource(t, loadCodexFixture(t, "exhausted.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Availability != quota.QuotaUnavailable {
+			t.Fatalf("availability = %s, want unavailable", snap.Availability)
+		}
+		if got := snap.Class(); got != quota.ClassExhausted {
+			t.Fatalf("class = %s, want exhausted", got)
+		}
+	})
+
+	// partial.json: malformed secondary → skipped, partial status, session survives.
+	t.Run("partial", func(t *testing.T) {
+		src := newCodexFixtureSource(t, loadCodexFixture(t, "partial.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourcePartial {
+			t.Fatalf("status = %s, want partial", snap.Status)
+		}
+		if contractFindWindow(snap.Windows, "session") == nil {
+			t.Fatal("session window must survive a malformed sibling")
+		}
+		if contractFindWindow(snap.Windows, "weekly") != nil {
+			t.Fatal("malformed weekly window must be skipped")
+		}
+	})
+
+	// minimal.json: only primary → one window, fresh, available.
+	t.Run("minimal", func(t *testing.T) {
+		src := newCodexFixtureSource(t, loadCodexFixture(t, "minimal.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh {
+			t.Fatalf("status = %s, want fresh", snap.Status)
+		}
+		if contractFindWindow(snap.Windows, "session") == nil {
+			t.Fatal("missing session window")
+		}
+	})
+
+	// additional_limits.json: named model-specific windows present.
+	t.Run("additional_limits", func(t *testing.T) {
+		src := newCodexFixtureSource(t, loadCodexFixture(t, "additional_limits.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if contractFindWindow(snap.Windows, "GPT-5.3-Codex-Spark") == nil {
+			t.Fatal("missing named additional window GPT-5.3-Codex-Spark")
+		}
+		if contractFindWindow(snap.Windows, "Another-Model") == nil {
+			t.Fatal("missing named additional window Another-Model")
+		}
+	})
+}
+
+// TestCodexContractFixturesAreSecretFree asserts the committed fixture files
+// contain no bearer tokens, account IDs, or key/value secrets.
+func TestCodexContractFixturesAreSecretFree(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("testdata", "quota", "codex"))
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		body := loadCodexFixture(t, e.Name())
+		if secretPattern.MatchString(string(body)) {
+			t.Fatalf("fixture %s contains a secret pattern", e.Name())
+		}
+	}
+}
+
+// --- z.ai adapter fixture acceptance -------------------------------------
+//
+// These acceptance tests load the sanitized z.ai fixture files from the
+// contract testdata tree, run them through the real ZaiSource adapter (behind a
+// fake transport + synthetic credential resolver), and verify the resulting
+// QuotaSnapshot. They are the acceptance tests for the z.ai contract evidence.
+
+// zaiStubTransport returns a canned response body/status and records calls.
+type zaiStubTransport struct {
+	body  []byte
+	code  int
+	calls int
+}
+
+func (t *zaiStubTransport) Do(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{
+		StatusCode: t.code,
+		Body:       io.NopCloser(bytes.NewReader(t.body)),
+		Header:     http.Header{},
+	}, nil
+}
+
+// zaiKeyResolver returns a synthetic Bearer API key (no real secrets).
+type zaiKeyResolver struct{ fail bool }
+
+func (r *zaiKeyResolver) Resolve(quota.CredentialRef) (string, error) {
+	if r.fail {
+		return "", errors.New("missing key")
+	}
+	return "synthetic-zai-key", nil
+}
+
+func loadZaiFixture(t *testing.T, name string) []byte {
+	t.Helper()
+	path := filepath.Join("testdata", "quota", "zai", name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	return b
+}
+
+// newZaiFixtureSource builds a ZaiSource with fresh evidence that returns the
+// given fixture bytes on a 200.
+func newZaiFixtureSource(t *testing.T, body []byte) *quota.ZaiSource {
+	t.Helper()
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.ZaiEvidence(contractNow))
+	client := &quota.BoundedClient{
+		Transport:    &zaiStubTransport{body: body, code: 200},
+		Timeout:      time.Second,
+		MaxBodyBytes: 1 << 20,
+	}
+	return quota.NewZaiSource("zai-acct1", client, &zaiKeyResolver{}, "", reg, contractNow)
+}
+
+func TestZaiContractFixtures(t *testing.T) {
+	// pro.json: one TOKENS_LIMIT (5h → primary) + one TIME_LIMIT (MCP → monthly),
+	// raw counts present → derived percentage, fresh, available.
+	t.Run("pro", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "pro.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh {
+			t.Fatalf("status = %s, want fresh", snap.Status)
+		}
+		if snap.Availability != quota.QuotaAvailable {
+			t.Fatalf("availability = %s, want available", snap.Availability)
+		}
+		if contractFindWindow(snap.Windows, "primary") == nil {
+			t.Fatal("missing primary token window")
+		}
+		if contractFindWindow(snap.Windows, "monthly") == nil {
+			t.Fatal("missing monthly (MCP) time window")
+		}
+		// Raw counts derive used/limit; reset converted from milliseconds.
+		p := contractFindWindow(snap.Windows, "primary")
+		if p.Used == nil || *p.Used != 13628365 || p.Limit == nil || *p.Limit != 40000000 {
+			t.Fatalf("primary used/limit = %v/%v", p.Used, p.Limit)
+		}
+		if p.ResetAt == nil {
+			t.Fatal("primary reset_at must be set (millis)")
+		}
+	})
+
+	// bigmodel_cn.json: weekly (primary) + 5h (session) token limits + monthly.
+	t.Run("bigmodel_cn", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "bigmodel_cn.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh {
+			t.Fatalf("status = %s, want fresh", snap.Status)
+		}
+		primary := contractFindWindow(snap.Windows, "primary")
+		if primary == nil || primary.Limit == nil || *primary.Limit != 10000000 {
+			t.Fatalf("primary (weekly) window = %v", primary)
+		}
+		if contractFindWindow(snap.Windows, "session") == nil {
+			t.Fatal("missing session (5h) token window")
+		}
+		if contractFindWindow(snap.Windows, "monthly") == nil {
+			t.Fatal("missing monthly (MCP) window")
+		}
+	})
+
+	// exhausted.json: a TOKENS_LIMIT at percentage 100 → unavailable, exhausted.
+	t.Run("exhausted", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "exhausted.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Availability != quota.QuotaUnavailable {
+			t.Fatalf("availability = %s, want unavailable", snap.Availability)
+		}
+		if got := snap.Class(); got != quota.ClassExhausted {
+			t.Fatalf("class = %s, want exhausted", got)
+		}
+	})
+
+	// missing_counts.json: only percentage → UsagePercent from server, Used/Limit nil.
+	t.Run("missing_counts", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "missing_counts.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		p := contractFindWindow(snap.Windows, "primary")
+		if p == nil || p.UsagePercent == nil || *p.UsagePercent != 42 {
+			t.Fatalf("primary usage_percent = %v, want 42 (server percentage)", p)
+		}
+		if p.Used != nil || p.Limit != nil {
+			t.Fatalf("primary used/limit must be nil when counts absent, got %v/%v", p.Used, p.Limit)
+		}
+	})
+
+	// auth_failure.json: envelope code 1001 → sanitized auth-failure error.
+	t.Run("auth_failure", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "auth_failure.json"))
+		snap, err := src.Fetch(context.Background())
+		if err == nil {
+			t.Fatal("expected auth-failure error for envelope code 1001")
+		}
+		if snap.Status != quota.SourceFailed {
+			t.Fatalf("status = %s, want failed", snap.Status)
+		}
+		if !strings.Contains(err.Error(), "auth") {
+			t.Fatalf("error should mention auth: %s", err)
+		}
+		if strings.Contains(err.Error(), "synthetic-zai-key") {
+			t.Fatalf("auth error must not leak key: %s", err)
+		}
+	})
+}
+
+// TestZaiContractFixturesAreSecretFree asserts the committed z.ai fixture files
+// contain no bearer tokens, account IDs, or key/value secrets.
+func TestZaiContractFixturesAreSecretFree(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("testdata", "quota", "zai"))
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		body := loadZaiFixture(t, e.Name())
+		if secretPattern.MatchString(string(body)) {
+			t.Fatalf("fixture %s contains a secret pattern", e.Name())
+		}
+	}
+}

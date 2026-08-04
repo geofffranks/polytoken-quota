@@ -96,7 +96,7 @@ func runSyntheticSequence(t *testing.T, events []hook.Type) seqResult {
 		}
 		observed = next
 	}
-	plan, err := reconcile.Build(desired, observed, e2eTarget())
+	plan, err := reconcile.Build(desired, observed, e2eTarget(), nil)
 	if err != nil {
 		t.Fatalf("reconcile after %v: %v", events, err)
 	}

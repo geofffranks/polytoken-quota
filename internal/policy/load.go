@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geofffranks/codexbar-hooks/internal/routing"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,6 +22,10 @@ var defaultOperational = Operational{
 	RecoveredRetention: 7 * 24 * time.Hour,
 	BackupCount:        5,
 }
+
+// defaultQuotaFreshness is the freshness TTL applied when a quota section omits
+// freshness_ttl, matching the routing package's default.
+const defaultQuotaFreshness = 30 * time.Minute
 
 // Load reads and validates desired.yaml at path, returning a fully resolved Desired
 // graph. It rejects unsupported versions, mappings without concrete model
@@ -87,6 +92,17 @@ func loadBytes(data []byte) (Desired, error) {
 			}
 			m.Models[base] = mb
 		}
+		// Optional per-provider quota/routing section. When absent it stays nil
+		// (routing treats the mapping as unrankable). When present its schedule
+		// (if any) is validated via routing.ParseSchedule so a bad schedule
+		// rejects policy loading rather than being silently accepted.
+		if mw.Quota != nil {
+			qc, err := quotaFromWire(string(id), mw.Quota)
+			if err != nil {
+				return Desired{}, err
+			}
+			m.Quota = qc
+		}
 		// A model must belong to exactly one mapping.
 		for base := range m.Models {
 			if other, ok := modelOwner[base]; ok {
@@ -114,6 +130,8 @@ func loadBytes(data []byte) (Desired, error) {
 		return Desired{}, err
 	}
 	d.Operational = op
+
+	d.Routing = routingFromWire(w.Routing)
 
 	if d.Global, err = targetFromWire(w.Global, true, modelOwner); err != nil {
 		return Desired{}, fmt.Errorf("policy: global target: %w", err)
@@ -282,12 +300,14 @@ type docWire struct {
 	Global      *targetWire            `yaml:"global"`
 	Projects    []targetWire           `yaml:"projects"`
 	Operational *operationalWire       `yaml:"operational"`
+	Routing     *routingWire           `yaml:"routing"`
 }
 
 type mappingWire struct {
 	CodexBarProviders  []string    `yaml:"codexbar_providers"`
 	PolytokenProviders []string    `yaml:"polytoken_providers"`
 	Models             []modelWire `yaml:"models"`
+	Quota              *quotaWire  `yaml:"quota"`
 }
 
 // modelWire is one entry in a mapping's models sequence. It accepts a bare name
@@ -350,4 +370,93 @@ type targetWire struct {
 type definitionWire struct {
 	Path  string `yaml:"path"`
 	Chain Chain  `yaml:"chain"`
+}
+
+// routingWire is the on-disk shape of the top-level `routing` section.
+type routingWire struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// quotaWire is the on-disk shape of a mapping's `quota` section.
+type quotaWire struct {
+	Adapter      string        `yaml:"adapter"`
+	FreshnessTTL string        `yaml:"freshness_ttl"`
+	BalanceGroup string        `yaml:"balance_group"`
+	Weight       int           `yaml:"weight"`
+	Schedule     *scheduleWire `yaml:"schedule"`
+}
+
+// scheduleWire is the on-disk shape of an off-peak schedule.
+type scheduleWire struct {
+	Timezone string              `yaml:"timezone"`
+	OffPeak  []offPeakWindowWire `yaml:"off_peak"`
+}
+
+// offPeakWindowWire is one off-peak window.
+type offPeakWindowWire struct {
+	Days  []string `yaml:"days"`
+	Start string   `yaml:"start"`
+	End   string   `yaml:"end"`
+}
+
+// routingFromWire translates the optional top-level routing section. A nil
+// section yields routing disabled (the backward-compatible default).
+func routingFromWire(w *routingWire) RoutingConfig {
+	if w == nil {
+		return RoutingConfig{}
+	}
+	return RoutingConfig{Enabled: w.Enabled}
+}
+
+// quotaFromWire translates a mapping's quota section into a QuotaConfig. The
+// schedule, when present, is validated via routing.ParseSchedule so an invalid
+// timezone/day/time rejects policy loading. FreshnessTTL defaults to 30m when
+// omitted (matching the routing package's default), like the operational
+// durations.
+func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
+	qc := &QuotaConfig{
+		Adapter:      w.Adapter,
+		FreshnessTTL: defaultQuotaFreshness,
+		BalanceGroup: w.BalanceGroup,
+		Weight:       w.Weight,
+	}
+	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)
+	if err != nil {
+		return nil, fmt.Errorf("policy: mapping %q: %w", mappingID, err)
+	}
+	qc.FreshnessTTL = ttl
+	// Apply documented defaults for omitted quota fields at load time so the
+	// resolved config matches its struct comments ("default" and 1).
+	if qc.BalanceGroup == "" {
+		qc.BalanceGroup = "default"
+	}
+	if qc.Weight == 0 {
+		qc.Weight = 1
+	}
+	if w.Schedule != nil {
+		s, err := scheduleFromWire(mappingID, w.Schedule)
+		if err != nil {
+			return nil, err
+		}
+		qc.Schedule = s
+	}
+	return qc, nil
+}
+
+// scheduleFromWire validates and builds a routing.Schedule from its wire form,
+// delegating timezone/day/time validation to routing.ParseSchedule.
+func scheduleFromWire(mappingID string, w *scheduleWire) (*routing.Schedule, error) {
+	windows := make([]routing.OffPeakWindow, len(w.OffPeak))
+	for i, ow := range w.OffPeak {
+		days := make([]routing.DayOfWeek, len(ow.Days))
+		for j, d := range ow.Days {
+			days[j] = routing.DayOfWeek(d)
+		}
+		windows[i] = routing.OffPeakWindow{Days: days, Start: ow.Start, End: ow.End}
+	}
+	s, err := routing.ParseSchedule(w.Timezone, windows)
+	if err != nil {
+		return nil, fmt.Errorf("policy: mapping %q schedule: %w", mappingID, err)
+	}
+	return &s, nil
 }

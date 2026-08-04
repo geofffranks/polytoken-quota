@@ -9,7 +9,11 @@
 // by reconcile, import, and the coordinator.
 package policy
 
-import "time"
+import (
+	"time"
+
+	"github.com/geofffranks/codexbar-hooks/internal/routing"
+)
 
 // MappingID names a provider mapping. It is the desired.yaml `providers` map key.
 type MappingID string
@@ -36,6 +40,12 @@ type Mapping struct {
 	CodexBarProviders  []string
 	PolytokenProviders []string
 	Models             map[string]ModelBaseline
+
+	// Quota is the optional per-provider quota/routing configuration. It is nil
+	// when the mapping's desired.yaml entry omits a quota section (routing
+	// disabled for that mapping). When present it carries the routing-relevant
+	// metadata (adapter, freshness, balance group, weight, off-peak schedule).
+	Quota *QuotaConfig
 }
 
 // Chain is an ordered list of model preference entries. Entries may carry
@@ -75,6 +85,26 @@ type Operational struct {
 	BackupCount        int
 }
 
+// QuotaConfig holds per-provider quota/routing configuration (additive on
+// Mapping). When a mapping omits its quota section, the mapping's Quota pointer
+// is nil and routing treats it as unrankable (it keeps its position, never
+// reordered). The defaults below match the routing package's own defaults:
+// FreshnessTTL 30m, BalanceGroup "default", Weight 1 when zero/empty.
+type QuotaConfig struct {
+	Adapter      string            // "codex" | "zai" (adapter name)
+	FreshnessTTL time.Duration     // default 30m when zero
+	BalanceGroup string            // default "default"
+	Weight       int               // default 1
+	Schedule     *routing.Schedule // nil = never off-peak
+}
+
+// RoutingConfig holds the top-level routing enablement (additive on Desired).
+// The zero value means routing is disabled, which is the backward-compatible
+// default for desired.yaml files without a routing section.
+type RoutingConfig struct {
+	Enabled bool
+}
+
 // Desired is the fully validated in-memory desired policy produced by Load.
 type Desired struct {
 	Version     int
@@ -82,4 +112,9 @@ type Desired struct {
 	Global      Target
 	Projects    []Target
 	Operational Operational
+
+	// Routing holds the top-level routing enablement. When Enabled is false (the
+	// default for a desired.yaml without a routing section) reconciliation is
+	// byte-for-byte identical to the pre-routing behavior.
+	Routing RoutingConfig
 }

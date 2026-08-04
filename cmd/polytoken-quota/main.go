@@ -207,7 +207,7 @@ func newCoordinator(cfg config) *service.Coordinator {
 
 	return &service.Coordinator{
 		Lock:            publish.NewFileLock(cfg.LockPath),
-		Policy:          service.FilePolicyLoader{DesiredPath: cfg.DesiredPath},
+		Policy:          service.FilePolicyLoader{Path: cfg.DesiredPath},
 		PolicyWriter:    policy.NewWriter(cfg.DesiredPath),
 		State:           service.StoreState{Store: store},
 		Targets:         service.NewTargetRegistry(),
@@ -217,6 +217,8 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Publish:         service.PublisherAdapter{Publisher: pub},
 		DiagnosticState: store,
 		Sources:         policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller:     service.NewQuotaPoller(),
+		JournalPath:     cfg.JournalPath,
 	}
 }
 
@@ -233,9 +235,12 @@ func main() {
 	coord := newCoordinator(cfg)
 
 	code := cli.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.Dependencies{
-		Mutator:     coord,
-		Diagnoser:   coord,
-		Environment: envSnapshot,
+		Mutator:        coord,
+		Diagnoser:      coord,
+		RankExplainer:  coord,
+		QuotaStater:    coord,
+		RoutingToggler: coord,
+		Environment:    envSnapshot,
 	})
 	os.Exit(code)
 }

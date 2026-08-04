@@ -22,19 +22,24 @@ import (
 // FilePolicyLoader is the production PolicyLoader: it loads and validates
 // desired.yaml at DesiredPath and reports whether it exists.
 type FilePolicyLoader struct {
-	DesiredPath string
+	Path string
 }
 
 // LoadPolicy loads and validates desired.yaml.
 func (l FilePolicyLoader) LoadPolicy() (policy.Desired, error) {
-	return policy.Load(l.DesiredPath)
+	return policy.Load(l.Path)
 }
 
 // DesiredExists reports whether desired.yaml is present.
 func (l FilePolicyLoader) DesiredExists() bool {
-	_, err := os.Stat(l.DesiredPath)
+	_, err := os.Stat(l.Path)
 	return err == nil
 }
+
+// DesiredPath returns the path to desired.yaml. It lets the routing enable/
+// disable commands locate the file for byte-preserving editing without the
+// Coordinator needing a separate path field.
+func (l FilePolicyLoader) DesiredPath() string { return l.Path }
 
 // StoreState adapts the concrete state.Store (Load/Save) to the StateStore
 // interface (LoadState/Save). The concrete store's Load returns a fresh empty
@@ -58,8 +63,8 @@ func (s StoreState) Save(st state.State) error {
 type reconcileBuilder struct{}
 
 // Build delegates to reconcile.Build.
-func (reconcileBuilder) Build(desired policy.Desired, observed state.State, t policy.Target) (reconcile.Plan, error) {
-	return reconcile.Build(desired, observed, t)
+func (reconcileBuilder) Build(desired policy.Desired, observed state.State, t policy.Target, ranks reconcile.RankLookup) (reconcile.Plan, error) {
+	return reconcile.Build(desired, observed, t, ranks)
 }
 
 // StagingStager adapts staging.Builder to the Stager interface.
