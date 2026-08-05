@@ -69,23 +69,26 @@ func (p *QuotaPollerImpl) Poll(ctx context.Context, desired policy.Desired, prov
 		if provider != "" && id != provider {
 			continue
 		}
-		src := p.sourceFor(id, m.Quota.Adapter, reg, nowFn)
+		src := p.sourceFor(id, m.Quota, reg, nowFn)
 		out[id] = pollOne(ctx, src)
 	}
 	return out, nil
 }
 
-// sourceFor constructs the QuotaSource adapter for one mapping. Known adapters
-// consult the shared release-owned evidence registry; polling never registers or
-// refreshes evidence. An unknown adapter yields an explicitly unsupported source.
-func (p *QuotaPollerImpl) sourceFor(mappingID, adapter string, reg *quota.EvidenceRegistry, now func() time.Time) quota.QuotaSource {
-	switch adapter {
+// sourceFor constructs the QuotaSource adapter for one mapping's quota config.
+// Known adapters consult the shared release-owned evidence registry; polling
+// never registers or refreshes evidence. An unknown adapter yields an
+// explicitly unsupported source.
+func (p *QuotaPollerImpl) sourceFor(mappingID string, qc *policy.QuotaConfig, reg *quota.EvidenceRegistry, now func() time.Time) quota.QuotaSource {
+	switch qc.Adapter {
 	case "codex":
 		return quota.NewCodexSource(mappingID, p.Client, p.Credentials, "", reg, now())
 	case "zai":
 		return quota.NewZaiSource(mappingID, p.Client, p.Credentials, "", reg, now())
+	case "anthropic":
+		return quota.NewAnthropicSource(mappingID, p.Client, p.Credentials, qc.MonthlyBudgetUSD, reg, now())
 	default:
-		reason := "unknown quota adapter " + adapter + "; record evidence before enabling"
+		reason := "unknown quota adapter " + qc.Adapter + "; record evidence before enabling"
 		return unsupportedSource{mappingID: mappingID, reason: reason}
 	}
 }
@@ -143,6 +146,7 @@ func NewQuotaPoller() QuotaPoller {
 	now := time.Now()
 	evidence.Register(quota.CodexEvidence(now))
 	evidence.Register(quota.ZaiEvidence(now))
+	evidence.Register(quota.AnthropicEvidence(now))
 	return &QuotaPollerImpl{
 		Client:      &quota.BoundedClient{},
 		Credentials: quota.DefaultCredentialResolver(),

@@ -414,11 +414,12 @@ type routingWire struct {
 
 // quotaWire is the on-disk shape of a mapping's `quota` section.
 type quotaWire struct {
-	Adapter      string        `yaml:"adapter"`
-	FreshnessTTL string        `yaml:"freshness_ttl"`
-	BalanceGroup string        `yaml:"balance_group"`
-	Weight       int           `yaml:"weight"`
-	Schedule     *scheduleWire `yaml:"schedule"`
+	Adapter          string        `yaml:"adapter"`
+	FreshnessTTL     string        `yaml:"freshness_ttl"`
+	BalanceGroup     string        `yaml:"balance_group"`
+	Weight           int           `yaml:"weight"`
+	MonthlyBudgetUSD float64       `yaml:"monthly_budget_usd"`
+	Schedule         *scheduleWire `yaml:"schedule"`
 }
 
 // scheduleWire is the on-disk shape of a peak schedule. Peak windows are
@@ -472,10 +473,19 @@ func routingFromWire(w *routingWire) RoutingConfig {
 // durations.
 func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	qc := &QuotaConfig{
-		Adapter:      w.Adapter,
-		FreshnessTTL: defaultQuotaFreshness,
-		BalanceGroup: w.BalanceGroup,
-		Weight:       w.Weight,
+		Adapter:          w.Adapter,
+		FreshnessTTL:     defaultQuotaFreshness,
+		BalanceGroup:     w.BalanceGroup,
+		Weight:           w.Weight,
+		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
+	}
+	if w.MonthlyBudgetUSD < 0 {
+		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be positive", mappingID)
+	}
+	// The anthropic adapter measures month-to-date spend against a
+	// user-defined budget; without one there is nothing to measure against.
+	if w.Adapter == "anthropic" && w.MonthlyBudgetUSD == 0 {
+		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
 	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)
 	if err != nil {

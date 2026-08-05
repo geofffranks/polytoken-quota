@@ -1,0 +1,8 @@
+{
+  "status": 200,
+  "body": {
+    "data": [],
+    "has_more": false,
+    "next_page": null
+  }
+}
