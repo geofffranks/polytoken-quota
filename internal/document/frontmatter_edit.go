@@ -37,6 +37,20 @@ func EditFrontmatter(raw []byte, edits []Edit) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+// Frontmatter returns the raw YAML frontmatter block of a Markdown document
+// (the bytes between the opening "---" line — optionally preceded only by a
+// UTF-8 BOM — and the closing "---" line), or ok=false when the document has
+// no frontmatter. It is the single shared locator: discovery and policy
+// source reading must agree with EditFrontmatter about what counts as
+// frontmatter, or files editable here would be invisible there.
+func Frontmatter(raw []byte) (block []byte, ok bool) {
+	fmStart, fmEnd, _, ok := locateFrontmatter(raw)
+	if !ok {
+		return nil, false
+	}
+	return raw[fmStart:fmEnd], true
+}
+
 // locateFrontmatter finds the frontmatter block. It returns:
 //   - fmStart: byte offset of the first YAML content line after the opening "---";
 //   - fmEnd:   byte offset of the closing "---" line (start of that line);

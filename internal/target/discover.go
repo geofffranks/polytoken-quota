@@ -7,17 +7,24 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/geofffranks/codexbar-hooks/internal/document"
 )
 
-// modelMarkers identify a definition file as model-bearing for proposal purposes.
-// A file containing either is a candidate for management; everything else is
-// skipped. Matching is intentionally a simple substring scan: this is a proposal
-// step, and exact parsing/ownership happens later.
-var modelMarkers = []string{"polytoken.model", "polytoken.fallback_models"}
+// legacyModelMarkers identify a definition file as model-bearing when it uses
+// dotted-key spellings. Real Polytoken definitions use the nested frontmatter
+// form (a `polytoken:` mapping containing `model:` / `fallback_models:`),
+// which is detected by parsing the frontmatter; the dotted substrings are kept
+// as a permissive legacy fallback. This is a proposal step, and exact
+// parsing/ownership happens later.
+var legacyModelMarkers = []string{"polytoken.model", "polytoken.fallback_models"}
 
 // Discover proposes model-bearing definition files within a single registered
-// target root. It returns relative (forward-slash) paths of files containing
-// polytoken.model or polytoken.fallback_models.
+// target root. It returns relative (forward-slash) paths of files whose YAML
+// frontmatter declares polytoken.model or polytoken.fallback_models (nested
+// form), or that contain the dotted-key spellings.
 //
 // Discover walks only the root it is given. It does not follow symlinks, so it
 // cannot scan outside the root tree. It makes no changes and adopts nothing: only
@@ -47,7 +54,7 @@ func Discover(root string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if containsAny(data, modelMarkers) {
+		if isModelBearing(data) {
 			rel, err := filepath.Rel(real, path)
 			if err != nil {
 				return err
@@ -61,6 +68,40 @@ func Discover(root string) ([]string, error) {
 	}
 	sort.Strings(found)
 	return found, nil
+}
+
+// discoverWire mirrors the managed slice of a Polytoken definition's
+// frontmatter: a nested `polytoken` mapping with `model` and/or
+// `fallback_models`. Unknown sibling keys are ignored.
+type discoverWire struct {
+	Polytoken *struct {
+		Model          string   `yaml:"model"`
+		FallbackModels []string `yaml:"fallback_models"`
+	} `yaml:"polytoken"`
+}
+
+// isModelBearing reports whether data is a candidate managed definition:
+// either its YAML frontmatter carries a nested polytoken.model /
+// polytoken.fallback_models declaration, or it contains a dotted-key legacy
+// spelling. Malformed frontmatter never fails discovery — this is a proposal
+// step, so an unparseable file is simply not proposed.
+func isModelBearing(data []byte) bool {
+	// Cheap pre-filter before any parsing.
+	if !strings.Contains(string(data), "polytoken") {
+		return false
+	}
+	if containsAny(data, legacyModelMarkers) {
+		return true
+	}
+	block, ok := document.Frontmatter(data)
+	if !ok {
+		return false
+	}
+	var w discoverWire
+	if err := yaml.Unmarshal(block, &w); err != nil {
+		return false
+	}
+	return w.Polytoken != nil && (w.Polytoken.Model != "" || len(w.Polytoken.FallbackModels) > 0)
 }
 
 func containsAny(data []byte, markers []string) bool {
