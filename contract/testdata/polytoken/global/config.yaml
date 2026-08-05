@@ -1,16 +1,35 @@
 # Synthetic, non-personal global Polytoken config layer for staging contract
-# tests. Declares two providers/models with a synthetic auth key, a default, and
-# no environment expansion.
+# tests. Uses the real Polytoken provider schema (kind/url/auth) with a
+# synthetic static_key so AuthInert redaction is exercised against the actual
+# secret location (providers.<id>.auth.key). Declares two models, a default,
+# and no environment expansion. Validated against `polytoken config validate`.
 providers:
   codex:
-    api_key: synthetic-codex-key-do-not-use
-    base_url: https://api.codex.test
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.codex.test/v1
+    auth:
+      type: static_key
+      key: synthetic-codex-key-do-not-use
   zai:
-    api_key: synthetic-zai-key-do-not-use
+    kind:
+      type: custom_open_ai_compatible
+    url: https://api.zai.test/v1
+    auth:
+      type: static_key
+      key: synthetic-zai-key-do-not-use
 models:
   codex/gpt:
+    provider: codex
+    provider_name: gpt
+    class: full
+    context_window: 200000
     enabled: true
   zai/glm:
+    provider: zai
+    provider_name: glm
+    class: full
+    context_window: 200000
     enabled: true
 defaults:
   full: zai/glm

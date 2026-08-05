@@ -37,6 +37,11 @@ import (
 	"github.com/geofffranks/codexbar-hooks/internal/target"
 )
 
+// supportedPolytokenVersion is the version-policy floor (minimum-current: the
+// latest stable release). The version contract is enforced against this value
+// by default; POLYTOKEN_VERSION overrides it for development only.
+const supportedPolytokenVersion = "0.6.1"
+
 // polytokenBin resolves the contract binary path. POLYTOKEN_CONTRACT_BIN is the
 // explicit opt-in; it defaults to the operator-approved POLYTOKEN_BIN.
 func polytokenBin(t *testing.T) string {
@@ -138,11 +143,15 @@ func TestPolytokenContractVersion(t *testing.T) {
 	if bin == "" {
 		t.Skip("set POLYTOKEN_CONTRACT_BIN (or POLYTOKEN_BIN) for the supported-binary contract")
 	}
-	if ver := os.Getenv("POLYTOKEN_VERSION"); ver != "" {
-		got := binaryVersion(t, bin)
-		if !strings.Contains(got, ver) {
-			t.Fatalf("polytoken version %q does not contain expected %q", got, ver)
-		}
+	ver := os.Getenv("POLYTOKEN_VERSION")
+	if ver == "" {
+		// The version contract is enforced by default against the supported
+		// release; an unset override must not silently skip the check.
+		ver = supportedPolytokenVersion
+	}
+	got := binaryVersion(t, bin)
+	if !strings.Contains(got, ver) {
+		t.Fatalf("polytoken version %q does not contain expected %q (set POLYTOKEN_VERSION to override for development)", got, ver)
 	}
 	runCompleteRootCases(t, bin)
 }

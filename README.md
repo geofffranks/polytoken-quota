@@ -11,7 +11,7 @@ The tool never controls a running Polytoken process, stores provider credentials
 | Component | Minimum | Notes |
 |-----------|---------|-------|
 | Go toolchain | `go1.26.5` | Exact version match (`go env GOVERSION`). |
-| Polytoken | `0.5.9` | Supported validation contract (resolved from `PATH`). |
+| Polytoken | `0.6.1` | Supported validation contract (resolved from `PATH`). |
 
 ## Install and initial setup
 

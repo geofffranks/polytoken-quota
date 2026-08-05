@@ -347,13 +347,24 @@ func mergeFiles(global, project map[string][]byte) map[string][]byte {
 // auth and redacted under AuthInert. Matching is case-insensitive on the final
 // path segment.
 var authValueKeys = map[string]bool{
-	"api_key":      true,
-	"apikey":       true,
-	"token":        true,
-	"secret":       true,
-	"password":     true,
-	"access_token": true,
-	"auth_token":   true,
+	// "key" covers the real Polytoken provider auth shape
+	// (providers.<id>.auth.key). Redacting every leaf named key is
+	// deliberately broad: staging is validation-only, and over-redacting a
+	// non-secret string is harmless while under-redacting leaks a credential.
+	"key":           true,
+	"api_key":       true,
+	"api-key":       true,
+	"apikey":        true,
+	"token":         true,
+	"secret":        true,
+	"password":      true,
+	"access_token":  true,
+	"auth_token":    true,
+	"refresh_token": true,
+	"client_secret": true,
+	"private_key":   true,
+	"authorization": true,
+	"credentials":   true,
 }
 
 // inertSecret is the schema-valid placeholder substituted for redacted secrets.

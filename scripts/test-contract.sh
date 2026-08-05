@@ -9,7 +9,8 @@
 #
 # Environment:
 #   POLYTOKEN_CONTRACT_BIN  path to the supported Polytoken binary (required)
-#   POLYTOKEN_VERSION       expected version substring (optional; verified when set)
+#   POLYTOKEN_VERSION       expected version substring override (development
+#                           only; the supported version is enforced by default)
 #
 # The contract suite isolates HOME and XDG_* so doctor never loads the operator's
 # real ~/.config/polytoken definitions; the staging root is the sole source.
@@ -22,12 +23,15 @@ if [[ -z "${POLYTOKEN_CONTRACT_BIN:-}" ]]; then
   exit 64
 fi
 
-if [[ ! -x "$POLYTOKEN_CONTRACT_BIN" ]]; then
-  echo "error: POLYTOKEN_CONTRACT_BIN=$POLYTOKEN_CONTRACT_BIN is not executable" >&2
+if [[ ! -f "$POLYTOKEN_CONTRACT_BIN" || ! -x "$POLYTOKEN_CONTRACT_BIN" ]]; then
+  echo "error: POLYTOKEN_CONTRACT_BIN=$POLYTOKEN_CONTRACT_BIN is not an executable file" >&2
   exit 64
 fi
 
 # Run from the repository root so contract/testdata resolves.
 cd "$(dirname "$0")/.."
 
-exec go test ./contract -run TestPolytokenContractVersion -v -count=1 -timeout 300s
+# Run the whole contract package: the real-binary cases plus the static
+# staging/quota/CodexBar contract checks, so "the contract suite passed" means
+# all of it ran.
+exec go test ./contract -v -count=1 -timeout 300s
