@@ -19,8 +19,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // Severity classifies a finding's urgency. Info findings are informational and

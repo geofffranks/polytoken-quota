@@ -14,11 +14,11 @@ import (
 	"io"
 	"strings"
 
-	"github.com/geofffranks/codexbar-hooks/internal/doctor"
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
-	"github.com/geofffranks/codexbar-hooks/internal/service"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // Process exit codes.

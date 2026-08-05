@@ -9,11 +9,11 @@ package service
 import (
 	"context"
 
-	"github.com/geofffranks/codexbar-hooks/internal/doctor"
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // Diagnoser performs the read-only diagnostic operations surfaced by the CLI.
@@ -74,17 +74,17 @@ type ChainOrderReport struct {
 // and effective order (when routing is enabled), per-provider quota state, and
 // the unconditional running-session advisory.
 type StatusReport struct {
-	JSON                   bool                  `json:"-"`
-	Revision               uint64                `json:"revision"`
-	Providers              []ProviderStatus      `json:"providers,omitempty"`
-	Targets                []TargetStatus        `json:"targets,omitempty"`
-	Pending                int                   `json:"pending"`
-	Drift                  bool                  `json:"drift"`
-	RoutingEnabled         bool                  `json:"routing_enabled"`
-	Ranking                []RankEntryReport     `json:"ranking,omitempty"`
-	EffectiveOrders        []ChainOrderReport    `json:"effective_orders,omitempty"`
-	Quota                  []QuotaSnapshotReport `json:"quota,omitempty"`
-	Problem                bool                  `json:"problem"`
+	JSON            bool                  `json:"-"`
+	Revision        uint64                `json:"revision"`
+	Providers       []ProviderStatus      `json:"providers,omitempty"`
+	Targets         []TargetStatus        `json:"targets,omitempty"`
+	Pending         int                   `json:"pending"`
+	Drift           bool                  `json:"drift"`
+	RoutingEnabled  bool                  `json:"routing_enabled"`
+	Ranking         []RankEntryReport     `json:"ranking,omitempty"`
+	EffectiveOrders []ChainOrderReport    `json:"effective_orders,omitempty"`
+	Quota           []QuotaSnapshotReport `json:"quota,omitempty"`
+	Problem         bool                  `json:"problem"`
 	// Error carries a sanitized diagnostic when the report could not be
 	// produced at all (state unreadable / no store). Callers must treat a
 	// non-empty Error as a failed diagnostic, never as a clean report.

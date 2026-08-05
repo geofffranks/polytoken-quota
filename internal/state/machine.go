@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // EffectiveMode derives the reconciler-internal effective mode from a provider's

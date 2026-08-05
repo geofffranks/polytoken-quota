@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/routing"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"gopkg.in/yaml.v3"
 )
 

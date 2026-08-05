@@ -14,7 +14,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/geofffranks/codexbar-hooks/internal/document"
+	"github.com/geofffranks/polytoken-quota/internal/document"
 )
 
 // RoutingWriteError reports a write failure and whether the destination was

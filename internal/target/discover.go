@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/geofffranks/codexbar-hooks/internal/document"
+	"github.com/geofffranks/polytoken-quota/internal/document"
 )
 
 // legacyModelMarkers identify a definition file as model-bearing when it uses

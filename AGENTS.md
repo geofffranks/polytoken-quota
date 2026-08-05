@@ -14,7 +14,7 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 ## Toolchain and platform matrix
 
 - **Go toolchain:** `go1.26.5` (exact). The gate verifies `go env GOVERSION` equals this.
-- **Module path:** `github.com/geofffranks/codexbar-hooks`
+- **Module path:** `github.com/geofffranks/polytoken-quota`
 - **Supported targets (GOOS/GOARCH):** `darwin/arm64`, `darwin/amd64`,
   `linux/amd64`, `linux/arm64`
 - **Polytoken contract binary:** resolved from `PATH` (currently

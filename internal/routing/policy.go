@@ -21,7 +21,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // DayOfWeek is a canonical weekday abbreviation.

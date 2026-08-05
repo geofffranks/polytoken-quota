@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
-	"github.com/geofffranks/codexbar-hooks/internal/testutil"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 

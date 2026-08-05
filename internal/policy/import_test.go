@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // --- test doubles -----------------------------------------------------------

@@ -123,7 +123,7 @@ func TestScalarEditPreservesQuoting(t *testing.T) {
 }
 
 // TestScalarEditEscapedQuotes proves editing a quoted scalar whose value
-// contains escaped quotes (`\"` in double-quoted, `''` in single-quoted style)
+// contains escaped quotes (`\"` in double-quoted, `”` in single-quoted style)
 // replaces the whole value span instead of truncating at the first escaped
 // quote and corrupting trailing bytes.
 func TestScalarEditEscapedQuotes(t *testing.T) {

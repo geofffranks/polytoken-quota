@@ -12,7 +12,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/geofffranks/codexbar-hooks/internal/document"
+	"github.com/geofffranks/polytoken-quota/internal/document"
 )
 
 // FilesystemSourceReader reads the managed subset of Polytoken's filesystem
@@ -263,5 +263,3 @@ func readManagedDefinition(data []byte) (SourceDefinition, bool, error) {
 	}
 	return SourceDefinition{Model: w.Polytoken.Model, FallbackModels: append([]string(nil), w.Polytoken.FallbackModels...)}, true, nil
 }
-
-

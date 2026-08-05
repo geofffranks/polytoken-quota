@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // PruneRecovered removes recovered errors whose ResolvedAt is at or before the

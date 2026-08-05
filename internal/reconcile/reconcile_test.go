@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // These tests cover the pure desired-chain reconciler. The reconciler transforms a

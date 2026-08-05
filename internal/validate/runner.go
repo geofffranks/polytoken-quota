@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
 )
 
 // Stage names the validation step a result refers to.

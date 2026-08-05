@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 )
 
 // brokenLoader simulates each policy-loader failure mode.

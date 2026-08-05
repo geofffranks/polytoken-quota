@@ -13,9 +13,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/service"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // runRouting dispatches the routing subcommands.

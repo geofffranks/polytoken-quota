@@ -18,7 +18,7 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // JournalSchema is the on-disk journal schema version. It is bumped only on

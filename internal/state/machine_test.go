@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
 )
 
 // seedState returns a clean state tracking a single healthy codex provider with

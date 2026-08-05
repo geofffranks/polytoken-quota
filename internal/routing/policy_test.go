@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // ----- shared test helpers -------------------------------------------------

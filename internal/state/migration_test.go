@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 func writeFile(t *testing.T, path, content string) {

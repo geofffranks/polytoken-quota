@@ -17,8 +17,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // configFile names the managed config.yaml document (relative to a target root) that

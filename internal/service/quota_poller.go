@@ -11,8 +11,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // QuotaPoller polls all configured providers (or one mapping when provider is

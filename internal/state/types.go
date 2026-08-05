@@ -11,7 +11,7 @@ package state
 import (
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // CurrentSchema is the on-disk state schema version this build reads and writes.

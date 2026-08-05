@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // Publisher applies validated candidate files to live Polytoken targets through

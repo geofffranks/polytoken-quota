@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 )
 
 // TestResolveRejectsTraversalAndSymlink is the Task 4 blueprint contract test:

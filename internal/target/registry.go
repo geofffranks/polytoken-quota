@@ -16,7 +16,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 )
 
 // Resolved is a canonicalized, validated target. DefinitionFiles holds the

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // QuotaInspector reports quota/routing health findings: stale snapshots, partial

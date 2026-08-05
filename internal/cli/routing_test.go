@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/service"
 )
 
 func TestFormatTimeZeroIsEmpty(t *testing.T) {
