@@ -166,7 +166,12 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 	// No target may remain pending: the publish path (C1: real hashes) must have
 	// succeeded for every valid target.
 	if out.PendingCount() != 0 {
-		t.Fatalf("pending targets after publish (C1: hashes not computed?): %+v", out.Targets)
+		for _, tgt := range out.Targets {
+			if tgt.Pending != nil {
+				t.Logf("pending detail: %+v", *tgt.Pending)
+			}
+		}
+		t.Fatalf("pending targets after publish: %+v", out.Targets)
 	}
 
 	// The live managed file must have been rewritten by the real Publisher with

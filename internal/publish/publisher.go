@@ -19,8 +19,12 @@ type Publisher struct {
 	FS          DurableFS
 	JournalPath string
 	Backups     BackupStore
-	// ManagedRoot is the directory managed live files must stay within. When
-	// non-empty, Apply and Recover reject symlinks or path escapes (TOCTOU).
+	// ManagedRoot is the fallback directory managed live files must stay
+	// within when a Transaction does not carry its own ManagedRoot. When a
+	// containment root is known (either source), Apply rejects symlinks or
+	// path escapes (TOCTOU). Transactions built by the Coordinator always
+	// carry the per-target canonical root, which takes precedence: a single
+	// Publisher-level root cannot express multiple registered targets.
 	ManagedRoot string
 	// Clock returns the current time used for recovery timestamps. Defaults to
 	// time.Now when nil.
@@ -148,7 +152,7 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 	// parent dir, then record progress in the journal.
 	for i := range tx.Replacements {
 		r := &tx.Replacements[i]
-		if err := p.applyOne(r); err != nil {
+		if err := p.applyOne(p.managedRootFor(tx), r); err != nil {
 			// Leave the journal in place; Recover will restore from backup.
 			return state.State{}, err
 		}
@@ -192,13 +196,14 @@ func (p Publisher) validateTransaction(tx Transaction) error {
 	if tx.Next.Revision == 0 {
 		return errors.New("publish: next state has zero revision")
 	}
+	root := p.managedRootFor(tx)
 	for i := range tx.Replacements {
 		r := &tx.Replacements[i]
 		if r.LivePath == "" {
 			return fmt.Errorf("publish: replacement %d empty live path", i)
 		}
-		if p.ManagedRoot != "" {
-			if err := ensureNoSymlink(p.ManagedRoot, r.LivePath); err != nil {
+		if root != "" {
+			if err := ensureNoSymlink(root, r.LivePath); err != nil {
 				return fmt.Errorf("publish: live path %s: %w", r.LivePath, err)
 			}
 		}
@@ -206,17 +211,27 @@ func (p Publisher) validateTransaction(tx Transaction) error {
 	return nil
 }
 
+// managedRootFor returns the containment root for tx: the transaction's own
+// per-target root when set, otherwise the Publisher-level fallback.
+func (p Publisher) managedRootFor(tx Transaction) string {
+	if tx.ManagedRoot != "" {
+		return tx.ManagedRoot
+	}
+	return p.ManagedRoot
+}
+
 // applyOne performs one durable replacement: verify the staged temp file's hash,
 // fsync it, atomically rename it over the live path, then fsync the parent dir.
-// Each step consults the fault hook so failures are recoverable.
-func (p Publisher) applyOne(r *Replacement) error {
+// root is the containment root the live path must stay within (empty disables
+// the check). Each step consults the fault hook so failures are recoverable.
+func (p Publisher) applyOne(root string, r *Replacement) error {
 	fs := p.fs()
 	if r.TempPath == "" {
 		return fmt.Errorf("publish: replacement %s has no temp path", r.LivePath)
 	}
 	// TOCTOU: re-check immediately before write.
-	if p.ManagedRoot != "" {
-		if err := ensureNoSymlink(p.ManagedRoot, r.LivePath); err != nil {
+	if root != "" {
+		if err := ensureNoSymlink(root, r.LivePath); err != nil {
 			return err
 		}
 	}

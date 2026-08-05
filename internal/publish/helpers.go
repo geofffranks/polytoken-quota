@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"time"
 
 	"github.com/geofffranks/codexbar-hooks/internal/state"
@@ -105,7 +106,15 @@ func ensureNoSymlink(root, path string) error {
 		return err
 	}
 	if !isWithin(cleanRoot, cleanPath) {
-		return ErrPathEscape
+		// The trusted root may reach the managed tree through a symlinked
+		// prefix (e.g. /var → /private/var on macOS) while live paths are
+		// built from the fully canonicalized target root. Canonicalize the
+		// root — never the untrusted path — and retry before rejecting.
+		resolved, rerr := filepath.EvalSymlinks(cleanRoot)
+		if rerr != nil || !isWithin(resolved, cleanPath) {
+			return ErrPathEscape
+		}
+		cleanRoot = resolved
 	}
 	return walkNoSymlink(cleanRoot, cleanPath)
 }

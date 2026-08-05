@@ -55,11 +55,14 @@ type Journal struct {
 // Transaction is the input to Publisher.Apply. Prior is the committed observed
 // state before this mutation; Next is the accepted state to commit; TargetID is
 // the target being applied; Replacements are the validated candidate file
-// writes.
+// writes. ManagedRoot is the canonical root of the target being applied: every
+// replacement's live path must stay within it. When empty, the Publisher-level
+// ManagedRoot (if any) applies instead.
 type Transaction struct {
 	Prior        state.State
 	Next         state.State
 	TargetID     string
+	ManagedRoot  string
 	Replacements []Replacement
 }
 
