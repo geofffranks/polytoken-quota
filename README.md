@@ -11,7 +11,7 @@ The tool never controls a running Polytoken process, stores provider credentials
 | Component | Minimum | Notes |
 |-----------|---------|-------|
 | Go toolchain | `go1.26.5` | Exact version match (`go env GOVERSION`). |
-| Polytoken | `0.5.9` | Supported validation contract (resolved from `PATH`). |
+| Polytoken | `0.6.1` | Supported validation contract (resolved from `PATH`). |
 
 ## Install and initial setup
 
@@ -121,14 +121,14 @@ Quota fields are:
 |---------|-------------|
 | `init` | Create the initial `desired.yaml` from the current managed state. |
 | `sync --from-polytoken [--force]` | Sync desired state from the live Polytoken config. |
-| `reconcile [--dry-run]` | Reconcile managed Polytoken fields toward desired state. |
+| `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
 | `quota check [--provider ID] [--json] [--reconcile]` | Poll quota once; optionally filter a mapping, emit JSON, and reconcile after saving observations. |
 | `quota status [--json]` | Show quota snapshots, windows, attempts, and routing metadata. |
 | `routing explain [--json]` | Show provider ranking and explanations. |
 | `routing enable` | Set `routing.enabled: true` in `desired.yaml`. |
 | `routing disable` | Set `routing.enabled: false` in `desired.yaml`. |
 | `status [--json]` | Show current provider availability, drift, pending targets, and routing state. |
-| `doctor [--json]` | Run configuration, quota, drift, pending-journal, and validation diagnostics. |
+| `doctor [--json]` | Run configuration (policy schema, target resolution), quota, pending-journal, and persisted apply-failure diagnostics. Candidate validation runs during `reconcile` (including `--dry-run`); its failures surface here as pending-target findings. |
 | `hook` | Read a legacy hook event from standard input and apply it. |
 | `state set <provider> [--quota X] [--availability Y]` | Set a provider's managed automatic state. |
 | `state clear <provider> \| --all` | Clear a provider's, or all providers', automatic state. |

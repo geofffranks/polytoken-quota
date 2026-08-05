@@ -12,10 +12,10 @@ import (
 	"slices"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/routing"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // RankEntryReport is one provider's position in the routing ranking, for the

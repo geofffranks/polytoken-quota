@@ -1,4 +1,4 @@
-module github.com/geofffranks/codexbar-hooks
+module github.com/geofffranks/polytoken-quota
 
 go 1.26.5
 

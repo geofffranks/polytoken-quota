@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/routing"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"gopkg.in/yaml.v3"
 )
 
@@ -194,8 +194,40 @@ func (d Desired) ResolveCodexBar(id string) (MappingID, error) {
 	}
 }
 
+// ParseModelRef splits a chain entry into its base model and optional
+// reasoning suffix, validating the spelling strictly: a suffixed entry must be
+// exactly "base(suffix)" with a non-empty base, a non-empty suffix, and the
+// closing parenthesis as the final character. This is the single canonical
+// model-reference grammar — policy loading and reconciliation must agree, or a
+// policy described as validated could later be rejected (or silently
+// preserved malformed) at reconcile time.
+func ParseModelRef(entry string) (base, suffix string, err error) {
+	if entry == "" {
+		return "", "", errors.New("policy: empty model reference")
+	}
+	open := strings.IndexByte(entry, '(')
+	if open < 0 {
+		if strings.ContainsAny(entry, ")") {
+			return "", "", fmt.Errorf("policy: unbalanced suffix in %q", entry)
+		}
+		return entry, "", nil
+	}
+	if open == 0 {
+		return "", "", fmt.Errorf("policy: empty base model in %q", entry)
+	}
+	if entry[len(entry)-1] != ')' {
+		return "", "", fmt.Errorf("policy: malformed reasoning suffix in %q (must end with ')')", entry)
+	}
+	inner := entry[open+1 : len(entry)-1]
+	if inner == "" || strings.ContainsAny(inner, "()") {
+		return "", "", fmt.Errorf("policy: malformed reasoning suffix in %q", entry)
+	}
+	return entry[:open], inner, nil
+}
+
 // baseOf returns the base model portion of a chain entry, stripping any reasoning
-// suffix introduced by `(`. Bare entries are returned unchanged.
+// suffix introduced by `(`. Bare entries are returned unchanged. Callers that
+// must reject malformed spellings use ParseModelRef instead.
 func baseOf(entry string) string {
 	if i := strings.IndexByte(entry, '('); i >= 0 {
 		return entry[:i]
@@ -213,7 +245,10 @@ func isGlob(name string) bool {
 // model in the graph, normalizing away reasoning suffixes first.
 func validateChain(modelOwner map[string]MappingID, c Chain) error {
 	for _, entry := range c {
-		base := baseOf(entry)
+		base, _, err := ParseModelRef(entry)
+		if err != nil {
+			return err
+		}
 		if _, ok := modelOwner[base]; !ok {
 			return fmt.Errorf("unresolved model %q (entry %q)", base, entry)
 		}

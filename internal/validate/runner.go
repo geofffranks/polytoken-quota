@@ -12,14 +12,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
 )
 
 // Stage names the validation step a result refers to.
@@ -199,14 +199,18 @@ func remediation(stage Stage, timedOut bool) string {
 // even for runaway output.
 type ExecRunner struct{}
 
-// Run invokes name with args directly under ctx.
+// Run invokes name with args directly under ctx. When env is non-nil the
+// child receives EXACTLY those variables: the parent process environment is
+// never merged in, so inherited credentials and account-bearing variables
+// cannot leak into the validation subprocess. Callers own including PATH and
+// any other variables the binary genuinely needs.
 func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error) {
 	if max <= 0 {
 		max = defaultMaxOutput
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	if env != nil {
-		cmd.Env = mergedEnvironment(env)
+		cmd.Env = exactEnvironment(env)
 	}
 	budget := &captureBudget{remaining: max}
 	out, errw := &boundedWriter{budget: budget}, &boundedWriter{budget: budget}
@@ -226,23 +230,15 @@ func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64
 	return stdout, stderr, 0, nil
 }
 
-func mergedEnvironment(overrides map[string]string) []string {
-	base := os.Environ()
-	seen := make(map[string]bool, len(overrides))
-	out := make([]string, 0, len(base)+len(overrides))
-	for _, kv := range base {
-		key, _, ok := strings.Cut(kv, "=")
-		if value, replace := overrides[key]; replace {
-			out = append(out, key+"="+value)
-			seen[key] = true
-		} else if ok {
-			out = append(out, kv)
-		}
+func exactEnvironment(env map[string]string) []string {
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
 	}
-	for key, value := range overrides {
-		if !seen[key] {
-			out = append(out, key+"="+value)
-		}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+env[key])
 	}
 	return out
 }
@@ -289,6 +285,9 @@ func (w *boundedWriter) bytes() []byte { return w.buf.Bytes() }
 // placeholders, and the result is bounded in length.
 func DefaultSanitize(b []byte) string {
 	s := string(b)
+	// Redact URL userinfo (scheme://user:pass@host) before anything else can
+	// split the credential across other patterns.
+	s = reURLCred.ReplaceAllString(s, "${1}<redacted>@")
 	s = reEmail.ReplaceAllString(s, "<account>")
 	// Redact bearer tokens BEFORE credential assignments: a header like
 	// "Authorization: Bearer <token>" is matched by reCredAssign first (it
@@ -307,9 +306,14 @@ func DefaultSanitize(b []byte) string {
 }
 
 var (
-	reEmail      = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
-	reCredAssign = regexp.MustCompile(`(?i)\b(api[_-]?key|api[_-]?secret|apikey|access[_-]?token|auth[_-]?token|secret|password|passwd|token|authorization)\s*[:=]\s*[^\s]+`)
+	reEmail = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
+	// reCredAssign matches credential-shaped key/value assignments in plain,
+	// quoted, and JSON/YAML spellings: the key may be bare or quoted, the
+	// separator may be = or :, and the value may be a quoted string or a bare
+	// token. The key set covers the common credential names, not only api_key.
+	reCredAssign = regexp.MustCompile(`(?i)["']?(api[_-]?key|api[_-]?secret|apikey|x-api-key|access[_-]?token|auth[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|client[_-]?secret|private[_-]?key|secret|password|passwd|token|authorization|credentials?|cookie|set-cookie)["']?\s*[:=]\s*("[^"\n]*"|'[^'\n]*'|[^\s,}\]]+)`)
 	reBearer     = regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._\-+/=]+`)
+	reURLCred    = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s@]+@`)
 	reHome       = regexp.MustCompile(`/home/[^\s]+|/Users/[^\s]+`)
 	reTemp       = regexp.MustCompile(`/tmp/[^\s]+|/var/folders/[^\s]+`)
 	reBlob       = regexp.MustCompile(`[A-Za-z0-9_\-]{32,}`)

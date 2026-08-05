@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
-	"github.com/geofffranks/codexbar-hooks/internal/testutil"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/testutil"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // noStagingSourceFixture lays down a global layer for staging builds.

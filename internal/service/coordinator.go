@@ -33,14 +33,14 @@ import (
 	"sort"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/doctor"
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/publish"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/publish"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // Coordinator is the only CLI-facing mutator. Every dependency is injected for
@@ -595,7 +595,11 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	}
 	if publish {
 		step("publish")
-		tx := c.buildTransaction(prior, next, rt, plan, candidate)
+		tx, err := c.buildTransaction(prior, next, rt, plan, candidate)
+		if err != nil {
+			step("record-pending")
+			return pendingOutcome(id, next.Revision, "publish", err)
+		}
 		// ApplyUnderLock: the Coordinator already holds the transaction lock;
 		// the publisher must NOT re-acquire it (flock LOCK_EX is not re-entrant).
 		if _, err := c.Publish.ApplyUnderLock(ctx, tx); err != nil {
@@ -674,7 +678,7 @@ func sortedTargetIDs(m map[string]state.TargetState) []string {
 // the SHA-256 of the current live file (zero [32]byte on first publish when no
 // live file exists). Mode is the live file's permission bits (0600 default when
 // no live file exists) so the renamed file preserves it.
-func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate) publish.Transaction {
+func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate) (publish.Transaction, error) {
 	var replacements []publish.Replacement
 	seen := map[string]bool{}
 	for _, fe := range plan.Edits {
@@ -684,35 +688,53 @@ func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTar
 		seen[fe.File] = true
 		livePath := filepath.Join(rt.Resolved.CanonicalRoot, filepath.FromSlash(fe.File))
 		tempPath := filepath.Join(candidate.ConfigDir, filepath.FromSlash(fe.File))
-		replacements = append(replacements, buildReplacement(livePath, tempPath))
+		r, err := buildReplacement(livePath, tempPath)
+		if err != nil {
+			return publish.Transaction{}, err
+		}
+		replacements = append(replacements, r)
 	}
 	return publish.Transaction{
 		Prior:        prior,
 		Next:         next,
 		TargetID:     targetID(rt),
+		ManagedRoot:  rt.Resolved.CanonicalRoot,
 		Replacements: replacements,
-	}
+	}, nil
 }
 
 // buildReplacement computes the hash and mode metadata for one managed file
-// replacement from its live and staged temp paths.
-func buildReplacement(livePath, tempPath string) publish.Replacement {
+// replacement from its live and staged temp paths. Any failure to read the
+// staged temp file, or any live-file inspection error other than not-exist, is
+// returned rather than swallowed: a zero NewHash would otherwise surface later
+// as an opaque publisher hash-mismatch instead of the real filesystem error.
+func buildReplacement(livePath, tempPath string) (publish.Replacement, error) {
 	r := publish.Replacement{LivePath: livePath, TempPath: tempPath, Mode: defaultReplacementMode}
 	// NewHash is the SHA-256 of the staged temp file the Builder wrote. This is
 	// the hash applyOne asserts before the atomic rename, so it must match the
 	// on-disk temp bytes exactly.
-	if data, err := os.ReadFile(tempPath); err == nil {
-		r.NewHash = sha256.Sum256(data)
+	data, err := os.ReadFile(tempPath)
+	if err != nil {
+		return publish.Replacement{}, fmt.Errorf("read staged file: %w", err)
 	}
+	r.NewHash = sha256.Sum256(data)
 	// OldHash and Mode come from the live file when it exists; on a first
 	// publish (no live file) OldHash stays the zero digest and Mode the default.
-	if info, err := os.Stat(livePath); err == nil {
+	info, err := os.Stat(livePath)
+	switch {
+	case err == nil:
 		r.Mode = info.Mode()
-		if data, err := os.ReadFile(livePath); err == nil {
-			r.OldHash = sha256.Sum256(data)
+		live, err := os.ReadFile(livePath)
+		if err != nil {
+			return publish.Replacement{}, fmt.Errorf("read live file: %w", err)
 		}
+		r.OldHash = sha256.Sum256(live)
+	case os.IsNotExist(err):
+		// First publish: zero OldHash and the default mode.
+	default:
+		return publish.Replacement{}, fmt.Errorf("stat live file: %w", err)
 	}
-	return r
+	return r, nil
 }
 
 // defaultReplacementMode is the permission applied to a newly created live

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
 )
 
 func TestCodexBarContractFixtures(t *testing.T) {

@@ -1,10 +1,11 @@
 package state
 
 import (
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
 )
 
 // seedState returns a clean state tracking a single healthy codex provider with
@@ -65,6 +66,30 @@ func TestEffectiveModeFormula(t *testing.T) {
 		ps := ProviderState{Quota: tc.quota, Availability: tc.availability}
 		if got := EffectiveMode(ps); got != tc.mode {
 			t.Fatalf("quota=%s availability=%s mode=%s want=%s", tc.quota, tc.availability, got, tc.mode)
+		}
+	}
+}
+
+// TestEffectiveModeZeroAndUnknownValues proves zero axis values normalize to
+// the healthy baseline (so a sparse {low, ""} state is reserve, not normal)
+// while unrecognized enum values fail closed to disabled.
+func TestEffectiveModeZeroAndUnknownValues(t *testing.T) {
+	cases := []struct {
+		quota        Quota
+		availability Availability
+		mode         Mode
+	}{
+		{"", "", ModeNormal},                 // legacy sparse baseline
+		{QuotaLow, "", ModeReserve},          // "" availability = available
+		{"", Unavailable, ModeDisabled},      // "" quota = normal
+		{"garbage", Available, ModeDisabled}, // corrupted quota fails closed
+		{QuotaNormal, "garbage", ModeDisabled},
+		{"garbage", "garbage", ModeDisabled},
+	}
+	for _, tc := range cases {
+		ps := ProviderState{Quota: tc.quota, Availability: tc.availability}
+		if got := EffectiveMode(ps); got != tc.mode {
+			t.Fatalf("quota=%q availability=%q mode=%s want=%s", tc.quota, tc.availability, got, tc.mode)
 		}
 	}
 }
@@ -135,6 +160,27 @@ func TestRefreshFailedDiagnosticOnly(t *testing.T) {
 	d := next.RefreshFailed[0]
 	if d.Provider != "codex" || d.Code != string(hook.RefreshFailed) || d.Summary != status || !d.At.Equal(time.Unix(8, 0)) {
 		t.Fatalf("diagnostic=%+v", d)
+	}
+}
+
+// TestRefreshFailedStatusSanitizedAndBounded proves a hook-controlled status
+// carrying a credential or an oversized payload is sanitized and bounded at
+// ingestion rather than recorded verbatim.
+func TestRefreshFailedStatusSanitizedAndBounded(t *testing.T) {
+	s := seedState()
+	secret := "Bearer sk-live-canary-do-not-persist-1234567890"
+	status := "auth refresh failed: Authorization: " + secret + " " + strings.Repeat("x", 8192)
+	e := hook.Event{Type: hook.RefreshFailed, Provider: "codex", Timestamp: time.Unix(8, 0), Status: &status}
+	next, accepted, _, err := ApplyEvent(s, e, Arrival{Sequence: 1})
+	if err != nil || !accepted {
+		t.Fatalf("accepted=%v err=%v", accepted, err)
+	}
+	got := next.RefreshFailed[0].Summary
+	if strings.Contains(got, "sk-live-canary") {
+		t.Fatalf("credential persisted in refresh-failed summary: %q", got)
+	}
+	if len(got) >= len(status) {
+		t.Fatalf("summary not bounded: len=%d", len(got))
 	}
 }
 

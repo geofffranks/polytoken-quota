@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/geofffranks/polytoken-quota/internal/document"
 )
 
 // FilesystemSourceReader reads the managed subset of Polytoken's filesystem
@@ -244,40 +246,20 @@ type sourceDefinitionWire struct {
 }
 
 func readManagedDefinition(data []byte) (SourceDefinition, bool, error) {
-	start, end, _, ok := frontmatterBounds(data)
+	// Use the shared document locator so discovery/sync agree byte-for-byte
+	// with EditFrontmatter about what counts as frontmatter (BOM prefixes and
+	// trailing whitespace on the fences included) — a definition the editor
+	// can manage must never be invisible to source reading.
+	block, ok := document.Frontmatter(data)
 	if !ok {
 		return SourceDefinition{}, false, nil
 	}
 	var w sourceDefinitionWire
-	if err := yaml.Unmarshal(data[start:end], &w); err != nil {
+	if err := yaml.Unmarshal(block, &w); err != nil {
 		return SourceDefinition{}, false, err
 	}
 	if w.Polytoken == nil || (w.Polytoken.Model == "" && len(w.Polytoken.FallbackModels) == 0) {
 		return SourceDefinition{}, false, nil
 	}
 	return SourceDefinition{Model: w.Polytoken.Model, FallbackModels: append([]string(nil), w.Polytoken.FallbackModels...)}, true, nil
-}
-
-func frontmatterBounds(data []byte) (int, int, int, bool) {
-	if len(data) < 4 || string(data[:3]) != "---" || (data[3] != '\n' && data[3] != '\r') {
-		return 0, 0, 0, false
-	}
-	start := 4
-	if data[3] == '\r' && start < len(data) && data[start] == '\n' {
-		start++
-	}
-	for pos := start; pos < len(data); {
-		lineEnd := pos
-		for lineEnd < len(data) && data[lineEnd] != '\n' && data[lineEnd] != '\r' {
-			lineEnd++
-		}
-		if string(data[pos:lineEnd]) == "---" {
-			return start, pos, lineEnd, true
-		}
-		for lineEnd < len(data) && (data[lineEnd] == '\n' || data[lineEnd] == '\r') {
-			lineEnd++
-		}
-		pos = lineEnd
-	}
-	return 0, 0, 0, false
 }

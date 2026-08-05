@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/service"
 )
 
 func TestFormatTimeZeroIsEmpty(t *testing.T) {
@@ -462,6 +462,22 @@ func TestQuotaCheckNoSecrets(t *testing.T) {
 	for _, secret := range []string{"sk-live-1234567890wxyz", "Bearer abc123", "password=hunter2"} {
 		if strings.Contains(combined, secret) {
 			t.Fatalf("secret %q leaked in output: %s", secret, combined)
+		}
+	}
+}
+
+// TestQuotaCheckRejectsEmptyProviderValue proves `--provider ""` (and
+// whitespace-only values, e.g. an unset shell variable) is rejected instead of
+// being treated as an unfiltered check.
+func TestQuotaCheckRejectsEmptyProviderValue(t *testing.T) {
+	for _, value := range []string{"", "   "} {
+		spy := newDepsSpy()
+		got := Run(context.Background(), []string{"quota", "check", "--provider", value}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if got != ExitRejected {
+			t.Fatalf("provider=%q exit=%d want=%d", value, got, ExitRejected)
+		}
+		if spy.QuotaCheckSet && spy.QuotaCheckProvider != "" {
+			t.Fatalf("empty provider forwarded to quota check: %q", spy.QuotaCheckProvider)
 		}
 	}
 }

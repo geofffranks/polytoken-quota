@@ -10,8 +10,8 @@ package service
 import (
 	"context"
 
-	"github.com/geofffranks/codexbar-hooks/internal/publish"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/publish"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // PublisherAdapter adapts a concrete publish.Publisher to the service.Publisher

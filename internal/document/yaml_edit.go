@@ -244,7 +244,7 @@ func (d *doc) insertSequenceKey(raw []byte, path []string, items []string) ([]by
 // trailing newline is removed; for a key whose value spans multiple lines, all
 // of those lines are removed. Sibling keys are untouched.
 func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
-	val, keyNode, _, exists, err := d.resolveValue(path)
+	val, keyNode, parent, exists, err := d.resolveValue(path)
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +253,13 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 	}
 	if keyNode == nil {
 		return nil, newError("document: cannot locate key line for %q", strings.Join(path, "."))
+	}
+	// A flow/inline parent mapping (`defaults: {full: x, mini: y}`) shares one
+	// physical line between the addressed key and its unmanaged siblings, so
+	// whole-line removal would erase the siblings too. Comma-aware span surgery
+	// is not supported; fail closed rather than corrupt unmanaged fields.
+	if parent != nil && parent.Kind == yaml.MappingNode && parent.Style&yaml.FlowStyle != 0 {
+		return nil, newError("document: %q is inside a flow-style mapping (not removable; use block style)", strings.Join(path, "."))
 	}
 	lineStart := d.offset(keyNode.Line, 1)
 	// End of the removed region: end of the last line occupied by the value.
@@ -275,14 +282,33 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 // first value byte for plain scalars, so unquoted values need no adjustment.
 func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 	start := d.offset(n.Line, n.Column)
-	if n.Style == yaml.SingleQuotedStyle || n.Style == yaml.DoubleQuotedStyle {
-		// start already points at the opening quote.
-		quote := d.raw[start]
+	if n.Style == yaml.DoubleQuotedStyle {
+		// start points at the opening quote. A backslash escapes the next
+		// byte (including `\"`), so an escaped quote never ends the span.
 		end := start + 1
 		for end < len(d.raw) {
-			if d.raw[end] == quote {
-				end++
-				break
+			switch d.raw[end] {
+			case '\\':
+				end += 2
+				continue
+			case '"':
+				return start, end + 1
+			}
+			end++
+		}
+		return start, end
+	}
+	if n.Style == yaml.SingleQuotedStyle {
+		// start points at the opening quote. A doubled quote ('') is an
+		// escaped quote inside the scalar, not the closing quote.
+		end := start + 1
+		for end < len(d.raw) {
+			if d.raw[end] == '\'' {
+				if end+1 < len(d.raw) && d.raw[end+1] == '\'' {
+					end += 2
+					continue
+				}
+				return start, end + 1
 			}
 			end++
 		}

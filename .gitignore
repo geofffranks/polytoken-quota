@@ -10,7 +10,7 @@
 .bash-guard
 
 # Approved planning / design artifacts — kept outside commits per artifact policy
-# (canonical home: /home/dev/workspace/codexbar-hooks/docs/superpowers).
+# (canonical home: docs/superpowers/ in the local working tree).
 docs/superpowers/
 
 # Temporary research / validation scratch directories — do not track and do not delete.

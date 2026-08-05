@@ -18,9 +18,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 	"gopkg.in/yaml.v3"
 )
 
@@ -109,9 +109,13 @@ func TestContractStagingFoldsLayers(t *testing.T) {
 	if got := configPath(t, cfg, "models.zai/glm.enabled"); got != true {
 		t.Fatalf("zai/glm.enabled = %v want true (global)", got)
 	}
-	// Auth redacted (inert).
-	if got := configPath(t, cfg, "providers.codex.api_key"); got == "synthetic-codex-key-do-not-use" {
+	// Auth redacted (inert): the real Polytoken secret location is
+	// providers.<id>.auth.key, and the synthetic key must not survive.
+	if got := configPath(t, cfg, "providers.codex.auth.key"); got == "synthetic-codex-key-do-not-use" {
 		t.Fatal("source secret present in inert staging")
+	}
+	if data, err := os.ReadFile(filepath.Join(c.ConfigDir, "config.yaml")); err != nil || bytes.Contains(data, []byte("synthetic-")) {
+		t.Fatalf("staged config still carries a synthetic secret (err=%v)", err)
 	}
 	// Both effective definitions present.
 	for _, rel := range []string{"subagents/global.md", "subagents/project.md"} {

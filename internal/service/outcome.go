@@ -3,7 +3,7 @@
 // process exit code.
 package service
 
-import "github.com/geofffranks/codexbar-hooks/internal/state"
+import "github.com/geofffranks/polytoken-quota/internal/state"
 
 // TargetOutcome describes the result of attempting to reconcile a single target
 // (the global target or a registered project target).

@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/cli"
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/publish"
-	"github.com/geofffranks/codexbar-hooks/internal/service"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/cli"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/publish"
+	"github.com/geofffranks/polytoken-quota/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // config resolves every path and setting the Coordinator needs from the
@@ -117,8 +117,34 @@ func inheritedEnvironment(inherited []string) map[string]string {
 	return env
 }
 
+// allowInheritedEnvKey reports whether an inherited process variable may be
+// forwarded to the Polytoken validation subprocess without appearing in the
+// explicit ~/.config/polytoken.env opt-in file. Only baseline process
+// plumbing (PATH, temp dir, locale, terminal, timezone) and POLYTOKEN_*
+// variables qualify; everything else — cloud credentials, CI tokens, provider
+// keys — is excluded so unrelated secrets never reach validation.
+func allowInheritedEnvKey(key string) bool {
+	switch key {
+	case "PATH", "TMPDIR", "TERM", "TZ", "LANG", "LC_ALL":
+		return true
+	}
+	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "POLYTOKEN_")
+}
+
+// loadPolytokenEnv builds the validation subprocess environment: allowlisted
+// inherited variables, plus the variables explicitly named in the
+// ~/.config/polytoken.env opt-in file. A file-named variable keeps its
+// inherited process value when one is set (non-empty), preserving the
+// process-overrides-file precedence — but a variable must be named in the
+// file (or allowlisted) to be forwarded at all.
 func loadPolytokenEnv(path string, inherited []string) (map[string]string, error) {
-	env := inheritedEnvironment(inherited)
+	all := inheritedEnvironment(inherited)
+	env := make(map[string]string, len(all))
+	for key, value := range all {
+		if allowInheritedEnvKey(key) {
+			env[key] = value
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -152,7 +178,11 @@ func loadPolytokenEnv(path string, inherited []string) (map[string]string, error
 			}
 			value = decoded
 		}
-		if existing, exists := env[key]; !exists || existing == "" {
+		if existing, exists := all[key]; exists && existing != "" {
+			// A file-named variable with a non-empty inherited value keeps the
+			// process value (explicit process override of the file).
+			env[key] = existing
+		} else {
 			env[key] = value
 		}
 	}
@@ -205,20 +235,27 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Sources:  staging.FSMaterializer{GlobalDir: cfg.GlobalDir},
 	}
 
+	loader := service.FilePolicyLoader{Path: cfg.DesiredPath}
+	registry := service.NewTargetRegistry()
 	return &service.Coordinator{
 		Lock:            publish.NewFileLock(cfg.LockPath),
-		Policy:          service.FilePolicyLoader{Path: cfg.DesiredPath},
+		Policy:          loader,
 		PolicyWriter:    policy.NewWriter(cfg.DesiredPath),
 		State:           service.StoreState{Store: store},
-		Targets:         service.NewTargetRegistry(),
+		Targets:         registry,
 		Builder:         service.NewReconciler(),
 		Stage:           service.StagingStager{Builder: builder},
 		Validate:        service.ValidateRunner{Runner: runner},
 		Publish:         service.PublisherAdapter{Publisher: pub},
 		DiagnosticState: store,
-		Sources:         policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
-		QuotaPoller:     service.NewQuotaPoller(),
-		JournalPath:     cfg.JournalPath,
+		DoctorInspectors: service.DoctorInspectors{
+			Policy:    service.PolicyDoctorInspector{Loader: loader},
+			Targets:   service.TargetDoctorInspector{Loader: loader, Targets: registry},
+			Publisher: service.PublishDoctorInspector{JournalPath: cfg.JournalPath},
+		},
+		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller: service.NewQuotaPoller(),
+		JournalPath: cfg.JournalPath,
 	}
 }
 

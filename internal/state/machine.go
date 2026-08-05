@@ -5,20 +5,37 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
 
 // EffectiveMode derives the reconciler-internal effective mode from a provider's
 // independent quota and availability axes:
 //
-//	unavailable OR exhausted => disabled
-//	available  AND low       => reserve
-//	available  AND normal    => normal
+//	unavailable OR exhausted     => disabled
+//	available  AND low           => reserve
+//	available  AND normal        => normal
+//	unknown/corrupted axis value => disabled (fail closed)
+//
+// Zero values ("" on either axis) are legacy/sparse states normalized to the
+// healthy baseline for that axis, matching how manual-disable updates seed
+// untracked providers. Any other unrecognized value is a corrupted observation
+// and must never enable a provider.
 func EffectiveMode(ps ProviderState) Mode {
-	if ps.ManualDisabled || ps.Availability == Unavailable || ps.Quota == QuotaExhausted {
+	q, av := ps.Quota, ps.Availability
+	if q == "" {
+		q = QuotaNormal
+	}
+	if av == "" {
+		av = Available
+	}
+	if ps.ManualDisabled || av == Unavailable || q == QuotaExhausted {
 		return ModeDisabled
 	}
-	if ps.Availability == Available && ps.Quota == QuotaLow {
+	if !validQuota(q) || !validAvailability(av) {
+		return ModeDisabled
+	}
+	if av == Available && q == QuotaLow {
 		return ModeReserve
 	}
 	return ModeNormal
@@ -174,7 +191,10 @@ func applyAxisEvent(s State, e hook.Event, a Arrival) (State, bool, Diagnostic, 
 func applyRefreshFailed(s State, e hook.Event) (State, bool, Diagnostic, error) {
 	summary := ""
 	if e.Status != nil {
-		summary = *e.Status
+		// The status string is hook-controlled input: sanitize and bound it at
+		// ingestion so a credential-bearing or oversized provider status can
+		// never reach the persisted state or diagnostic output verbatim.
+		summary = quota.SanitizeText(*e.Status)
 	}
 	diag := Diagnostic{
 		Code:     string(e.Type),

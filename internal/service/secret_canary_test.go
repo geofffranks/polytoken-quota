@@ -20,14 +20,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/hook"
-	"github.com/geofffranks/codexbar-hooks/internal/publish"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
-	"github.com/geofffranks/codexbar-hooks/internal/testutil"
-	"github.com/geofffranks/codexbar-hooks/internal/validate"
+	"github.com/geofffranks/polytoken-quota/internal/hook"
+	"github.com/geofffranks/polytoken-quota/internal/publish"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/testutil"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // canarySecret is the synthetic, non-personal sentinel injected everywhere.

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // --- test stubs implementing the inspector interfaces -----------------------
@@ -400,6 +400,42 @@ func TestDoctorSurfacesPersistedManualResolutionFailure(t *testing.T) {
 	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
 	if !r.Actionable() || !slices.Contains(findingCodes(r), "target-pending") {
 		t.Fatalf("report did not surface persisted failure: %+v", r)
+	}
+}
+
+// TestDoctorSanitizesTamperedPendingFailure proves a secret-bearing pending
+// failure written directly into the state file (bypassing the sanitizing Save
+// path) is re-sanitized at the doctor output boundary in both message and
+// structured fields.
+func TestDoctorSanitizesTamperedPendingFailure(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{
+		"global": {Pending: &state.ApplyFailure{
+			TargetID:    "global\napi_key=CANARY-tampered",
+			Stage:       "publish",
+			File:        "/home/alice/.config/polytoken/config.yaml",
+			Summary:     "failed: Authorization: Bearer CANARY-tampered-token",
+			Remediation: "token=CANARY-tampered rerun",
+			LiveStatus:  "last-known-good",
+		}},
+	}}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	f := pendingFinding(t, r)
+	for _, field := range []string{f.Message, f.TargetID, f.File, f.Chain, f.Remediation} {
+		if strings.Contains(field, "CANARY-tampered") {
+			t.Fatalf("tampered secret leaked through doctor output: %+v", f)
+		}
+		if strings.Contains(field, "alice") {
+			t.Fatalf("home path leaked through doctor output: %+v", f)
+		}
 	}
 }
 

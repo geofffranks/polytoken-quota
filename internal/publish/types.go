@@ -18,7 +18,7 @@ import (
 	"io/fs"
 	"os"
 
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // JournalSchema is the on-disk journal schema version. It is bumped only on
@@ -48,25 +48,36 @@ type Journal struct {
 	PriorRevision uint64
 	NextRevision  uint64
 	TargetID      string
-	Replacements  []Replacement
-	Intended      state.TargetState
+	// ManagedRoot is the canonical target root the transaction's live paths
+	// were validated against. Recovery re-validates every journal path
+	// against it before reading or writing anything.
+	ManagedRoot  string
+	Replacements []Replacement
+	Intended     state.TargetState
 }
 
 // Transaction is the input to Publisher.Apply. Prior is the committed observed
 // state before this mutation; Next is the accepted state to commit; TargetID is
 // the target being applied; Replacements are the validated candidate file
-// writes.
+// writes. ManagedRoot is the canonical root of the target being applied: every
+// replacement's live path must stay within it. When empty, the Publisher-level
+// ManagedRoot (if any) applies instead.
 type Transaction struct {
 	Prior        state.State
 	Next         state.State
 	TargetID     string
+	ManagedRoot  string
 	Replacements []Replacement
 }
 
-// RecoveryReport summarizes a single recovery invocation.
+// RecoveryReport summarizes a single recovery invocation. CleanupError is a
+// non-fatal diagnostic: the committed state is already durable, but a stale
+// journal (or backup) could not be removed and will be retried/ignored on the
+// next recovery. It never fails the recovery itself.
 type RecoveryReport struct {
-	Action   string // "noop", "roll-forward", "restore", or "corrupt"
-	TargetID string
+	Action       string // "noop", "roll-forward", "restore", or "corrupt"
+	TargetID     string
+	CleanupError string
 }
 
 // Recovery action names.

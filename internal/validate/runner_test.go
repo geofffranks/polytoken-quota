@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 )
 
 // --- fake CommandRunner -----------------------------------------------------
@@ -79,14 +79,18 @@ func newRunner(c CommandRunner) Runner {
 	return Runner{Binary: "/opt/polytoken", Commands: c, MaxOutput: 4096, Sanitize: sanitize}
 }
 
-func TestExecRunnerPreservesInheritedEnvironmentWhenOverriding(t *testing.T) {
+// TestExecRunnerDoesNotInheritParentEnvironment proves the validation
+// subprocess sees ONLY the explicitly provided variables: an inherited
+// credential-shaped variable in the parent process must be invisible to the
+// child, so unrelated secrets can never reach the validated binary.
+func TestExecRunnerDoesNotInheritParentEnvironment(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("/bin/sh unavailable")
 	}
-	t.Setenv("POLYTOKEN_INHERITED_ENV", "inherited")
-	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s:%s \"$POLYTOKEN_INHERITED_ENV\" \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
-	if err != nil || exit != 0 || string(out) != "inherited:present" {
-		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	t.Setenv("SECRET_CLOUD_TOKEN", "canary-must-not-leak")
+	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s:%s \"$SECRET_CLOUD_TOKEN\" \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
+	if err != nil || exit != 0 || string(out) != ":present" {
+		t.Fatalf("out=%q exit=%d err=%v (inherited secret visible to child?)", out, exit, err)
 	}
 }
 
@@ -272,6 +276,14 @@ func TestSanitizeRedactsSecrets(t *testing.T) {
 		"temp path":        "wrote /tmp/quota-stage-xyz/config.yaml done",
 		"email":            "account alice@example.com registered",
 		"long blob":        "key=AKIAIOSFODNN7EXAMPLE0123456789abcdefghij",
+		// Quoted/JSON spellings and additional credential key names.
+		"json quoted key":  `parse error near {"api_key":"sk-live-short"}`,
+		"json spaced":      `"refresh_token" : "SECRET-rt-1"`,
+		"client secret":    "client_secret=SECRET-cs-2 rejected",
+		"private key":      "private_key: SECRET-pk-3",
+		"x-api-key header": "x-api-key: SECRET-xk-4",
+		"cookie":           `Cookie: session=SECRET-ck-5`,
+		"url userinfo":     "GET https://alice:SECRET-pw-6@api.test/v1 failed",
 	}
 	forbidden := []string{
 		"SECRET", "alice", "sk-live-", "eyJhbGci", "example.com",

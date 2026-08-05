@@ -9,11 +9,11 @@ package service
 import (
 	"context"
 
-	"github.com/geofffranks/codexbar-hooks/internal/doctor"
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // Diagnoser performs the read-only diagnostic operations surfaced by the CLI.
@@ -74,18 +74,22 @@ type ChainOrderReport struct {
 // and effective order (when routing is enabled), per-provider quota state, and
 // the unconditional running-session advisory.
 type StatusReport struct {
-	JSON                   bool                  `json:"-"`
-	Revision               uint64                `json:"revision"`
-	Providers              []ProviderStatus      `json:"providers,omitempty"`
-	Targets                []TargetStatus        `json:"targets,omitempty"`
-	Pending                int                   `json:"pending"`
-	Drift                  bool                  `json:"drift"`
-	RoutingEnabled         bool                  `json:"routing_enabled"`
-	Ranking                []RankEntryReport     `json:"ranking,omitempty"`
-	EffectiveOrders        []ChainOrderReport    `json:"effective_orders,omitempty"`
-	Quota                  []QuotaSnapshotReport `json:"quota,omitempty"`
-	Problem                bool                  `json:"problem"`
-	RunningSessionAdvisory string                `json:"running_session_advisory"`
+	JSON            bool                  `json:"-"`
+	Revision        uint64                `json:"revision"`
+	Providers       []ProviderStatus      `json:"providers,omitempty"`
+	Targets         []TargetStatus        `json:"targets,omitempty"`
+	Pending         int                   `json:"pending"`
+	Drift           bool                  `json:"drift"`
+	RoutingEnabled  bool                  `json:"routing_enabled"`
+	Ranking         []RankEntryReport     `json:"ranking,omitempty"`
+	EffectiveOrders []ChainOrderReport    `json:"effective_orders,omitempty"`
+	Quota           []QuotaSnapshotReport `json:"quota,omitempty"`
+	Problem         bool                  `json:"problem"`
+	// Error carries a sanitized diagnostic when the report could not be
+	// produced at all (state unreadable / no store). Callers must treat a
+	// non-empty Error as a failed diagnostic, never as a clean report.
+	Error                  string `json:"error,omitempty"`
+	RunningSessionAdvisory string `json:"running_session_advisory"`
 }
 
 // Compile-time assertions that *Coordinator implements both Mutator (via its
@@ -101,10 +105,15 @@ var (
 func (c *Coordinator) Status(_ context.Context, _ bool) StatusReport {
 	report := StatusReport{}
 	if c.State == nil {
+		report.Error = "no state store configured"
 		return report
 	}
 	observed, err := c.State.LoadState()
 	if err != nil {
+		// A malformed or unreadable state file must never render as a clean
+		// "in sync" report; surface the sanitized failure so the CLI can exit
+		// non-zero.
+		report.Error = sanitizeFailure(err.Error())
 		return report
 	}
 	report.Revision = observed.Revision

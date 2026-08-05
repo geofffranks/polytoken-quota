@@ -12,7 +12,7 @@ package policy
 import (
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/routing"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 )
 
 // MappingID names a provider mapping. It is the desired.yaml `providers` map key.

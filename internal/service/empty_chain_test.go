@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/staging"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
-	"github.com/geofffranks/codexbar-hooks/internal/testutil"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/testutil"
 )
 
 // emptyChainDesired is a policy whose single definition chain has two entries,

@@ -1,8 +1,8 @@
 package service
 
 import (
-	"github.com/geofffranks/codexbar-hooks/internal/quota"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // aggregateMappingState projects the CodexBar provider states backing one

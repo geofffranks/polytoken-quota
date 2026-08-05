@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 )
 
 // TestResolveRejectsTraversalAndSymlink is the Task 4 blueprint contract test:
@@ -110,35 +110,49 @@ func TestResolveExplicitProjectsOnly(t *testing.T) {
 	}
 }
 
-// TestDiscoverProposesModelBearingFiles proves Discover proposes only files
-// containing polytoken.model or polytoken.fallback_models within one registered
-// root, without adopting them.
+// TestDiscoverProposesModelBearingFiles proves Discover proposes files whose
+// frontmatter declares polytoken.model or polytoken.fallback_models in the
+// nested form real Polytoken definitions use, plus dotted-key legacy
+// spellings, within one registered root, without adopting them.
 func TestDiscoverProposesModelBearingFiles(t *testing.T) {
 	root := t.TempDir()
-	m1 := filepath.Join(root, "agents", "agent.md")
-	m2 := filepath.Join(root, "helpers", "sub.md")
-	plain := filepath.Join(root, "README.md")
-	for _, p := range []string{m1, m2, plain} {
+	files := map[string]string{
+		// Nested frontmatter — the shape Polytoken actually loads.
+		"agents/agent.md": "---\npolytoken:\n  model: codex/gpt-5.6-sol\n---\n# Agent\n",
+		// Nested fallback_models without model.
+		"helpers/sub.md": "---\ndescription: helper\npolytoken:\n  fallback_models:\n    - zai/glm-5.2\n---\nbody\n",
+		// Dotted legacy spelling, still proposed.
+		"legacy/dotted.md": "---\npolytoken.model: codex/gpt-5.6-sol\n---\n",
+		// Negative: plain file, no polytoken at all.
+		"README.md": "# project readme\n",
+		// Negative: polytoken mapping without managed model fields.
+		"agents/toolonly.md": "---\npolytoken:\n  tools: [file_read]\n---\nbody\n",
+		// Negative: prose mention of the word polytoken in the body only.
+		"docs/notes.md": "---\ntitle: notes\n---\npolytoken is a harness; model: not frontmatter\n",
+		// Negative: malformed frontmatter YAML must not fail discovery.
+		"broken/bad.md": "---\npolytoken: [unclosed\n  model: x\n---\n",
+	}
+	for rel, content := range files {
+		p := filepath.Join(root, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := os.WriteFile(m1, []byte("---\npolytoken.model: codex/gpt-5.6-sol\n---\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(m2, []byte("polytoken.fallback_models: [zai/glm-5.2]\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(plain, []byte("# project readme\n"), 0o600); err != nil {
-		t.Fatal(err)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got, err := Discover(root)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
-	want := []string{"agents/agent.md", "helpers/sub.md"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"agents/agent.md", "helpers/sub.md", "legacy/dotted.md"}
+	if len(got) != len(want) {
 		t.Fatalf("got=%v want=%v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got=%v want=%v", got, want)
+		}
 	}
 }
 

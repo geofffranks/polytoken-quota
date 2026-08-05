@@ -12,8 +12,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/geofffranks/codexbar-hooks/internal/policy"
-	"github.com/geofffranks/codexbar-hooks/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // FuzzReconcileDuplicateIdempotent proves Build is idempotent under repeated

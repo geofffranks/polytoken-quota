@@ -24,9 +24,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/geofffranks/codexbar-hooks/internal/document"
-	"github.com/geofffranks/codexbar-hooks/internal/reconcile"
-	"github.com/geofffranks/codexbar-hooks/internal/target"
+	"github.com/geofffranks/polytoken-quota/internal/document"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 	"gopkg.in/yaml.v3"
 )
 
@@ -133,6 +133,21 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 	configDir := filepath.Join(root, configSubdir)
 	userConfigDir := filepath.Join(root, userConfigSubdir)
 	workDir := filepath.Join(root, workSubdir)
+	// Claim the deterministic root exclusively for this build: remove any
+	// stale prior root (or a symlink planted at the path, which RemoveAll
+	// deletes without following), then create it fresh with os.Mkdir so no
+	// stale files, foreign ownership, or redirection survive into this
+	// candidate. The coordinator serializes builds per target under the
+	// advisory lock, so the exclusive create cannot race a sibling build.
+	if err := os.MkdirAll(b.TempRoot, dirPerm); err != nil {
+		return Candidate{}, fmt.Errorf("staging: create temp root: %w", err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return Candidate{}, fmt.Errorf("staging: clear stale staging root: %w", err)
+	}
+	if err := os.Mkdir(root, dirPerm); err != nil {
+		return Candidate{}, fmt.Errorf("staging: create staging root: %w", err)
+	}
 	if err := os.MkdirAll(configDir, dirPerm); err != nil {
 		return Candidate{}, fmt.Errorf("staging: create config dir: %w", err)
 	}
@@ -347,13 +362,24 @@ func mergeFiles(global, project map[string][]byte) map[string][]byte {
 // auth and redacted under AuthInert. Matching is case-insensitive on the final
 // path segment.
 var authValueKeys = map[string]bool{
-	"api_key":      true,
-	"apikey":       true,
-	"token":        true,
-	"secret":       true,
-	"password":     true,
-	"access_token": true,
-	"auth_token":   true,
+	// "key" covers the real Polytoken provider auth shape
+	// (providers.<id>.auth.key). Redacting every leaf named key is
+	// deliberately broad: staging is validation-only, and over-redacting a
+	// non-secret string is harmless while under-redacting leaks a credential.
+	"key":           true,
+	"api_key":       true,
+	"api-key":       true,
+	"apikey":        true,
+	"token":         true,
+	"secret":        true,
+	"password":      true,
+	"access_token":  true,
+	"auth_token":    true,
+	"refresh_token": true,
+	"client_secret": true,
+	"private_key":   true,
+	"authorization": true,
+	"credentials":   true,
 }
 
 // inertSecret is the schema-valid placeholder substituted for redacted secrets.
@@ -417,7 +443,13 @@ func (m FSMaterializer) Project(ctx context.Context, res target.Resolved) (Layer
 // configuration and backup files may carry raw secrets that bypass AuthInert
 // redaction.
 func readLayer(dir string) (Layer, error) {
-	cfg, err := os.ReadFile(filepath.Join(dir, stagedConfigFile))
+	cfgPath := filepath.Join(dir, stagedConfigFile)
+	// The layer's config.yaml must be a regular file, not a symlink that could
+	// pull outside content into staging.
+	if info, lerr := os.Lstat(cfgPath); lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return Layer{}, fmt.Errorf("read config: %s is a symlink", stagedConfigFile)
+	}
+	cfg, err := os.ReadFile(cfgPath)
 	if err != nil {
 		return Layer{}, fmt.Errorf("read config: %w", err)
 	}
@@ -448,6 +480,13 @@ func readLayer(dir string) (Layer, error) {
 		}
 		relSlash := filepath.ToSlash(rel)
 		if shouldExcludeFile(relSlash) {
+			return nil
+		}
+		// Never follow a symlinked file: a benign-named link pointing outside
+		// the layer would otherwise copy arbitrary outside content (possibly a
+		// credential file) into the staging root. WalkDir already refuses to
+		// descend into symlinked directories; skip link files the same way.
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		data, rerr := os.ReadFile(path)
