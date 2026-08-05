@@ -123,7 +123,10 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 		}
 	}
 	if o.Error != nil {
-		fmt.Fprintln(stderr, o.Error)
+		// Same sanitizer as the mutation path: a staging/validation error can
+		// carry paths or credential fragments, and dry-run output is no less
+		// persistent than any other terminal output.
+		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(o.Error.Error())))
 	}
 	if !o.Accepted {
 		return ExitRejected

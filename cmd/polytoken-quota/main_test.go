@@ -54,12 +54,51 @@ func TestLoadPolytokenEnvParsesAndPreservesExportedOverrides(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# comment\nFOO=from-file\nexport BAR='quoted value'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadPolytokenEnv(path, []string{"FOO=from-process", "KEEP=value"})
+	got, err := loadPolytokenEnv(path, []string{"FOO=from-process", "UNRELATED=value"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["FOO"] != "from-process" || got["BAR"] != "quoted value" || got["KEEP"] != "value" {
+	if got["FOO"] != "from-process" || got["BAR"] != "quoted value" {
 		t.Fatalf("env=%v", got)
+	}
+	// An inherited variable neither allowlisted nor named in the file must
+	// not be forwarded to the validation subprocess.
+	if _, leaked := got["UNRELATED"]; leaked {
+		t.Fatalf("unrelated inherited variable forwarded: %v", got)
+	}
+}
+
+// TestLoadPolytokenEnvExcludesInheritedSecrets proves credential-shaped
+// inherited variables (cloud tokens, CI secrets, provider keys) never reach
+// the validation environment unless explicitly named in polytoken.env, while
+// baseline plumbing (PATH) and POLYTOKEN_* variables pass through.
+func TestLoadPolytokenEnvExcludesInheritedSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "polytoken.env")
+	if err := os.WriteFile(path, []byte("OPTED_IN_TOKEN=from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inherited := []string{
+		"AWS_SECRET_ACCESS_KEY=secret",
+		"GITHUB_TOKEN=secret",
+		"OPENAI_API_KEY=secret",
+		"PATH=/usr/bin",
+		"POLYTOKEN_DEBUG=1",
+		"OPTED_IN_TOKEN=from-process",
+	}
+	got, err := loadPolytokenEnv(path, inherited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY"} {
+		if _, leaked := got[key]; leaked {
+			t.Fatalf("inherited secret %s forwarded: %v", key, got)
+		}
+	}
+	if got["PATH"] != "/usr/bin" || got["POLYTOKEN_DEBUG"] != "1" {
+		t.Fatalf("allowlisted variables missing: %v", got)
+	}
+	if got["OPTED_IN_TOKEN"] != "from-process" {
+		t.Fatalf("file-named variable should keep process value: %v", got)
 	}
 }
 

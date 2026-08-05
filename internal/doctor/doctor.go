@@ -19,6 +19,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/geofffranks/codexbar-hooks/internal/quota"
 	"github.com/geofffranks/codexbar-hooks/internal/state"
 )
 
@@ -191,23 +192,29 @@ func safeIdentifier(value string) string {
 // ApplyFailure. The Message carries the full persisted-error detail: last
 // successful and latest attempted revision/timestamp, failure stage, affected
 // chain/file, sanitized command error, current reproducibility, and live status.
+//
+// ApplyFailure fields are documented as sanitized at ingestion, but the state
+// file is long-lived and hand-editable, so every free-text field is
+// re-sanitized (and identifiers re-validated) here at the output boundary —
+// doctor text/JSON must never echo a stale or tampered state file verbatim.
 func pendingTargetFinding(id string, ts state.TargetState) Finding {
 	af := ts.Pending
 	msg := fmt.Sprintf(
 		"target %s pending: stage=%s attempted_revision=%d attempted_at=%s last_successful_revision=%d last_successful_at=%s summary=%q reproduces=%v live_status=%s",
-		id, af.Stage, af.AttemptedRevision, af.AttemptedAt, af.LastSuccessfulRevision, af.LastSuccessfulAt,
-		af.Summary, af.Reproduces, af.LiveStatus,
+		safeIdentifier(id), quota.SanitizeText(af.Stage), af.AttemptedRevision, af.AttemptedAt,
+		af.LastSuccessfulRevision, af.LastSuccessfulAt,
+		quota.SanitizeText(af.Summary), af.Reproduces, quota.SanitizeText(af.LiveStatus),
 	)
-	remediation := af.Remediation
+	remediation := quota.SanitizeText(af.Remediation)
 	if remediation == "" {
 		remediation = "resolve the pending error and re-run reconcile"
 	}
 	return Finding{
 		Code:        "target-pending",
 		Message:     msg,
-		TargetID:    af.TargetID,
-		File:        af.File,
-		Chain:       af.Chain,
+		TargetID:    safeIdentifier(af.TargetID),
+		File:        quota.SanitizeText(af.File),
+		Chain:       quota.SanitizeText(af.Chain),
 		Remediation: remediation,
 		Severity:    Error,
 	}

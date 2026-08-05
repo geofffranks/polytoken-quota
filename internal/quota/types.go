@@ -164,14 +164,19 @@ var (
 	reURLCreds = regexp.MustCompile(`(?i)(https?://)[^/\s:@]+:[^/\s@]+@`)
 	reBearer   = regexp.MustCompile(`(?i)\b(bearer)\s+[^\s]+`)
 	reSecretKV = regexp.MustCompile(`(?i)(api[_-]?key|apikey|token|secret|password|passwd|account|acct)(\s*[=:]\s*)?[^\s]+`)
+	reHomePath = regexp.MustCompile(`/home/[^\s]+|/Users/[^\s]+`)
+	reTempPath = regexp.MustCompile(`/tmp/[^\s]+|/var/folders/[^\s]+`)
 )
 
 // sanitize strips known secret patterns from s and bounds its length. It never
-// preserves credentials, bearer tokens, or account-like substrings.
+// preserves credentials, bearer tokens, account-like substrings, or
+// user-identifying home/temp paths.
 func sanitize(s string) string {
 	s = reURLCreds.ReplaceAllString(s, "$1")
 	s = reBearer.ReplaceAllString(s, "[redacted]")
 	s = reSecretKV.ReplaceAllString(s, "[redacted]")
+	s = reHomePath.ReplaceAllString(s, "[home]")
+	s = reTempPath.ReplaceAllString(s, "[tmp]")
 	if len(s) > maxErrorSummary {
 		// Keep the UTF-8 output within the byte bound while reserving space for
 		// the three-byte ellipsis. Walk runes so truncation never splits UTF-8.

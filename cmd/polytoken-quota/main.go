@@ -117,8 +117,34 @@ func inheritedEnvironment(inherited []string) map[string]string {
 	return env
 }
 
+// allowInheritedEnvKey reports whether an inherited process variable may be
+// forwarded to the Polytoken validation subprocess without appearing in the
+// explicit ~/.config/polytoken.env opt-in file. Only baseline process
+// plumbing (PATH, temp dir, locale, terminal, timezone) and POLYTOKEN_*
+// variables qualify; everything else — cloud credentials, CI tokens, provider
+// keys — is excluded so unrelated secrets never reach validation.
+func allowInheritedEnvKey(key string) bool {
+	switch key {
+	case "PATH", "TMPDIR", "TERM", "TZ", "LANG", "LC_ALL":
+		return true
+	}
+	return strings.HasPrefix(key, "LC_") || strings.HasPrefix(key, "POLYTOKEN_")
+}
+
+// loadPolytokenEnv builds the validation subprocess environment: allowlisted
+// inherited variables, plus the variables explicitly named in the
+// ~/.config/polytoken.env opt-in file. A file-named variable keeps its
+// inherited process value when one is set (non-empty), preserving the
+// process-overrides-file precedence — but a variable must be named in the
+// file (or allowlisted) to be forwarded at all.
 func loadPolytokenEnv(path string, inherited []string) (map[string]string, error) {
-	env := inheritedEnvironment(inherited)
+	all := inheritedEnvironment(inherited)
+	env := make(map[string]string, len(all))
+	for key, value := range all {
+		if allowInheritedEnvKey(key) {
+			env[key] = value
+		}
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -152,7 +178,11 @@ func loadPolytokenEnv(path string, inherited []string) (map[string]string, error
 			}
 			value = decoded
 		}
-		if existing, exists := env[key]; !exists || existing == "" {
+		if existing, exists := all[key]; exists && existing != "" {
+			// A file-named variable with a non-empty inherited value keeps the
+			// process value (explicit process override of the file).
+			env[key] = existing
+		} else {
 			env[key] = value
 		}
 	}
