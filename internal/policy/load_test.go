@@ -102,6 +102,42 @@ func TestLoadSyntheticFixture(t *testing.T) {
 	}
 }
 
+// TestParseModelRefGrammar pins the canonical model-reference grammar: bare
+// names and exactly-one trailing "(suffix)" are valid; unbalanced, empty, or
+// trailing-junk spellings are rejected. Policy loading and reconciliation both
+// use this parser, so acceptance can never diverge between them.
+func TestParseModelRefGrammar(t *testing.T) {
+	valid := map[string][2]string{
+		"codex/gpt":              {"codex/gpt", ""},
+		"codex/gpt-5.6-sol(med)": {"codex/gpt-5.6-sol", "med"},
+	}
+	for entry, want := range valid {
+		base, suffix, err := ParseModelRef(entry)
+		if err != nil || base != want[0] || suffix != want[1] {
+			t.Fatalf("ParseModelRef(%q) = %q,%q,%v want %q,%q", entry, base, suffix, err, want[0], want[1])
+		}
+	}
+	invalid := []string{"", "model(", "model)", "model()", "model(foo)junk", "(foo)", "model(f(o)o)"}
+	for _, entry := range invalid {
+		if _, _, err := ParseModelRef(entry); err == nil {
+			t.Fatalf("ParseModelRef(%q) accepted malformed spelling", entry)
+		}
+	}
+}
+
+// TestValidateChainRejectsMalformedSuffix proves a chain entry with a
+// malformed reasoning suffix fails policy validation instead of being
+// truncated at the first parenthesis and described as validated.
+func TestValidateChainRejectsMalformedSuffix(t *testing.T) {
+	owner := map[string]MappingID{"codex/gpt": "codex"}
+	if err := validateChain(owner, Chain{"codex/gpt(high)junk"}); err == nil {
+		t.Fatal("malformed suffix accepted by validateChain")
+	}
+	if err := validateChain(owner, Chain{"codex/gpt(high)"}); err != nil {
+		t.Fatalf("valid suffix rejected: %v", err)
+	}
+}
+
 // TestLoadRequiresConcreteUnambiguousModels covers the Task 4 blueprint rejection
 // cases plus version, intra-mapping duplicate, and non-concrete (glob) names.
 func TestLoadRequiresConcreteUnambiguousModels(t *testing.T) {

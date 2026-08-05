@@ -93,6 +93,37 @@ func sanitizeSnapshots(s State) State {
 	return next
 }
 
+// sanitizeDiagnostics re-sanitizes every persisted free-text diagnostic field
+// (refresh-failed summaries and per-target apply-failure text) immediately
+// before marshaling. Ingestion paths already sanitize, but a state file is
+// long-lived and hand-editable, so the store never trusts that the fields it
+// re-persists are still clean. It never mutates the input state.
+func sanitizeDiagnostics(s State) State {
+	next := s
+	if len(s.RefreshFailed) > 0 {
+		refresh := make([]Diagnostic, len(s.RefreshFailed))
+		for i, d := range s.RefreshFailed {
+			d.Summary = quota.SanitizeText(d.Summary)
+			refresh[i] = d
+		}
+		next.RefreshFailed = refresh
+	}
+	if len(s.Targets) > 0 {
+		targets := make(map[string]TargetState, len(s.Targets))
+		for id, ts := range s.Targets {
+			if ts.Pending != nil {
+				pending := *ts.Pending
+				pending.Summary = quota.SanitizeText(pending.Summary)
+				pending.Remediation = quota.SanitizeText(pending.Remediation)
+				ts.Pending = &pending
+			}
+			targets[id] = ts
+		}
+		next.Targets = targets
+	}
+	return next
+}
+
 func sanitizeSnap(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
 	if snap == nil || snap.Error == "" {
 		return snap, false
@@ -163,6 +194,7 @@ func (st Store) Save(s State) error {
 	s = PruneRecovered(s, st.now(), st.RecoveredRetention)
 	s = PruneUsageHistory(s, st.now())
 	s = sanitizeSnapshots(s)
+	s = sanitizeDiagnostics(s)
 	s.Schema = CurrentSchema
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {

@@ -238,6 +238,42 @@ body
 	}
 }
 
+// TestFilesystemSourceReaderAcceptsBOMAndWhitespaceFences proves definitions
+// with a UTF-8 BOM prefix or trailing whitespace on the frontmatter fences are
+// discovered: the document editor accepts them, so source reading must too, or
+// an editable managed definition would be invisible to init/sync.
+func TestFilesystemSourceReaderAcceptsBOMAndWhitespaceFences(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("models: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bom := "\ufeff---\npolytoken:\n  model: codex/gpt\n---\nbody\n"
+	ws := "---  \r\npolytoken:\r\n  model: zai/glm\r\n---\r\nbody\r\n"
+	if err := os.WriteFile(filepath.Join(root, "agents", "bom.md"), []byte(bom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "agents", "ws.md"), []byte(ws), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (FilesystemSourceReader{GlobalDir: root}).Global(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]string{}
+	for _, d := range got.Definitions {
+		found[d.Path] = d.Model
+	}
+	if found["agents/bom.md"] != "codex/gpt" {
+		t.Fatalf("BOM-prefixed definition not read: %+v", got.Definitions)
+	}
+	if found["agents/ws.md"] != "zai/glm" {
+		t.Fatalf("whitespace-fence definition not read: %+v", got.Definitions)
+	}
+}
+
 func TestFilesystemSourceReaderUsesOnlyRegisteredProjects(t *testing.T) {
 	root := t.TempDir()
 	global := filepath.Join(root, "global")

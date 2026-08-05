@@ -757,3 +757,21 @@ func TestCodexEvidenceShape(t *testing.T) {
 		t.Fatalf("zero evidence must not be fresh, got %s", got)
 	}
 }
+
+// TestFlexFloatRejectsNonFinite proves quoted NaN/Inf strings (which
+// strconv.ParseFloat accepts) and JSON-decoded non-finite values are rejected
+// rather than flowing into windows, ranking arithmetic, and state JSON.
+func TestFlexFloatRejectsNonFinite(t *testing.T) {
+	for _, raw := range []string{`"NaN"`, `"Inf"`, `"-Inf"`, `"+Inf"`, `"nan"`, `"infinity"`} {
+		if v, err := flexFloat([]byte(raw)); err == nil {
+			t.Fatalf("flexFloat(%s) accepted non-finite value %v", raw, v)
+		}
+	}
+	// Finite values still decode from both shapes.
+	if v, err := flexFloat([]byte(`12.5`)); err != nil || v != 12.5 {
+		t.Fatalf("number: v=%v err=%v", v, err)
+	}
+	if v, err := flexFloat([]byte(`" 12.5 "`)); err != nil || v != 12.5 {
+		t.Fatalf("quoted: v=%v err=%v", v, err)
+	}
+}

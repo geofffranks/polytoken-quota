@@ -351,6 +351,47 @@ func TestCheckEligibilityAllUnknown(t *testing.T) {
 	}
 }
 
+// TestCheckEligibilityUnavailable proves a fresh snapshot that explicitly
+// reports quota exhausted/unavailable is never rankable, even when it still
+// carries usable window numbers.
+func TestCheckEligibilityUnavailable(t *testing.T) {
+	p := ProviderPolicy{MappingID: "p"}
+	snap := remSnap("p", 0.0, rankNow)
+	snap.Availability = quota.QuotaUnavailable
+	e := CheckEligibility(p, ProviderObs{MappingID: "p", Mode: "normal", Snapshot: snap}, rankNow)
+	if e.Rankable {
+		t.Fatal("unavailable snapshot should not be rankable")
+	}
+	if !strings.Contains(e.Reason, "unavailable") {
+		t.Fatalf("reason %q should mention unavailability", e.Reason)
+	}
+}
+
+// TestCheckEligibilityZeroRemaining proves an available snapshot with no
+// remaining headroom fails closed rather than ranking an exhausted provider.
+func TestCheckEligibilityZeroRemaining(t *testing.T) {
+	p := ProviderPolicy{MappingID: "p"}
+	snap := remSnap("p", 0.0, rankNow) // used == limit → remaining 0
+	e := CheckEligibility(p, ProviderObs{MappingID: "p", Mode: "normal", Snapshot: snap}, rankNow)
+	if e.Rankable {
+		t.Fatal("zero-remaining snapshot should not be rankable")
+	}
+}
+
+// TestCheckEligibilityInvalidAvailabilityEnum proves an unrecognized or empty
+// availability enum value fails closed.
+func TestCheckEligibilityInvalidAvailabilityEnum(t *testing.T) {
+	p := ProviderPolicy{MappingID: "p"}
+	for _, v := range []quota.QuotaAvailability{"", "garbage"} {
+		snap := remSnap("p", 0.5, rankNow)
+		snap.Availability = v
+		e := CheckEligibility(p, ProviderObs{MappingID: "p", Mode: "normal", Snapshot: snap}, rankNow)
+		if e.Rankable {
+			t.Fatalf("availability %q should not be rankable", v)
+		}
+	}
+}
+
 func TestCheckEligibilityFreshUsableSignalButUnknownAvailability(t *testing.T) {
 	p := ProviderPolicy{MappingID: "p"}
 	used, limit := 1.0, 2.0

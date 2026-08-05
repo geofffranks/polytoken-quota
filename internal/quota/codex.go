@@ -17,6 +17,7 @@ package quota
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"errors"
 	"fmt"
 	"net/http"
@@ -453,10 +454,13 @@ func decodeAdditionalLimit(e codexAdditionalLimitRaw) ([]QuotaWindow, bool) {
 
 // flexFloat decodes a JSON number or a quoted numeric string into a float64. It
 // is used for individual_limit fields that may arrive as either shape.
+// Non-finite values (NaN, ±Inf — accepted by ParseFloat from quoted strings)
+// are rejected: they would poison remaining/ranking arithmetic and make the
+// persisted state JSON unmarshalable.
 func flexFloat(raw json.RawMessage) (float64, error) {
 	var n float64
 	if err := json.Unmarshal(raw, &n); err == nil {
-		return n, nil
+		return finiteOrErr(n)
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -464,9 +468,18 @@ func flexFloat(raw json.RawMessage) (float64, error) {
 		if perr != nil {
 			return 0, errors.New("invalid numeric string")
 		}
-		return v, nil
+		return finiteOrErr(v)
 	}
 	return 0, errors.New("value is neither number nor string")
+}
+
+// finiteOrErr returns v unchanged when it is a finite float, or an error for
+// NaN and ±Inf.
+func finiteOrErr(v float64) (float64, error) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, errors.New("non-finite numeric value")
+	}
+	return v, nil
 }
 
 // flexInt decodes a JSON integer or a quoted integer string into an int64.

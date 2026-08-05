@@ -14,10 +14,8 @@
 package reconcile
 
 import (
-	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/geofffranks/codexbar-hooks/internal/policy"
 	"github.com/geofffranks/codexbar-hooks/internal/state"
@@ -73,25 +71,15 @@ func (e EmptyChainError) Error() string {
 
 // ParseModelRef splits a desired chain entry into its base model and an optional
 // reasoning suffix. "codex/gpt-5.6-sol(medium)" yields base "codex/gpt-5.6-sol" and
-// suffix "medium"; a bare entry yields Base == Spelling with an empty suffix. An
-// empty reference or an unbalanced suffix is an error.
+// suffix "medium"; a bare entry yields Base == Spelling with an empty suffix.
+// The grammar is the single canonical one in policy.ParseModelRef, so policy
+// loading and reconciliation can never disagree about which spellings are valid.
 func ParseModelRef(entry string) (ModelRef, error) {
-	if entry == "" {
-		return ModelRef{}, errors.New("reconcile: empty model reference")
+	base, suffix, err := policy.ParseModelRef(entry)
+	if err != nil {
+		return ModelRef{}, fmt.Errorf("reconcile: %w", err)
 	}
-	open := strings.IndexByte(entry, '(')
-	if open < 0 {
-		return ModelRef{Spelling: entry, Base: entry}, nil
-	}
-	closeIdx := strings.LastIndexByte(entry, ')')
-	if closeIdx <= open {
-		return ModelRef{}, fmt.Errorf("reconcile: unbalanced suffix in %q", entry)
-	}
-	return ModelRef{
-		Spelling: entry,
-		Base:     entry[:open],
-		Suffix:   entry[open+1 : closeIdx],
-	}, nil
+	return ModelRef{Spelling: entry, Base: base, Suffix: suffix}, nil
 }
 
 // survivor is a desired chain entry that survived disabled filtering, with its

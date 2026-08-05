@@ -122,6 +122,53 @@ func TestScalarEditPreservesQuoting(t *testing.T) {
 	}
 }
 
+// TestScalarEditEscapedQuotes proves editing a quoted scalar whose value
+// contains escaped quotes (`\"` in double-quoted, `''` in single-quoted style)
+// replaces the whole value span instead of truncating at the first escaped
+// quote and corrupting trailing bytes.
+func TestScalarEditEscapedQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"double", "defaults:\n  full: \"foo\\\"bar\" # keep\n"},
+		{"single", "defaults:\n  full: 'foo''bar' # keep\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := EditYAML([]byte(tc.in), []Edit{{Path: []string{"defaults", "full"}, Kind: Scalar, Scalar: strPtr("codex/gpt")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(out, []byte("bar")) {
+				t.Fatalf("stale value bytes left behind: %q", out)
+			}
+			if !bytes.Contains(out, []byte("# keep")) {
+				t.Fatalf("trailing comment lost: %q", out)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("output not reparseable: %v\n%q", err, out)
+			}
+		})
+	}
+}
+
+// TestRemoveKeyInFlowMappingFailsClosed proves removing a key whose parent
+// mapping is flow-style is refused: whole-line removal would erase unmanaged
+// siblings sharing the line.
+func TestRemoveKeyInFlowMappingFailsClosed(t *testing.T) {
+	in := []byte("defaults: {full: codex/gpt, mini: zai/glm}\n")
+	_, err := EditYAML(in, []Edit{{Path: []string{"defaults", "full"}, Remove: true}})
+	if err == nil {
+		t.Fatal("flow-mapping remove accepted; would have erased sibling mini")
+	}
+	// A sequence edit to empty (which lowers to Remove) must fail closed too.
+	_, err = EditYAML(in, []Edit{{Path: []string{"defaults", "full"}, Kind: Sequence, Sequence: nil}})
+	if err == nil {
+		t.Fatal("flow-mapping empty-sequence removal accepted")
+	}
+}
+
 // TestDisableRestoreIsByteIdentical proves a disable->restore cycle whose final
 // state equals the original is byte-identical, AND that a transient enabled key
 // absent in the baseline is REMOVED (not set to true) on restoration. The
