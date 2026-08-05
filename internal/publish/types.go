@@ -48,8 +48,12 @@ type Journal struct {
 	PriorRevision uint64
 	NextRevision  uint64
 	TargetID      string
-	Replacements  []Replacement
-	Intended      state.TargetState
+	// ManagedRoot is the canonical target root the transaction's live paths
+	// were validated against. Recovery re-validates every journal path
+	// against it before reading or writing anything.
+	ManagedRoot  string
+	Replacements []Replacement
+	Intended     state.TargetState
 }
 
 // Transaction is the input to Publisher.Apply. Prior is the committed observed
@@ -66,10 +70,14 @@ type Transaction struct {
 	Replacements []Replacement
 }
 
-// RecoveryReport summarizes a single recovery invocation.
+// RecoveryReport summarizes a single recovery invocation. CleanupError is a
+// non-fatal diagnostic: the committed state is already durable, but a stale
+// journal (or backup) could not be removed and will be retried/ignored on the
+// next recovery. It never fails the recovery itself.
 type RecoveryReport struct {
-	Action   string // "noop", "roll-forward", "restore", or "corrupt"
-	TargetID string
+	Action       string // "noop", "roll-forward", "restore", or "corrupt"
+	TargetID     string
+	CleanupError string
 }
 
 // Recovery action names.

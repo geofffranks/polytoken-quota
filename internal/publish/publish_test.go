@@ -537,6 +537,101 @@ func TestRecoverRejectsStalePriorRevision(t *testing.T) {
 	}
 }
 
+// TestRecoverRejectsTamperedJournalPaths proves a parseable journal whose
+// path-bearing fields point outside the managed root or the backup root is
+// treated as corrupt: recovery must never read or restore through persisted
+// paths it has not re-validated.
+func TestRecoverRejectsTamperedJournalPaths(t *testing.T) {
+	outside := t.TempDir()
+	cases := map[string]func(j *Journal){
+		"live path escapes root": func(j *Journal) {
+			j.Replacements[0].LivePath = filepath.Join(outside, "escape.yaml")
+		},
+		"backup path escapes backup root": func(j *Journal) {
+			j.Replacements[0].BackupPath = filepath.Join(outside, "stolen.backup")
+		},
+		"empty live path": func(j *Journal) {
+			j.Replacements[0].LivePath = ""
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newStagedEnv(t, "")
+			e.rewireForRecover(t)
+			j := Journal{
+				Schema:        JournalSchema,
+				PriorRevision: e.Prior.Revision,
+				NextRevision:  e.Tx.Next.Revision,
+				TargetID:      e.Tx.TargetID,
+				ManagedRoot:   e.Publisher.ManagedRoot,
+				Replacements:  cloneReplacements(e.Tx.Replacements),
+				Intended:      intendedOutcome(e.Tx),
+			}
+			tamper(&j)
+			if err := os.MkdirAll(filepath.Dir(e.Publisher.JournalPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJournal(OSFS{}, e.Publisher.JournalPath, j, nil); err != nil {
+				t.Fatal(err)
+			}
+			_, report, err := e.Publisher.Recover(context.Background(), e.Prior)
+			if err == nil {
+				t.Fatal("expected error for tampered journal paths")
+			}
+			if report.Action != ActionCorrupt {
+				t.Fatalf("action=%s want corrupt", report.Action)
+			}
+		})
+	}
+}
+
+// TestRestoreRemovesBackupAndRejectsSymlinkTarget proves Restore consumes the
+// backup after a successful restore (matching its documented contract) and
+// refuses to write through a symlinked live destination.
+func TestRestoreRemovesBackupAndRejectsSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.yaml")
+	testutil.WriteFile(t, live, constLive)
+	bs := BackupStore{Root: filepath.Join(dir, "backups"), Limit: 3}
+	bp, err := bs.Snapshot(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testutil.WriteFile(t, live, "clobbered")
+	if err := bs.Restore(bp, live); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(live); err != nil || string(data) != constLive {
+		t.Fatalf("restore content=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(bp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("backup not removed after successful restore")
+	}
+	// Symlinked destination is refused.
+	bp2, err := bs.Snapshot(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(live)
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere"), live); err != nil {
+		t.Fatal(err)
+	}
+	if err := bs.Restore(bp2, live); err == nil {
+		t.Fatal("restore wrote through a symlinked destination")
+	}
+}
+
+// TestBackupBaseNamesAreCollisionFree proves two live paths that sanitize to
+// the same readable bytes get distinct backup bases, so pruning one source
+// can never delete the other's backups.
+func TestBackupBaseNamesAreCollisionFree(t *testing.T) {
+	a := sanitizeBase("/x/a+b/live.yaml")
+	b := sanitizeBase("/x/a/b/live.yaml") // both readable forms are +x+a+b+live.yaml
+	if a == b {
+		t.Fatalf("distinct paths share backup base %q", a)
+	}
+}
+
 func TestApplyHappyPathPublishesAndRemovesJournal(t *testing.T) {
 	e := newStagedEnv(t, "")
 	e.rewiredForRecover()

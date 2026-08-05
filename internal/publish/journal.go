@@ -15,6 +15,7 @@ type journalFile struct {
 	PriorRevision uint64               `json:"prior_revision"`
 	NextRevision  uint64               `json:"next_revision"`
 	TargetID      string               `json:"target_id"`
+	ManagedRoot   string               `json:"managed_root,omitempty"`
 	Replacements  []journalReplacement `json:"replacements"`
 	Intended      intendedTarget       `json:"intended"`
 }
@@ -139,6 +140,7 @@ func toJournalFile(j Journal) journalFile {
 		PriorRevision: j.PriorRevision,
 		NextRevision:  j.NextRevision,
 		TargetID:      j.TargetID,
+		ManagedRoot:   j.ManagedRoot,
 		Intended:      toIntended(j.Intended),
 	}
 	for _, r := range j.Replacements {
@@ -161,6 +163,7 @@ func fromJournalFile(jf journalFile) Journal {
 		PriorRevision: jf.PriorRevision,
 		NextRevision:  jf.NextRevision,
 		TargetID:      jf.TargetID,
+		ManagedRoot:   jf.ManagedRoot,
 		Intended:      fromIntended(jf.Intended),
 	}
 	for _, r := range jf.Replacements {

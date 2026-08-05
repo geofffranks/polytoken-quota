@@ -1,6 +1,7 @@
 package publish
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"os"
@@ -19,8 +20,11 @@ type BackupStore struct {
 
 // Snapshot copies src (a live file about to be replaced) to a fresh numbered
 // backup under Root and returns the backup path. The backup preserves the
-// source file mode. After copying, backups for the same source beyond Limit are
-// pruned oldest-first.
+// source file mode and is written durably (same-directory temp + fsync +
+// atomic rename + directory fsync), so a crash after the journal becomes
+// durable can never leave a torn backup that a later restore depends on.
+// After copying, backups for the same source beyond Limit are pruned
+// oldest-first.
 func (b BackupStore) Snapshot(src string) (string, error) {
 	if b.Root == "" {
 		return "", fmt.Errorf("publish: empty backup root")
@@ -38,7 +42,7 @@ func (b BackupStore) Snapshot(src string) (string, error) {
 		return "", errStep(stepBackup, err)
 	}
 	dst := b.freshPath(src)
-	if err := os.WriteFile(dst, data, mode); err != nil {
+	if err := writeFileDurable(dst, data, mode); err != nil {
 		return "", errStep(stepBackup, err)
 	}
 	if err := b.prune(src); err != nil {
@@ -48,7 +52,10 @@ func (b BackupStore) Snapshot(src string) (string, error) {
 }
 
 // Restore copies the backup at backup back over its original live path, then
-// removes the backup. The live file is written with the backup's preserved mode.
+// removes the backup. The live file is written durably with the backup's
+// preserved mode via a same-directory temp + atomic rename, and the
+// destination is refused when it is a symlink (the restore target must be the
+// managed file itself, never a redirection).
 func (b BackupStore) Restore(backup, live string) error {
 	data, err := os.ReadFile(backup)
 	if err != nil {
@@ -58,10 +65,58 @@ func (b BackupStore) Restore(backup, live string) error {
 	if info, err := os.Stat(backup); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.WriteFile(live, data, mode); err != nil {
+	if info, err := os.Lstat(live); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("publish: restore %s: %w", live, ErrPathEscape)
+	}
+	if err := writeFileDurable(live, data, mode); err != nil {
 		return fmt.Errorf("publish: restore %s: %w", live, err)
 	}
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("publish: remove restored backup %s: %w", backup, err)
+	}
 	return nil
+}
+
+// writeFileDurable writes data to path atomically and durably: a temp file in
+// path's directory is written, fsync'd, chmod'd to mode, renamed over path,
+// and the parent directory is fsync'd so the entry survives a crash.
+func writeFileDurable(path string, data []byte, mode fs.FileMode) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, ".backup-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) }
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		cleanup()
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // freshPath returns a unique numbered backup path for src. It derives a stable
@@ -153,8 +208,11 @@ func startsWith(s, prefix string) bool {
 }
 
 // sanitizeBase reduces an absolute live path to a filesystem-safe backup base
-// name, preserving enough structure to disambiguate files while staying under
-// Root. Path separators become '+'.
+// name, preserving enough structure to stay readable while staying under
+// Root. Path separators become '+'. The readable form alone is not injective
+// (distinct paths can sanitize to the same bytes, which would let retention
+// pruning for one source delete another source's backups), so a short digest
+// of the exact cleaned path is appended to make the base unique per source.
 func sanitizeBase(p string) string {
 	clean := filepath.Clean(p)
 	var b []byte
@@ -173,5 +231,13 @@ func sanitizeBase(p string) string {
 	if s == "" {
 		s = "backup"
 	}
-	return s
+	// Bound the readable prefix so the final name (plus digest and sequence
+	// number) stays within common 255-byte filename limits for deep paths.
+	// The digest keeps uniqueness even when the prefix is truncated.
+	const maxReadable = 180
+	if len(s) > maxReadable {
+		s = s[len(s)-maxReadable:]
+	}
+	sum := sha256.Sum256([]byte(clean))
+	return s + "~" + hexEncode(sum[:6])
 }

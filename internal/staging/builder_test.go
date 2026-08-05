@@ -181,6 +181,80 @@ func splitDots(s string) []string {
 
 // --- tests ------------------------------------------------------------------
 
+// TestBuildSkipsSymlinkedLayerFiles proves a benign-named symlink inside a
+// source layer pointing at an outside secret file is never followed into the
+// staging root, and a symlinked config.yaml fails the build outright.
+func TestBuildSkipsSymlinkedLayerFiles(t *testing.T) {
+	live := layeredFixture(t)
+	outside := t.TempDir()
+	secretPath := filepath.Join(outside, "credentials")
+	testutil.WriteFile(t, secretPath, "outside-secret-canary")
+	globalDir := live.Sources.GlobalDir
+	// Benign-looking definition name linking to the outside secret.
+	if err := os.Symlink(secretPath, filepath.Join(globalDir, "subagents", "notes.md")); err != nil {
+		t.Fatal(err)
+	}
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	if _, err := os.Stat(filepath.Join(c.ConfigDir, "subagents", "notes.md")); !os.IsNotExist(err) {
+		t.Fatal("symlinked layer file was copied into staging")
+	}
+	err = filepath.WalkDir(c.Root, func(path string, d os.DirEntry, werr error) error {
+		if werr != nil || d.IsDir() {
+			return werr
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.Contains(data, []byte("outside-secret-canary")) {
+			t.Fatalf("outside secret leaked into staging at %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestBuildRejectsSymlinkedConfig proves a layer whose config.yaml is itself a
+// symlink is refused rather than silently read through.
+func TestBuildRejectsSymlinkedConfig(t *testing.T) {
+	live := layeredFixture(t)
+	globalDir := live.Sources.GlobalDir
+	real := filepath.Join(globalDir, "config.yaml")
+	moved := filepath.Join(t.TempDir(), "moved-config.yaml")
+	if err := os.Rename(real, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, real); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan); err == nil {
+		t.Fatal("build accepted a symlinked config.yaml")
+	}
+}
+
+// TestBuildClearsStaleStagingRoot proves a stale root left by a prior crash
+// (including foreign files) never survives into the next candidate.
+func TestBuildClearsStaleStagingRoot(t *testing.T) {
+	live := layeredFixture(t)
+	b := builderWith(t, live, AuthInert)
+	stale := stageRoot(b.TempRoot, live.Target.ID)
+	testutil.WriteFile(t, filepath.Join(stale, "config", "leftover.md"), "stale-bytes")
+	c, err := b.Build(context.Background(), live.Target, live.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	if _, err := os.Stat(filepath.Join(c.ConfigDir, "leftover.md")); !os.IsNotExist(err) {
+		t.Fatal("stale file survived into the fresh staging candidate")
+	}
+}
+
 // TestBuildCompleteRootAndNeutralWorkdir folds global + project into one
 // effective config (project wins), copies every effective definition, applies
 // edits only in staging, and records a separate neutral ConfigDir/WorkingDir.
