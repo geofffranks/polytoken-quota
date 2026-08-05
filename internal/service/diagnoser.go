@@ -85,7 +85,11 @@ type StatusReport struct {
 	EffectiveOrders        []ChainOrderReport    `json:"effective_orders,omitempty"`
 	Quota                  []QuotaSnapshotReport `json:"quota,omitempty"`
 	Problem                bool                  `json:"problem"`
-	RunningSessionAdvisory string                `json:"running_session_advisory"`
+	// Error carries a sanitized diagnostic when the report could not be
+	// produced at all (state unreadable / no store). Callers must treat a
+	// non-empty Error as a failed diagnostic, never as a clean report.
+	Error                  string `json:"error,omitempty"`
+	RunningSessionAdvisory string `json:"running_session_advisory"`
 }
 
 // Compile-time assertions that *Coordinator implements both Mutator (via its
@@ -101,10 +105,15 @@ var (
 func (c *Coordinator) Status(_ context.Context, _ bool) StatusReport {
 	report := StatusReport{}
 	if c.State == nil {
+		report.Error = "no state store configured"
 		return report
 	}
 	observed, err := c.State.LoadState()
 	if err != nil {
+		// A malformed or unreadable state file must never render as a clean
+		// "in sync" report; surface the sanitized failure so the CLI can exit
+		// non-zero.
+		report.Error = sanitizeFailure(err.Error())
 		return report
 	}
 	report.Revision = observed.Revision

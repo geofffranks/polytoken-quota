@@ -237,11 +237,22 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		report := deps.Diagnoser.Status(ctx, jsonOut)
 		writeStatus(stdout, report, jsonOut)
+		if report.Error != "" {
+			fmt.Fprintln(stderr, "status:", report.Error)
+			return ExitRejected
+		}
 		return DiagnosticExitCode(StatusCommand, report.Problem)
 	case "reconcile":
 		dryRun, keepStaging, ok := parseReconcileFlags(args[1:])
 		if !ok {
 			fmt.Fprintln(stderr, "reconcile: invalid arguments")
+			return ExitRejected
+		}
+		if keepStaging && !dryRun {
+			// Retained candidates are only reported (and only useful) on the
+			// dry-run path; a bare --keep-staging would retain sensitive
+			// staged configuration with no pointer to it.
+			fmt.Fprintln(stderr, "reconcile: --keep-staging requires --dry-run")
 			return ExitRejected
 		}
 		out := deps.Mutator.Reconcile(ctx, dryRun, keepStaging)
@@ -390,6 +401,12 @@ func runStateClear(ctx context.Context, args []string, deps Dependencies, stderr
 			}
 			provider = a
 		}
+	}
+	if all && provider != "" {
+		// Contradictory arguments must never silently become the destructive
+		// all-provider clear: force the caller to choose one form.
+		fmt.Fprintln(stderr, "state clear: pass either a provider or --all, not both")
+		return ExitRejected
 	}
 	selector, err := ParseSelector(provider, all)
 	if err != nil {

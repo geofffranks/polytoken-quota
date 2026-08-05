@@ -162,6 +162,12 @@ func parseQuotaCheckFlags(args []string) (provider string, jsonOut, reconcile, o
 			if strings.HasPrefix(args[i+1], "--") {
 				return "", containsFlag(args[i+1:], "--json"), false, false
 			}
+			// An empty or whitespace-only ID is a caller mistake (e.g. an
+			// unset shell variable), not an unfiltered check; reject it like
+			// positional provider parsing does.
+			if strings.TrimSpace(args[i+1]) == "" {
+				return "", false, false, false
+			}
 			provider = args[i+1]
 			i++
 		case "--json":

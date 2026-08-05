@@ -46,6 +46,7 @@ type depsSpy struct {
 	QuotaCheckReconcile bool
 	QuotaCheckOutcome   service.Outcome
 	QuotaCheckSet       bool
+	StatusReportValue   service.StatusReport
 }
 
 func newDepsSpy() *depsSpy { return &depsSpy{} }
@@ -129,7 +130,7 @@ func (s *depsSpy) QuotaCheck(_ context.Context, provider string, reconcile bool)
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return service.StatusReport{} }
+func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return s.StatusReportValue }
 
 func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
 
@@ -385,6 +386,35 @@ func statusFixture() service.StatusReport {
 		},
 		Pending: 1,
 		Drift:   false,
+	}
+}
+
+// TestStateClearRejectsContradictoryArguments proves `state clear --all
+// <provider>` is rejected without mutation: contradictory arguments must never
+// silently become the destructive all-provider clear.
+func TestStateClearRejectsContradictoryArguments(t *testing.T) {
+	spy := newDepsSpy()
+	got := Run(context.Background(), []string{"state", "clear", "--all", "codex"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+	if got != ExitRejected {
+		t.Fatalf("exit=%d want=%d", got, ExitRejected)
+	}
+	if spy.Mutations != 0 {
+		t.Fatalf("contradictory state clear mutated %d times", spy.Mutations)
+	}
+}
+
+// TestStatusStateLoadFailureExitsRejected proves a status report carrying an
+// Error (state unreadable) exits 1 instead of rendering as a clean report.
+func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
+	spy := newDepsSpy()
+	spy.StatusReportValue = service.StatusReport{Error: "state: parse state.json: unexpected end of JSON input"}
+	stderr := &strings.Builder{}
+	got := Run(context.Background(), []string{"status"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+	if got != ExitRejected {
+		t.Fatalf("exit=%d want=%d", got, ExitRejected)
+	}
+	if !strings.Contains(stderr.String(), "state.json") {
+		t.Fatalf("stderr missing diagnostic: %q", stderr.String())
 	}
 }
 

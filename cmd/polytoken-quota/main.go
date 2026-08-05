@@ -235,20 +235,27 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Sources:  staging.FSMaterializer{GlobalDir: cfg.GlobalDir},
 	}
 
+	loader := service.FilePolicyLoader{Path: cfg.DesiredPath}
+	registry := service.NewTargetRegistry()
 	return &service.Coordinator{
 		Lock:            publish.NewFileLock(cfg.LockPath),
-		Policy:          service.FilePolicyLoader{Path: cfg.DesiredPath},
+		Policy:          loader,
 		PolicyWriter:    policy.NewWriter(cfg.DesiredPath),
 		State:           service.StoreState{Store: store},
-		Targets:         service.NewTargetRegistry(),
+		Targets:         registry,
 		Builder:         service.NewReconciler(),
 		Stage:           service.StagingStager{Builder: builder},
 		Validate:        service.ValidateRunner{Runner: runner},
 		Publish:         service.PublisherAdapter{Publisher: pub},
 		DiagnosticState: store,
-		Sources:         policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
-		QuotaPoller:     service.NewQuotaPoller(),
-		JournalPath:     cfg.JournalPath,
+		DoctorInspectors: service.DoctorInspectors{
+			Policy:    service.PolicyDoctorInspector{Loader: loader},
+			Targets:   service.TargetDoctorInspector{Loader: loader, Targets: registry},
+			Publisher: service.PublishDoctorInspector{JournalPath: cfg.JournalPath},
+		},
+		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller: service.NewQuotaPoller(),
+		JournalPath: cfg.JournalPath,
 	}
 }
 
