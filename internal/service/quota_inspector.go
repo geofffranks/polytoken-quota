@@ -127,7 +127,7 @@ func adapterSupport(adapter string, now time.Time, reg *quota.EvidenceRegistry) 
 	if reg == nil {
 		reg = quota.NewEvidenceRegistry()
 	}
-	if adapter != "codex" && adapter != "zai" {
+	if adapter != "codex" && adapter != "zai" && adapter != "anthropic" {
 		return quota.SupportStatus{
 			Supported: false,
 			Reason:    "unknown quota adapter " + adapter + "; record evidence before enabling",

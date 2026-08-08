@@ -118,7 +118,14 @@ func (c *BoundedClient) Do(req *http.Request) (*BoundedResponse, error) {
 
 	doer := c.Transport
 	if doer == nil {
-		doer = http.DefaultClient
+		doer = &http.Client{
+			Transport:     http.DefaultTransport,
+			CheckRedirect: rejectRedirect,
+		}
+	} else if client, ok := doer.(*http.Client); ok {
+		clone := *client
+		clone.CheckRedirect = rejectRedirect
+		doer = &clone
 	}
 
 	resp, err := doer.Do(req)
@@ -144,6 +151,10 @@ func (c *BoundedClient) Do(req *http.Request) (*BoundedResponse, error) {
 		Body:       body,
 		Headers:    resp.Header,
 	}, nil
+}
+
+func rejectRedirect(_ *http.Request, _ []*http.Request) error {
+	return errors.New("bounded http: redirects are not allowed for provider endpoints")
 }
 
 // --- Transient credential resolver ---------------------------------------

@@ -107,11 +107,45 @@ The `models` list is the ownership boundary: only listed concrete models and the
 
 Quota fields are:
 
-- `adapter`: `codex` or `zai`.
+- `adapter`: `codex`, `zai`, or `anthropic`.
+- `monthly_budget_usd`: required for (and only used by) the `anthropic` adapter — the monthly spend ceiling treated as that provider's quota.
 - `freshness_ttl`: how long a successful snapshot remains eligible; defaults to `30m`.
 - `balance_group`: isolates ranking comparisons between provider groups; defaults to `default`.
 - `weight`: deterministic tie-break weight; defaults to `1`.
 - `schedule`: optional IANA timezone and `peak` windows. Each window has lowercase `days` (`mon` through `sun`), `start`, and `end`. Peak windows are written in the provider's local timezone; outside them the provider is treated as off-peak for ranking.
+
+### Anthropic adapter
+
+The `anthropic` adapter is for pay-as-you-go Anthropic **API** accounts
+(Claude subscription plans expose no usable API and are not supported). A
+metered API has no token allowance to deplete — the meaningful quota is the
+money you are willing to spend. The adapter therefore polls the Admin API
+cost report (`GET /v1/organizations/cost_report`, read-only) for the
+organization's month-to-date spend and reports it against your
+`monthly_budget_usd` as a single monthly window: at 100% the provider is
+treated as exhausted and routing demotes it, exactly like a depleted codex or
+z.ai allowance. The window resets at the first of each month (UTC).
+
+- Credentials: `ANTHROPIC_ADMIN_API_KEY` — an **Admin** key (`sk-ant-admin…`,
+  created in Console → Settings → Admin keys; a standard API key gets 401 on
+  the Admin API). Resolved transiently per check and never persisted.
+- Spend visibility is coarse: the cost report only supports daily (UTC)
+  buckets and omits the still-open day until the UTC day closes, so the
+  reported month-to-date spend can trail reality by up to a day's usage. Set
+  `monthly_budget_usd` with at least a heavy day's margin below your true
+  ceiling. The default 30m `freshness_ttl` is fine.
+- `monthly_budget_usd` is your number, known only to this tool — Anthropic
+  never sees it, and no Anthropic API exposes the account's real limits (the
+  usage-tier spend cap, a console-configured spend limit, or the prepaid
+  credit balance are all console-only). The two mechanisms fail differently:
+  Anthropic *enforces* its own limits by hard-failing API requests once you
+  hit them, while this tool watches spend against `monthly_budget_usd` and
+  demotes the provider in your model chains *before* that happens. Set it
+  comfortably below the enforced ceiling so routing steers away from
+  Anthropic instead of sessions slamming into request errors.
+- Anthropic's per-minute rate limits are deliberately not polled: they refill
+  in about a minute, so a scheduled snapshot of them carries no
+  session-start routing signal.
 
 `routing.enabled` defaults to `false`. Enabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. `sync --from-polytoken` replaces the policy with current managed values, while `--force` overrides its degraded/ambiguous-drift guard.
 

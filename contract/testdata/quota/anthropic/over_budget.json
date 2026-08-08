@@ -1,0 +1,22 @@
+{
+  "status": 200,
+  "body": {
+    "data": [
+      {
+        "starting_at": "2026-08-01T00:00:00Z",
+        "ending_at": "2026-08-02T00:00:00Z",
+        "results": [
+          {
+            "amount": "25000",
+            "currency": "USD",
+            "cost_type": "tokens",
+            "model": "claude-sonnet-4-5",
+            "service_tier": "standard"
+          }
+        ]
+      }
+    ],
+    "has_more": false,
+    "next_page": null
+  }
+}

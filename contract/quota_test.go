@@ -12,6 +12,7 @@ package contract
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -279,7 +280,7 @@ func TestEvidenceAndReasonsAreSecretFree(t *testing.T) {
 
 // releaseProviders enumerates the provider adapters expected to carry current
 // contract evidence for a release.
-var releaseProviders = []string{"codex", "zai"}
+var releaseProviders = []string{"codex", "zai", "anthropic"}
 
 // configuredProviders returns the provider names that are configured for this
 // environment, read from the PQ_TEST_PROVIDERS env var (comma-separated). When
@@ -306,6 +307,7 @@ func buildReleaseRegistry() *quota.EvidenceRegistry {
 	reg := quota.NewEvidenceRegistry()
 	reg.Register(quota.CodexEvidence(time.Now()))
 	reg.Register(quota.ZaiEvidence(time.Now()))
+	reg.Register(quota.AnthropicEvidence(time.Now()))
 	return reg
 }
 
@@ -674,6 +676,188 @@ func TestZaiContractFixturesAreSecretFree(t *testing.T) {
 		}
 		body := loadZaiFixture(t, e.Name())
 		if secretPattern.MatchString(string(body)) {
+			t.Fatalf("fixture %s contains a secret pattern", e.Name())
+		}
+	}
+}
+
+// --- Anthropic adapter fixture acceptance -----------------------------------
+//
+// The Anthropic adapter polls the Admin API cost report for month-to-date
+// spend against the mapping's monthly budget, so its fixtures describe
+// {status, body} cost-report pages. These acceptance tests replay each
+// fixture through the real AnthropicSource behind a fake transport +
+// synthetic admin-key resolver, with a 200 USD test budget.
+
+// anthropicFixture is the on-disk fixture shape.
+type anthropicFixture struct {
+	Status int             `json:"status"`
+	Body   json.RawMessage `json:"body"`
+}
+
+// anthropicStubTransport replays a fixture's status and body.
+type anthropicStubTransport struct {
+	fx    anthropicFixture
+	calls int
+}
+
+func (t *anthropicStubTransport) Do(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{
+		StatusCode: t.fx.Status,
+		Body:       io.NopCloser(bytes.NewReader(t.fx.Body)),
+		Header:     http.Header{},
+	}, nil
+}
+
+// anthropicKeyResolver returns a synthetic admin API key.
+type anthropicKeyResolver struct{}
+
+func (anthropicKeyResolver) Resolve(quota.CredentialRef) (string, error) {
+	return "synthetic-anthropic-admin-fixture-key", nil
+}
+
+func loadAnthropicFixture(t *testing.T, name string) anthropicFixture {
+	t.Helper()
+	path := filepath.Join("testdata", "quota", "anthropic", name)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	var fx anthropicFixture
+	if err := json.Unmarshal(b, &fx); err != nil {
+		t.Fatalf("parse fixture %s: %v", path, err)
+	}
+	return fx
+}
+
+// anthropicFixtureBudget is the monthly budget the fixtures are written against.
+const anthropicFixtureBudget = 200.0
+
+// newAnthropicFixtureSource builds an AnthropicSource with fresh evidence that
+// replays the given fixture against the fixture budget.
+func newAnthropicFixtureSource(t *testing.T, fx anthropicFixture) *quota.AnthropicSource {
+	t.Helper()
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.AnthropicEvidence(contractNow))
+	client := &quota.BoundedClient{
+		Transport:    &anthropicStubTransport{fx: fx},
+		Timeout:      time.Second,
+		MaxBodyBytes: 1 << 20,
+	}
+	return quota.NewAnthropicSource("anthropic", client, anthropicKeyResolver{}, anthropicFixtureBudget, reg, contractNow)
+}
+
+func TestAnthropicContractFixtures(t *testing.T) {
+	// midmonth.json: 150.00 spend of 200 budget → monthly window, 75% used.
+	t.Run("midmonth", func(t *testing.T) {
+		snap, err := newAnthropicFixtureSource(t, loadAnthropicFixture(t, "midmonth.json")).Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable {
+			t.Fatalf("status=%s availability=%s", snap.Status, snap.Availability)
+		}
+		w := contractFindWindow(snap.Windows, "monthly")
+		if w == nil || w.Used == nil || *w.Used != 150 || w.Limit == nil || *w.Limit != anthropicFixtureBudget {
+			t.Fatalf("monthly window=%+v", w)
+		}
+		if rem := snap.EffectiveRemaining(); rem == nil || *rem != 0.25 {
+			t.Fatalf("effective remaining=%v", rem)
+		}
+	})
+	// empty_month.json: no spend recorded → fresh, fully available.
+	t.Run("empty_month", func(t *testing.T) {
+		snap, err := newAnthropicFixtureSource(t, loadAnthropicFixture(t, "empty_month.json")).Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable {
+			t.Fatalf("status=%s availability=%s", snap.Status, snap.Availability)
+		}
+		w := contractFindWindow(snap.Windows, "monthly")
+		if w == nil || *w.Used != 0 || *w.UsagePercent != 0 {
+			t.Fatalf("monthly window=%+v", w)
+		}
+	})
+	// over_budget.json: 250.00 spend of 200 budget → exhausted observation.
+	t.Run("over_budget", func(t *testing.T) {
+		snap, err := newAnthropicFixtureSource(t, loadAnthropicFixture(t, "over_budget.json")).Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaUnavailable {
+			t.Fatalf("status=%s availability=%s want fresh/unavailable", snap.Status, snap.Availability)
+		}
+	})
+	// auth_failure.json: 401 → failed attempt with admin-key remediation.
+	t.Run("auth_failure", func(t *testing.T) {
+		snap, err := newAnthropicFixtureSource(t, loadAnthropicFixture(t, "auth_failure.json")).Fetch(context.Background())
+		if err == nil {
+			t.Fatal("401 fixture did not fail")
+		}
+		if snap.Status != quota.SourceFailed {
+			t.Fatalf("status=%s want failed", snap.Status)
+		}
+		if !strings.Contains(snap.Error, "ANTHROPIC_ADMIN_API_KEY") {
+			t.Fatalf("error not actionable: %s", snap.Error)
+		}
+		if strings.Contains(snap.Error, "fixture-key") {
+			t.Fatal("API key material leaked into error")
+		}
+	})
+}
+
+// TestAnthropicLiveContract is the opt-in real-API acceptance check: it runs
+// only when ANTHROPIC_ADMIN_API_KEY is set, performs one live cost-report read
+// through the production adapter (read-only, no spend), and asserts the
+// cost-report contract still holds. It never prints, persists, or asserts on
+// the key itself.
+func TestAnthropicLiveContract(t *testing.T) {
+	if os.Getenv("ANTHROPIC_ADMIN_API_KEY") == "" {
+		t.Skip("set ANTHROPIC_ADMIN_API_KEY for the live Anthropic cost-report contract check (read-only)")
+	}
+	// liveTestBudget is a synthetic denominator for the spend/budget division.
+	// It is NOT read from Anthropic — no Anthropic API exposes the account's
+	// spend limit, tier cap, or credit balance; production uses the operator's
+	// monthly_budget_usd from desired.yaml. Only the spend side is live here.
+	const liveTestBudget = 100.0
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.AnthropicEvidence(time.Now()))
+	src := quota.NewAnthropicSource("anthropic-live", &quota.BoundedClient{}, quota.DefaultCredentialResolver(), liveTestBudget, reg, time.Now())
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("live fetch failed: %v (snapshot error: %s)", err, snap.Error)
+	}
+	if snap.Status != quota.SourceFresh && snap.Status != quota.SourcePartial {
+		t.Fatalf("live status=%s (error: %s)", snap.Status, snap.Error)
+	}
+	w := contractFindWindow(snap.Windows, "monthly")
+	if w == nil || w.Used == nil || w.Limit == nil {
+		t.Fatalf("live response produced no usable monthly window: %+v", snap.Windows)
+	}
+	if *w.Used < 0 {
+		t.Fatalf("negative month-to-date spend: %v", *w.Used)
+	}
+	t.Logf("live month-to-date spend: %.4f USD against a synthetic %.2f test budget (%.1f%%; the budget is this test's constant, not an Anthropic value)", *w.Used, *w.Limit, *w.UsagePercent)
+}
+
+// TestAnthropicContractFixturesAreSecretFree asserts the committed Anthropic
+// fixture files contain no bearer tokens, account IDs, or key/value secrets.
+func TestAnthropicContractFixturesAreSecretFree(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("testdata", "quota", "anthropic"))
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join("testdata", "quota", "anthropic", e.Name()))
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if secretPattern.MatchString(string(b)) {
 			t.Fatalf("fixture %s contains a secret pattern", e.Name())
 		}
 	}

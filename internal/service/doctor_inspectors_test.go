@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"time"
+
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,6 +30,16 @@ type failingRegistry struct{ err error }
 
 func (r failingRegistry) ResolveTargets(policy.Desired) ([]RegisteredTarget, error) {
 	return nil, r.err
+}
+
+func TestAdapterSupportRecognizesAnthropic(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.AnthropicEvidence(now))
+	status := adapterSupport("anthropic", now, reg)
+	if !status.Supported {
+		t.Fatalf("anthropic support=%+v, want supported", status)
+	}
 }
 
 func TestPolicyDoctorInspectorFindings(t *testing.T) {
