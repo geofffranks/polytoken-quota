@@ -411,6 +411,21 @@ func TestCheckEligibilityFreshNoRemainingSignal(t *testing.T) {
 	}
 }
 
+// TestCheckEligibilityPartialSnapshot proves incomplete quota observations do
+// not make a provider eligible from a potentially understated lower bound.
+func TestCheckEligibilityPartialSnapshot(t *testing.T) {
+	p := ProviderPolicy{MappingID: "p"}
+	snap := remSnap("p", 0.5, rankNow)
+	snap.Status = quota.SourcePartial
+	e := CheckEligibility(p, ProviderObs{MappingID: "p", Mode: "normal", Snapshot: snap}, rankNow)
+	if e.Rankable {
+		t.Fatal("partial snapshot should not be rankable")
+	}
+	if !strings.Contains(e.Reason, "partial") {
+		t.Fatalf("reason %q should mention partial data", e.Reason)
+	}
+}
+
 func TestCheckEligibilityAuthFailure(t *testing.T) {
 	p := ProviderPolicy{MappingID: "p"}
 	snap := &quota.QuotaSnapshot{

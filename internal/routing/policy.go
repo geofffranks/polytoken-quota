@@ -290,6 +290,9 @@ func CheckEligibility(policy ProviderPolicy, obs ProviderObs, now time.Time) Eli
 	if snap.Status == quota.SourceFailed {
 		return Eligibility{Reason: "authentication/configuration failure"}
 	}
+	if snap.Status == quota.SourcePartial {
+		return Eligibility{Reason: "partial quota data"}
+	}
 	// Fail closed on anything but an explicit "available": unavailable means
 	// the provider reported itself exhausted, and any other value (unknown,
 	// empty, or a corrupted enum) is unusable data, never rankable.
