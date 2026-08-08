@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -129,7 +130,7 @@ func (a *AnthropicSource) now() time.Time {
 // an unsupported status with a sanitized remediation reason. A missing budget
 // is likewise unsupported: there is nothing to measure spend against.
 func (a *AnthropicSource) Status() SupportStatus {
-	if a.MonthlyBudgetUSD <= 0 {
+	if a.MonthlyBudgetUSD <= 0 || math.IsNaN(a.MonthlyBudgetUSD) || math.IsInf(a.MonthlyBudgetUSD, 0) {
 		return SupportStatus{
 			Supported: false,
 			Reason:    "anthropic adapter requires monthly_budget_usd in the mapping's quota config",
@@ -292,14 +293,60 @@ func (a *AnthropicSource) fetchCostPage(ctx context.Context, adminKey, page stri
 
 // anthropicCostEnvelope is the cost report page envelope.
 type anthropicCostEnvelope struct {
-	Data     []anthropicCostBucket `json:"data"`
-	HasMore  bool                  `json:"has_more"`
-	NextPage *string               `json:"next_page"`
+	Data        []anthropicCostBucket `json:"data"`
+	HasMore     bool                  `json:"has_more"`
+	NextPage    *string               `json:"next_page"`
+	dataSet     bool
+	hasMoreSet  bool
+	dataNull    bool
+	hasMoreNull bool
+}
+
+func (e *anthropicCostEnvelope) UnmarshalJSON(data []byte) error {
+	type plain anthropicCostEnvelope
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, ok := fields["data"]; ok {
+		decoded.dataSet = true
+		decoded.dataNull = string(raw) == "null"
+	}
+	if raw, ok := fields["has_more"]; ok {
+		decoded.hasMoreSet = true
+		decoded.hasMoreNull = string(raw) == "null"
+	}
+	*e = anthropicCostEnvelope(decoded)
+	return nil
 }
 
 // anthropicCostBucket is one time bucket with its cost line items.
 type anthropicCostBucket struct {
-	Results []json.RawMessage `json:"results"`
+	Results     []json.RawMessage `json:"results"`
+	resultsSet  bool
+	resultsNull bool
+}
+
+func (b *anthropicCostBucket) UnmarshalJSON(data []byte) error {
+	type plain anthropicCostBucket
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, ok := fields["results"]; ok {
+		decoded.resultsSet = true
+		decoded.resultsNull = string(raw) == "null"
+	}
+	*b = anthropicCostBucket(decoded)
+	return nil
 }
 
 // anthropicCostItem is one cost line item. Amount is a decimal string; the
@@ -317,17 +364,20 @@ type anthropicCostItem struct {
 // the report's 1-2h lag).
 func parseAnthropicCostPage(body []byte) (spend float64, partial bool, nextPage string, err error) {
 	var env anthropicCostEnvelope
-	if uerr := json.Unmarshal(body, &env); uerr != nil {
-		return 0, false, "", errors.New("anthropic: invalid cost report body (could not decode JSON)")
+	if uerr := json.Unmarshal(body, &env); uerr != nil || !env.dataSet || env.dataNull || !env.hasMoreSet || env.hasMoreNull {
+		return 0, false, "", errors.New("anthropic: invalid cost report body (missing required envelope fields)")
 	}
 	for _, bucket := range env.Data {
+		if !bucket.resultsSet || bucket.resultsNull {
+			return 0, false, "", errors.New("anthropic: invalid cost report body (missing bucket results)")
+		}
 		for _, raw := range bucket.Results {
 			var item anthropicCostItem
 			if uerr := json.Unmarshal(raw, &item); uerr != nil {
 				partial = true
 				continue
 			}
-			if item.Currency != "" && !strings.EqualFold(item.Currency, "USD") {
+			if !strings.EqualFold(strings.TrimSpace(item.Currency), "USD") {
 				partial = true // never guess an exchange rate
 				continue
 			}
@@ -339,8 +389,11 @@ func parseAnthropicCostPage(body []byte) (spend float64, partial bool, nextPage 
 			spend += cents / anthropicCentsPerDollar
 		}
 	}
-	if env.HasMore && env.NextPage != nil && *env.NextPage != "" {
-		nextPage = *env.NextPage
+	if env.HasMore {
+		if env.NextPage == nil || strings.TrimSpace(*env.NextPage) == "" {
+			return 0, false, "", errors.New("anthropic: invalid cost report pagination (has_more without next_page)")
+		}
+		nextPage = strings.TrimSpace(*env.NextPage)
 	}
 	return spend, partial, nextPage, nil
 }

@@ -457,6 +457,17 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNonFiniteAnthropicBudget(t *testing.T) {
+	for _, value := range []string{".nan", ".inf", "-.inf"} {
+		t.Run(value, func(t *testing.T) {
+			yaml := "version: 1\nproviders:\n  anthropic:\n    codexbar_providers: [anthropic]\n    models: [anthropic/claude]\n    quota:\n      adapter: anthropic\n      monthly_budget_usd: " + value + "\n"
+			if _, err := Load(writeTemp(t, yaml)); err == nil {
+				t.Fatalf("Load accepted non-finite budget %s", value)
+			}
+		})
+	}
+}
+
 // TestLoadRoutingQuotaInvalidSchedule proves a bad schedule (timezone/day/time)
 // rejects policy loading rather than being silently accepted.
 func TestLoadRoutingQuotaInvalidSchedule(t *testing.T) {

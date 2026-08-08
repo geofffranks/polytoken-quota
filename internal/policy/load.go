@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -479,8 +480,8 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
 	}
-	if w.MonthlyBudgetUSD < 0 {
-		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be positive", mappingID)
+	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 {
+		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be finite and positive", mappingID)
 	}
 	// The anthropic adapter measures month-to-date spend against a
 	// user-defined budget; without one there is nothing to measure against.

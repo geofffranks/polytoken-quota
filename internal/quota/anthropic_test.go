@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -279,5 +280,42 @@ func TestAnthropicEvidenceGateFailsClosed(t *testing.T) {
 	}
 	if len(doer.calls) != 0 {
 		t.Fatalf("HTTP request made despite failed gate: %d calls", len(doer.calls))
+	}
+}
+
+func TestAnthropicMalformedEnvelopeFailsClosed(t *testing.T) {
+	for _, body := range []string{`{}`, `{"error":"temporary"}`, `{"data":[{}],"has_more":false}`, `{"data":[{"results":null}],"has_more":false}`, `{"data":null,"has_more":false}`, `{"data":[],"has_more":null}`} {
+		doer := &recordingDoer{resp: costResponse(http.StatusOK, body)}
+		snap, err := freshAnthropic(t, doer).Fetch(context.Background())
+		if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
+			t.Fatalf("body %s: snapshot=%+v err=%v; want failed unknown", body, snap, err)
+		}
+	}
+}
+
+func TestAnthropicHasMoreRequiresNextPage(t *testing.T) {
+	doer := &recordingDoer{resp: costResponse(http.StatusOK, `{"data":[],"has_more":true,"next_page":null}`)}
+	snap, err := freshAnthropic(t, doer).Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed {
+		t.Fatalf("snapshot=%+v err=%v; want failed missing pagination token", snap, err)
+	}
+}
+
+func TestAnthropicRequiresExplicitUSDCurrency(t *testing.T) {
+	body := `{"data":[{"results":[{"amount":"1000"}]}],"has_more":false,"next_page":null}`
+	snap, err := freshAnthropic(t, &recordingDoer{resp: costResponse(http.StatusOK, body)}).Fetch(context.Background())
+	if err != nil || snap.Status != SourcePartial || *snap.Windows[0].Used != 0 {
+		t.Fatalf("snapshot=%+v err=%v; want partial zero spend", snap, err)
+	}
+}
+
+func TestAnthropicNonFiniteBudgetFailsClosed(t *testing.T) {
+	for _, budget := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		src := freshAnthropic(t, &recordingDoer{resp: costResponse(http.StatusOK, costBody("100"))})
+		src.MonthlyBudgetUSD = budget
+		snap, err := src.Fetch(context.Background())
+		if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
+			t.Fatalf("budget=%v: snapshot=%+v err=%v; want failed unknown", budget, snap, err)
+		}
 	}
 }

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -96,6 +98,33 @@ func TestBoundedClientHTTPSPolicy(t *testing.T) {
 				t.Fatalf("transport must not be called on rejected URL; got %d calls", len(doer.calls))
 			}
 		})
+	}
+}
+
+func TestBoundedClientRejectsCrossOriginRedirects(t *testing.T) {
+	var leaked atomic.Int32
+	other := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "" {
+			leaked.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	first := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL, http.StatusFound)
+	}))
+	defer first.Close()
+
+	client := first.Client()
+	bc := &BoundedClient{Transport: client, Timeout: time.Second}
+	req := newRequest(t, first.URL)
+	req.Header.Set("x-api-key", "synthetic-admin-key")
+	_, err := bc.Do(req)
+	if err == nil {
+		t.Fatal("expected cross-origin redirect to be rejected")
+	}
+	if leaked.Load() != 0 {
+		t.Fatal("credential was forwarded to redirect origin")
 	}
 }
 
