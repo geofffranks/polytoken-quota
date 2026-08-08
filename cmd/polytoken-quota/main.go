@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -26,6 +27,16 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
+
+var Version = "dev"
+
+func printVersionIfRequested(args []string, output io.Writer) bool {
+	if len(args) == 0 || args[0] != "--version" {
+		return false
+	}
+	fmt.Fprintf(output, "polytoken-quota %s\n", Version)
+	return true
+}
 
 // config resolves every path and setting the Coordinator needs from the
 // environment. The utility root defaults to $HOME/.polytoken-quota and is
@@ -260,6 +271,10 @@ func newCoordinator(cfg config) *service.Coordinator {
 }
 
 func main() {
+	if printVersionIfRequested(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

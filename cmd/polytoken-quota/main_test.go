@@ -1,10 +1,49 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestPrintVersionIfRequestedPrintsDefaultVersion(t *testing.T) {
+	var output bytes.Buffer
+	oldVersion := Version
+	Version = "dev"
+	t.Cleanup(func() { Version = oldVersion })
+
+	if !printVersionIfRequested([]string{"--version"}, &output) {
+		t.Fatal("--version was not handled")
+	}
+	if got, want := output.String(), "polytoken-quota dev\n"; got != want {
+		t.Fatalf("version output=%q want %q", got, want)
+	}
+}
+
+func TestPrintVersionIfRequestedUsesLinkTimeOverrideValue(t *testing.T) {
+	var output bytes.Buffer
+	oldVersion := Version
+	Version = "v1.2.3"
+	t.Cleanup(func() { Version = oldVersion })
+
+	if !printVersionIfRequested([]string{"--version"}, &output) {
+		t.Fatal("--version was not handled")
+	}
+	if got, want := output.String(), "polytoken-quota v1.2.3\n"; got != want {
+		t.Fatalf("version output=%q want %q", got, want)
+	}
+}
+
+func TestPrintVersionIfRequestedIgnoresOtherArguments(t *testing.T) {
+	var output bytes.Buffer
+	if printVersionIfRequested([]string{"status"}, &output) {
+		t.Fatal("non-version arguments were handled as --version")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("unexpected output=%q", output.String())
+	}
+}
 
 func TestResolveConfigRejectsInvalidExplicitPolytokenBinary(t *testing.T) {
 	t.Setenv("POLYTOKEN_BINARY", filepath.Join(t.TempDir(), "missing", "polytoken"))
