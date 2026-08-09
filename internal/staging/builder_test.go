@@ -90,10 +90,9 @@ func layeredFixture(t *testing.T) liveFixture {
 	testutil.WriteFile(t, filepath.Join(projectDir, "subagents", "project.md"), projectDefMD)
 
 	res := target.Resolved{
-		ID:              "proj-test",
-		CanonicalRoot:   projectDir,
-		Global:          false,
-		DefinitionFiles: []string{filepath.Join(projectDir, "subagents", "project.md")},
+		ID:            "proj-test",
+		CanonicalRoot: projectDir,
+		Global:        false,
 	}
 	// A realistic plan: re-enable codex/gpt (edit), set a scalar default, and
 	// rewrite the project definition model + fallback list. These edits land

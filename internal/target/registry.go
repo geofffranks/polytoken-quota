@@ -19,14 +19,26 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 )
 
-// Resolved is a canonicalized, validated target. DefinitionFiles holds the
-// canonical absolute paths of the managed definition files, all guaranteed to be
-// contained under CanonicalRoot.
+// ResolvedDefinition is one explicitly registered definition after exact path
+// validation. Public identity is limited to the target ID and normalized,
+// slash-separated policy-relative path. canonicalPath is retained internally for
+// exact approved-file reads and is never exposed through DTOs or errors.
+type ResolvedDefinition struct {
+	TargetID   string
+	PolicyPath string
+	Chain      policy.Chain
+
+	canonicalPath string
+}
+
+// Resolved is a canonicalized, validated target. Definitions keeps each managed
+// definition's approved canonical path together with its public target/path
+// identity and exact desired chain; callers never reconstruct paths.
 type Resolved struct {
-	ID              string
-	CanonicalRoot   string
-	Global          bool
-	DefinitionFiles []string
+	ID            string
+	CanonicalRoot string
+	Global        bool
+	Definitions   []ResolvedDefinition
 }
 
 // ErrSymlinkManagedFile signals a managed definition path that is a symlink,
@@ -47,58 +59,89 @@ func Resolve(in policy.Target) (Resolved, error) {
 	}
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return Resolved{}, fmt.Errorf("target: resolve root %q: %w", in.Root, err)
+		return Resolved{}, errors.New("target: resolve root failed")
 	}
 
 	out := Resolved{ID: in.ID, CanonicalRoot: realRoot, Global: in.Global}
 	seen := map[string]bool{}
 	for _, def := range in.Definitions {
-		canon, err := resolveDefinition(realRoot, def.Path)
+		policyPath, canon, err := resolveDefinition(realRoot, def.Path)
 		if err != nil {
-			if in.ID != "" {
-				return Resolved{}, fmt.Errorf("target: %s: %w", in.ID, err)
-			}
-			return Resolved{}, err
+			return Resolved{}, definitionError(in.ID, def.Path, err)
 		}
 		if seen[canon] {
-			return Resolved{}, fmt.Errorf("target: duplicate definition file %q", canon)
+			return Resolved{}, definitionError(in.ID, policyPath, errors.New("duplicate definition file"))
 		}
 		seen[canon] = true
-		out.DefinitionFiles = append(out.DefinitionFiles, canon)
+		out.Definitions = append(out.Definitions, ResolvedDefinition{
+			TargetID:      in.ID,
+			PolicyPath:    policyPath,
+			Chain:         append(policy.Chain(nil), def.Chain...),
+			canonicalPath: canon,
+		})
 	}
-	sort.Strings(out.DefinitionFiles)
+	sort.Slice(out.Definitions, func(i, j int) bool {
+		return out.Definitions[i].PolicyPath < out.Definitions[j].PolicyPath
+	})
 	return out, nil
 }
 
-func resolveDefinition(root, rel string) (string, error) {
+func resolveDefinition(root, rel string) (string, string, error) {
 	if rel == "" {
-		return "", errors.New("empty definition path")
+		return "", "", errors.New("empty definition path")
+	}
+	if filepath.IsAbs(rel) {
+		return "", "", errors.New("absolute definition path is not policy-relative")
 	}
 	// Reject traversal that escapes the root before touching the filesystem.
 	cleaned := filepath.Clean(rel)
-	if cleaned == ".." || strings.HasPrefix(cleaned, "../") {
-		return "", fmt.Errorf("path traversal outside root: %q", rel)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", "", errors.New("path traversal outside root")
 	}
-	abs := rel
-	if !filepath.IsAbs(rel) {
-		abs = filepath.Join(root, rel)
-	}
+	policyPath := filepath.ToSlash(cleaned)
+	abs := filepath.Join(root, cleaned)
 	// Symlink rejection (default): Lstat catches a symlink at the entry itself.
 	li, err := os.Lstat(abs)
 	if err != nil {
-		return "", fmt.Errorf("stat %q: %w", rel, err)
+		return "", "", errors.New("stat failed")
 	}
 	if li.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%w: %q", ErrSymlinkManagedFile, rel)
+		return "", "", ErrSymlinkManagedFile
 	}
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", fmt.Errorf("resolve %q: %w", rel, err)
+		return "", "", errors.New("resolve failed")
 	}
 	if !isWithin(root, real) {
-		return "", fmt.Errorf("path outside root: %q", rel)
+		return "", "", errors.New("path outside root")
 	}
-	return real, nil
+	return policyPath, real, nil
+}
+
+func definitionError(targetID, policyPath string, err error) error {
+	location := safeLocation(targetID, policyPath)
+	if location == "" {
+		return fmt.Errorf("target: definition: %w", err)
+	}
+	return fmt.Errorf("target: definition %s: %w", location, err)
+}
+
+func safeLocation(targetID, policyPath string) string {
+	targetID = sanitizeLabel(targetID)
+	policyPath = filepath.ToSlash(filepath.Clean(policyPath))
+	if filepath.IsAbs(policyPath) || policyPath == "." || policyPath == ".." || strings.HasPrefix(policyPath, "../") {
+		policyPath = "<invalid>"
+	} else {
+		policyPath = sanitizeLabel(policyPath)
+	}
+	switch {
+	case targetID != "" && policyPath != "":
+		return targetID + ":" + policyPath
+	case targetID != "":
+		return targetID
+	default:
+		return policyPath
+	}
 }
 
 // isWithin reports whether path is contained under root after canonicalization.

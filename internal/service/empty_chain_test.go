@@ -98,10 +98,9 @@ func TestEmptyChainFailurePreservesByteIdenticalLKG(t *testing.T) {
 		"models:\n  codex/gpt:\n    enabled: true\n  zai/glm:\n    enabled: true\n")
 
 	res := target.Resolved{
-		ID:              "global",
-		CanonicalRoot:   globalDir,
-		Global:          true,
-		DefinitionFiles: []string{defPath},
+		ID:            "global",
+		CanonicalRoot: globalDir,
+		Global:        true,
 	}
 	// A zero-edit plan: the exact shape produced by an empty-chain failure.
 	zeroPlan := reconcile.Plan{TargetID: "global"}

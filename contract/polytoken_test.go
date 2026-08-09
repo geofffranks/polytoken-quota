@@ -191,10 +191,9 @@ func disabledFallbackRes(t *testing.T) target.Resolved {
 	t.Helper()
 	dir := absFixture(t, "disabled-fallback", "global")
 	return target.Resolved{
-		ID:              "global",
-		CanonicalRoot:   dir,
-		Global:          true,
-		DefinitionFiles: []string{filepath.Join(dir, "subagents", "global.md")},
+		ID:            "global",
+		CanonicalRoot: dir,
+		Global:        true,
 	}
 }
 
@@ -236,10 +235,9 @@ func testDisabledFallback(t *testing.T, bin string) {
 func testValidCandidate(t *testing.T, bin string) {
 	globalDir := absFixture(t, "live", "global")
 	res := target.Resolved{
-		ID:              "global",
-		CanonicalRoot:   globalDir,
-		Global:          true,
-		DefinitionFiles: []string{filepath.Join(globalDir, "subagents", "global.md")},
+		ID:            "global",
+		CanonicalRoot: globalDir,
+		Global:        true,
 	}
 	work := t.TempDir()
 	env := isolateEnv(t, work)
@@ -271,10 +269,9 @@ func testLayeredRoot(t *testing.T, bin string) {
 	globalDir := absFixture(t, "live", "global")
 	projectDir := absFixture(t, "live", "project", ".polytoken")
 	res := target.Resolved{
-		ID:              "project",
-		CanonicalRoot:   projectDir,
-		Global:          false,
-		DefinitionFiles: []string{filepath.Join(projectDir, "subagents", "project.md")},
+		ID:            "project",
+		CanonicalRoot: projectDir,
+		Global:        false,
 	}
 	work := t.TempDir()
 	env := isolateEnv(t, work)
@@ -301,10 +298,9 @@ func testNeutralIsolation(t *testing.T, bin string) {
 	projectDir := absFixture(t, "live", "project", ".polytoken")
 	conflictingDir := absFixture(t, "live", "conflicting")
 	res := target.Resolved{
-		ID:              "project",
-		CanonicalRoot:   projectDir,
-		Global:          false,
-		DefinitionFiles: []string{filepath.Join(projectDir, "subagents", "project.md")},
+		ID:            "project",
+		CanonicalRoot: projectDir,
+		Global:        false,
 	}
 	work := t.TempDir()
 	env := isolateEnv(t, work)
@@ -332,10 +328,9 @@ func testNeutralIsolation(t *testing.T, bin string) {
 func testTimeout(t *testing.T, bin string) {
 	globalDir := absFixture(t, "live", "global")
 	res := target.Resolved{
-		ID:              "global",
-		CanonicalRoot:   globalDir,
-		Global:          true,
-		DefinitionFiles: []string{filepath.Join(globalDir, "subagents", "global.md")},
+		ID:            "global",
+		CanonicalRoot: globalDir,
+		Global:        true,
 	}
 	// Snapshot the live fixture before any validation.
 	liveBefore, _ := os.ReadFile(filepath.Join(globalDir, "config.yaml"))

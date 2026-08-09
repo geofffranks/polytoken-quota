@@ -47,11 +47,11 @@ func TestResolveGlobalTarget(t *testing.T) {
 	if !res.Global || res.ID != "global" || res.CanonicalRoot == "" {
 		t.Fatalf("resolved=%+v", res)
 	}
-	if len(res.DefinitionFiles) != 1 || filepath.Base(res.DefinitionFiles[0]) != "agent.md" {
-		t.Fatalf("files=%+v", res.DefinitionFiles)
+	if len(res.Definitions) != 1 || res.Definitions[0].PolicyPath != "agents/agent.md" {
+		t.Fatalf("definitions=%+v", res.Definitions)
 	}
-	if !withinRoot(t, res.CanonicalRoot, res.DefinitionFiles[0]) {
-		t.Fatalf("file %q not within root %q", res.DefinitionFiles[0], res.CanonicalRoot)
+	if !withinRoot(t, res.CanonicalRoot, res.Definitions[0].canonicalPath) {
+		t.Fatalf("definition not within resolved root")
 	}
 }
 
@@ -105,8 +105,109 @@ func TestResolveExplicitProjectsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if len(res.DefinitionFiles) != 1 || filepath.Base(res.DefinitionFiles[0]) != "registered.md" {
-		t.Fatalf("files=%+v want only registered.md", res.DefinitionFiles)
+	if len(res.Definitions) != 1 || res.Definitions[0].PolicyPath != "registered.md" {
+		t.Fatalf("definitions=%+v want only registered.md", res.Definitions)
+	}
+}
+
+// TestResolvedDefinitionsRetainPathIdentity proves each explicitly registered
+// definition keeps its target, normalized policy path, exact desired chain, and
+// an internal canonical path approved by containment checks.
+func TestResolvedDefinitionsRetainPathIdentity(t *testing.T) {
+	secretRoot := filepath.Join(t.TempDir(), "home", "alice", ".config", "CANARY-secret-root")
+	definitionPath := filepath.Join(secretRoot, "subagents", "nested", "agent.md")
+	if err := os.MkdirAll(filepath.Dir(definitionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(definitionPath, []byte("---\nname: Build Agent\npolytoken:\n  model: codex/gpt\n  fallback_models: [zai/glm]\n---\nbody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chain := policy.Chain{"codex/gpt(medium)", "zai/glm"}
+	res, err := Resolve(policy.Target{ID: "project-a", Root: secretRoot, Definitions: []policy.Definition{{
+		Path: filepath.Join("subagents", "nested", "..", "nested", "agent.md"), Chain: chain,
+	}}})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Definitions) != 1 {
+		t.Fatalf("definitions=%+v", res.Definitions)
+	}
+	got := res.Definitions[0]
+	if got.TargetID != "project-a" || got.PolicyPath != "subagents/nested/agent.md" {
+		t.Fatalf("public identity=%+v", got)
+	}
+	if got.canonicalPath != definitionPath {
+		t.Fatalf("canonical path=%q want %q", got.canonicalPath, definitionPath)
+	}
+	if len(got.Chain) != 2 || got.Chain[0] != chain[0] || got.Chain[1] != chain[1] {
+		t.Fatalf("chain=%v want %v", got.Chain, chain)
+	}
+	chain[0] = "mutated/input"
+	if got.Chain[0] != "codex/gpt(medium)" {
+		t.Fatalf("resolved chain aliases policy input: %v", got.Chain)
+	}
+	metadata, err := ReadDefinitionMetadata(got)
+	if err != nil {
+		t.Fatalf("ReadDefinitionMetadata: %v", err)
+	}
+	if metadata.Name != "Build Agent" || metadata.Model != "codex/gpt" || len(metadata.FallbackModels) != 1 || metadata.FallbackModels[0] != "zai/glm" {
+		t.Fatalf("metadata=%+v", metadata)
+	}
+}
+
+// TestResolveDoesNotParseDefinitionMetadata keeps exact path validation separate
+// from diagnostic metadata reads. Malformed frontmatter is a metadata error, not
+// a reason to reject an otherwise valid registered reconciliation target.
+func TestResolveDoesNotParseDefinitionMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "agent.md")
+	if err := os.WriteFile(path, []byte("---\nname: [invalid\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(policy.Target{ID: "project-a", Root: root, Definitions: []policy.Definition{{Path: "agent.md"}}})
+	if err != nil {
+		t.Fatalf("Resolve parsed frontmatter: %v", err)
+	}
+	if _, err := ReadDefinitionMetadata(resolved.Definitions[0]); err == nil {
+		t.Fatal("malformed frontmatter accepted by metadata reader")
+	}
+}
+
+// TestRoutingDefinitionsExplicitPathsOnly proves resolution reads only exact
+// registered files and still rejects traversal and symlink escapes. Model-bearing
+// siblings and sibling project roots are never discovered.
+func TestRoutingDefinitionsExplicitPathsOnly(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "home", "registered", ".polytoken")
+	outside := filepath.Join(base, "home", "unregistered-project", ".polytoken")
+	for _, path := range []string{
+		filepath.Join(root, "subagents", "registered.md"),
+		filepath.Join(root, "subagents", "unregistered.md"),
+		filepath.Join(outside, "subagents", "sibling.md"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\nname: hidden unless registered\npolytoken:\n  model: codex/gpt\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := Resolve(policy.Target{ID: "registered", Root: root, Definitions: []policy.Definition{{Path: "subagents/registered.md", Chain: policy.Chain{"codex/gpt"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Definitions) != 1 || res.Definitions[0].PolicyPath != "subagents/registered.md" {
+		t.Fatalf("resolved unregistered definitions: %+v", res.Definitions)
+	}
+
+	link := filepath.Join(root, "subagents", "linked.md")
+	if err := os.Symlink(filepath.Join(outside, "subagents", "sibling.md"), link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	for _, path := range []string{"../unregistered-project/.polytoken/subagents/sibling.md", "subagents/linked.md"} {
+		if _, err := Resolve(policy.Target{ID: "registered", Root: root, Definitions: []policy.Definition{{Path: path}}}); err == nil {
+			t.Fatalf("accepted unsafe definition %q", path)
+		}
 	}
 }
 

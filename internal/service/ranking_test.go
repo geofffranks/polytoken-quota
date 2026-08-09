@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -449,6 +451,118 @@ func TestComputeRankingLookupReordersBuild(t *testing.T) {
 	got := modelScalar(plan, "agent.md")
 	if got != "full/x" {
 		t.Fatalf("with routing enabled the higher-headroom provider should lead; got model=%q want %q", got, "full/x")
+	}
+}
+
+// TestRoutingDefinitionNamesAndOrdering proves route metadata preserves the
+// canonical core order and deterministically sorts named definitions while
+// retaining exact target/path/chain identity. Duplicate names are disambiguated
+// with policy-relative path context and missing names use a stable path fallback.
+func TestRoutingDefinitionNamesAndOrdering(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "home", "alice", ".config", "CANARY-routing")
+	writeDefinition := func(rel, frontmatter string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\n"+frontmatter+"\n---\nbody\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeDefinition("subagents/zeta.md", "name: Shared\npolytoken:\n  model: live/zeta")
+	writeDefinition("subagents/alpha.md", "name: Shared\npolytoken:\n  fallback_models: [live/alpha]")
+	writeDefinition("facets/no-name.md", "polytoken:\n  model: live/fallback")
+
+	desired := policy.Desired{
+		Global: policy.Target{ID: "global", Root: root,
+			Full: policy.Chain{"full/a"}, Mini: policy.Chain{"mini/a"}, Nano: policy.Chain{"nano/a"},
+			Definitions: []policy.Definition{
+				{Path: "subagents/zeta.md", Chain: policy.Chain{"desired/zeta"}},
+				{Path: "facets/no-name.md", Chain: policy.Chain{"desired/fallback"}},
+				{Path: "subagents/alpha.md", Chain: policy.Chain{"desired/alpha"}},
+			},
+		},
+	}
+	resolved, err := NewTargetRegistry().ResolveTargets(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := RoutingDefinitionMetadata(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNames := []string{"full", "mini", "nano", "no-name", "Shared (subagents/alpha.md)", "Shared (subagents/zeta.md)"}
+	wantPaths := []string{"", "", "", "facets/no-name.md", "subagents/alpha.md", "subagents/zeta.md"}
+	wantHeads := []string{"full/a", "mini/a", "nano/a", "desired/fallback", "desired/alpha", "desired/zeta"}
+	if len(got) != len(wantNames) {
+		t.Fatalf("metadata=%+v", got)
+	}
+	for i := range wantNames {
+		if got[i].TargetID != "global" || got[i].Name != wantNames[i] || got[i].SourcePath != wantPaths[i] || len(got[i].Desired) != 1 || got[i].Desired[0] != wantHeads[i] {
+			t.Fatalf("metadata[%d]=%+v", i, got[i])
+		}
+	}
+}
+
+// TestRoutingOutputNeverLeaksCanonicalRoots proves the service-ready metadata
+// and resolver errors expose only target IDs and normalized policy-relative
+// paths, never synthetic home/secret canonical roots or raw frontmatter secrets.
+func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
+	secretRoot := filepath.Join(t.TempDir(), "home", "victim", ".config", "CANARY-SECRET-ROOT")
+	path := filepath.Join(secretRoot, "subagents", "agent.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nname: 'Agent\\napi_key=CANARY-NAME-SECRET'\npolytoken:\n  model: codex/gpt\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	desired := policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/agent.md", Chain: policy.Chain{"codex/gpt"}}}}}
+	resolved, err := NewTargetRegistry().ResolveTargets(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := RoutingDefinitionMetadata(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(encoded)
+	for _, forbidden := range []string{secretRoot, "CANARY-SECRET-ROOT", "CANARY-NAME-SECRET", "api_key"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("metadata leaked %q: %s", forbidden, output)
+		}
+	}
+	if !strings.Contains(output, `"target_id":"global"`) || !strings.Contains(output, `"source_path":"subagents/agent.md"`) {
+		t.Fatalf("metadata lacks safe location: %s", output)
+	}
+
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: filepath.Join(secretRoot, "missing.md")}}}})
+	if err == nil {
+		t.Fatal("absolute definition path accepted")
+	}
+	if strings.Contains(err.Error(), secretRoot) || strings.Contains(err.Error(), "CANARY-SECRET-ROOT") {
+		t.Fatalf("resolution error leaked canonical root: %v", err)
+	}
+
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/missing.md"}}}})
+	if err == nil {
+		t.Fatal("missing definition accepted")
+	}
+	if strings.Contains(err.Error(), secretRoot) || strings.Contains(err.Error(), "CANARY-SECRET-ROOT") {
+		t.Fatalf("missing-definition error leaked canonical root: %v", err)
+	}
+
+	missingRoot := filepath.Join(t.TempDir(), "home", "victim", ".config", "CANARY-MISSING-ROOT")
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: missingRoot}})
+	if err == nil {
+		t.Fatal("missing root accepted")
+	}
+	if strings.Contains(err.Error(), missingRoot) || strings.Contains(err.Error(), "CANARY-MISSING-ROOT") {
+		t.Fatalf("missing-root error leaked canonical root: %v", err)
 	}
 }
 

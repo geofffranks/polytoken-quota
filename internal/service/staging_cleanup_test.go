@@ -33,8 +33,7 @@ func noStagingSourceFixture(t *testing.T) (string, target.Resolved) {
 		"models:\n  codex/gpt:\n    enabled: true\ndefaults:\n  full: codex/gpt\n")
 	testutil.WriteFile(t, filepath.Join(globalDir, "subagents", "agent.md"),
 		"---\npolytoken:\n  model: codex/gpt\n---\nbody\n")
-	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true,
-		DefinitionFiles: []string{filepath.Join(globalDir, "subagents", "agent.md")}}
+	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true}
 	return globalDir, res
 }
 

@@ -87,8 +87,7 @@ func fsUnregisteredUntouched(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(otherDir, "secret.yaml"), "api_key: must-not-leak\n")
 
 	before := testutil.Snapshot(t, root)
-	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true,
-		DefinitionFiles: []string{filepath.Join(globalDir, "subagents", "agent.md")}}
+	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true}
 	c, err := staging.Builder{
 		TempRoot: t.TempDir(), AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
@@ -150,8 +149,7 @@ func fsRestrictiveModes(t *testing.T) {
 		"models:\n  codex/gpt:\n    enabled: true\n")
 	testutil.WriteFile(t, filepath.Join(globalDir, "subagents", "agent.md"),
 		"---\npolytoken:\n  model: codex/gpt\n---\nbody\n")
-	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true,
-		DefinitionFiles: []string{filepath.Join(globalDir, "subagents", "agent.md")}}
+	res := target.Resolved{ID: "global", CanonicalRoot: globalDir, Global: true}
 	c, err := staging.Builder{
 		TempRoot: t.TempDir(), AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},

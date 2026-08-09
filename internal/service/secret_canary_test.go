@@ -70,8 +70,7 @@ func runCanaryScenario(t *testing.T, canary string, scenarios []string) string {
 	store := state.Store{Path: statePath, RecoveredRetention: 24 * time.Hour}
 	clock := func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }
 
-	res := target.Resolved{ID: "global", CanonicalRoot: sourceDir, Global: true,
-		DefinitionFiles: []string{filepath.Join(sourceDir, "subagents", "agent.md")}}
+	res := target.Resolved{ID: "global", CanonicalRoot: sourceDir, Global: true}
 
 	for _, sc := range scenarios {
 		switch sc {
