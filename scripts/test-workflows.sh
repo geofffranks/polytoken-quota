@@ -135,13 +135,17 @@ weekly_tmp=$(mktemp -d)
 archive_tmp=''
 trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
 printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 v9.9.9 not-a-tag > "$weekly_tmp/released-tags"
-printf '%s\n' v9.9.9 v2.0.0 > "$weekly_tmp/repository-only-tags"
+printf '%s\n' v10.0.0 v2.0.0 > "$weekly_tmp/repository-only-tags"
 selected=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/released-tags" | sort | tail -n1 | cut -d' ' -f2)
+repository_only_selected=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/repository-only-tags" | sort | tail -n1 | cut -d' ' -f2)
+test "$repository_only_selected" = v10.0.0 || { echo "FAIL: repository-only fixture did not contain the higher stable-looking tag: $repository_only_selected" >&2; exit 1; }
+test "$selected" != "$repository_only_selected" || { echo "FAIL: released-tag selection included repository-only tag: $selected" >&2; exit 1; }
 test "$selected" = v9.9.9 || { echo "FAIL: local released-tag fixture selected $selected" >&2; exit 1; }
 grep -Fxv v9.9.9 "$weekly_tmp/released-tags" > "$weekly_tmp/releases-without-drafts"
 selected_without_draft=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/releases-without-drafts" | sort | tail -n1 | cut -d' ' -f2)
 test "$selected_without_draft" = v1.10.0 || { echo "FAIL: draft stable-looking tag was not excluded: $selected_without_draft" >&2; exit 1; }
-echo 'PASS: weekly tag selection uses released tags, ignores repository-only tags, and excludes draft stable-looking tags'
+test "$selected_without_draft" != "$repository_only_selected" || { echo "FAIL: released baseline included repository-only tag: $selected_without_draft" >&2; exit 1; }
+echo 'PASS: weekly tag selection uses released tags, ignores higher repository-only tags, and excludes draft stable-looking tags'
 
 # Validate the real release shape locally: cross-build every supported target, package
 # the resulting binary and VERSION, inspect contents, verify SHA-256 checksums, and
