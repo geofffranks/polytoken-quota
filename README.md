@@ -50,6 +50,8 @@ Download the archive for the machine's `GOOS`/`GOARCH` pair and `checksums.txt` 
 
 ```sh
 sha256sum --check checksums.txt
+# macOS:
+shasum -a 256 -c checksums.txt
 ```
 
 The archive contains the `polytoken-quota` executable and a `VERSION` file. Extract it and place the executable somewhere on `PATH`, for example:

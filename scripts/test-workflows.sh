@@ -187,6 +187,18 @@ readme="$repo_root/README.md"
 agents="$repo_root/AGENTS.md"
 [[ -f "$readme" ]] || { echo "error: README.md not found: $readme" >&2; exit 1; }
 [[ -f "$agents" ]] || { echo "error: AGENTS.md not found: $agents" >&2; exit 1; }
+
+# Keep maintainer-facing documentation tied to every automation surface and its
+# operational contract. Workflow assertions above validate implementation;
+# these checks ensure the documented operating procedure does not drift away.
+assert_contains "$agents" 'CI.*ci\.yml.*pull requests and pushes to `main`.*test, race-test, vet, and build' 'AGENTS documents CI triggers and test/race/vet/build operations'
+assert_contains "$agents" 'Release.*release\.yml.*four archives.*checksums' 'AGENTS documents release archives and checksums'
+assert_contains "$agents" 'Weekly Patch Release.*weekly-patch-release\.yml.*Monday `09:00 UTC`' 'AGENTS documents weekly patch-release schedule'
+assert_contains "$agents" 'first release' 'AGENTS documents weekly first-release guard'
+assert_contains "$agents" 'Dependabot Auto-Merge.*dependabot-auto-merge\.yml.*patch/minor.*auto-merge' 'AGENTS documents Dependabot auto-merge policy'
+assert_contains "$agents" 'Go Version Bump.*go-version-bump\.yml.*Monday `10:00 UTC`.*pull request' 'AGENTS documents Go version schedule and pull-request behavior'
+assert_contains "$agents" 'Dependabot.*\.github/dependabot\.yml.*weekly Go module and GitHub Actions update' 'AGENTS documents Dependabot update configuration'
+
 for archive in \
   polytoken-quota-darwin-arm64.tar.gz \
   polytoken-quota-darwin-amd64.tar.gz \
@@ -195,6 +207,7 @@ for archive in \
   assert_contains "$readme" "\`$archive\`" "README documents release archive $archive"
 done
 assert_contains "$readme" 'sha256sum --check checksums\.txt' 'README documents checksum verification'
+assert_contains "$readme" 'shasum -a 256 -c checksums\.txt' 'README documents macOS checksum verification'
 assert_contains "$readme" 'VERSION' 'README documents the VERSION file'
 assert_contains "$readme" -- '--version' 'README documents --version behavior'
 assert_contains "$readme" 'No release is assumed to exist yet' 'README does not claim a release already exists'

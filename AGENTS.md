@@ -53,7 +53,6 @@ Repository settings required for these workflows: enable **Allow auto-merge**; s
 | Race | `go test -race ./...` |
 | Vet | `go vet ./...` |
 | Fuzz | `go test -run=^$ -fuzz=<FuzzTarget> -fuzztime=20s` |
-| Build check | `go build ./...` |
 | Workflow policy | `scripts/test-workflows.sh` |
 | Contract | `scripts/test-contract.sh` (opt-in external binary) |
 
