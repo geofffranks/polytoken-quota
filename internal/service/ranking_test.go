@@ -564,6 +564,9 @@ func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
 	if strings.Contains(err.Error(), missingRoot) || strings.Contains(err.Error(), "CANARY-MISSING-ROOT") {
 		t.Fatalf("missing-root error leaked canonical root: %v", err)
 	}
+	if !strings.Contains(err.Error(), "global") {
+		t.Fatalf("missing-root error lacks safe target identity: %v", err)
+	}
 }
 
 // modelScalar extracts the scalar value of a definition's polytoken.model edit.

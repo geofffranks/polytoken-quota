@@ -29,6 +29,9 @@ type ResolvedDefinition struct {
 	Chain      policy.Chain
 
 	canonicalPath string
+	canonicalRoot string
+	rootInfo      os.FileInfo
+	fileInfo      os.FileInfo
 }
 
 // Resolved is a canonicalized, validated target. Definitions keeps each managed
@@ -51,15 +54,19 @@ var ErrSymlinkManagedFile = errors.New("target: managed definition file is a sym
 // files.
 func Resolve(in policy.Target) (Resolved, error) {
 	if in.Root == "" {
-		return Resolved{}, errors.New("target: empty root")
+		return Resolved{}, rootError(in.ID, "empty root")
 	}
 	root, err := filepath.Abs(filepath.Clean(in.Root))
 	if err != nil {
-		return Resolved{}, fmt.Errorf("target: canonicalize root: %w", err)
+		return Resolved{}, rootError(in.ID, "canonicalize root failed")
 	}
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return Resolved{}, errors.New("target: resolve root failed")
+		return Resolved{}, rootError(in.ID, "resolve root failed")
+	}
+	rootInfo, err := os.Stat(realRoot)
+	if err != nil {
+		return Resolved{}, rootError(in.ID, "stat root failed")
 	}
 
 	out := Resolved{ID: in.ID, CanonicalRoot: realRoot, Global: in.Global}
@@ -68,6 +75,10 @@ func Resolve(in policy.Target) (Resolved, error) {
 		policyPath, canon, err := resolveDefinition(realRoot, def.Path)
 		if err != nil {
 			return Resolved{}, definitionError(in.ID, def.Path, err)
+		}
+		fileInfo, err := os.Stat(canon)
+		if err != nil {
+			return Resolved{}, definitionError(in.ID, policyPath, errors.New("stat failed"))
 		}
 		if seen[canon] {
 			return Resolved{}, definitionError(in.ID, policyPath, errors.New("duplicate definition file"))
@@ -78,6 +89,9 @@ func Resolve(in policy.Target) (Resolved, error) {
 			PolicyPath:    policyPath,
 			Chain:         append(policy.Chain(nil), def.Chain...),
 			canonicalPath: canon,
+			canonicalRoot: realRoot,
+			rootInfo:      rootInfo,
+			fileInfo:      fileInfo,
 		})
 	}
 	sort.Slice(out.Definitions, func(i, j int) bool {
@@ -118,6 +132,14 @@ func resolveDefinition(root, rel string) (string, string, error) {
 	return policyPath, real, nil
 }
 
+func rootError(targetID, classification string) error {
+	identity := normalizePublicIdentity(targetID)
+	if identity == "" {
+		return fmt.Errorf("target: %s", classification)
+	}
+	return fmt.Errorf("target %s: %s", identity, classification)
+}
+
 func definitionError(targetID, policyPath string, err error) error {
 	location := safeLocation(targetID, policyPath)
 	if location == "" {
@@ -127,12 +149,12 @@ func definitionError(targetID, policyPath string, err error) error {
 }
 
 func safeLocation(targetID, policyPath string) string {
-	targetID = sanitizeLabel(targetID)
+	targetID = normalizePublicIdentity(targetID)
 	policyPath = filepath.ToSlash(filepath.Clean(policyPath))
 	if filepath.IsAbs(policyPath) || policyPath == "." || policyPath == ".." || strings.HasPrefix(policyPath, "../") {
 		policyPath = "<invalid>"
 	} else {
-		policyPath = sanitizeLabel(policyPath)
+		policyPath = normalizePublicIdentity(policyPath)
 	}
 	switch {
 	case targetID != "" && policyPath != "":

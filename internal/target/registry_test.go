@@ -1,8 +1,10 @@
 package target
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
@@ -170,6 +172,183 @@ func TestResolveDoesNotParseDefinitionMetadata(t *testing.T) {
 	}
 	if _, err := ReadDefinitionMetadata(resolved.Definitions[0]); err == nil {
 		t.Fatal("malformed frontmatter accepted by metadata reader")
+	}
+}
+
+func TestReadDefinitionMetadataRejectsPostResolveSymlinkSwap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		swap func(t *testing.T, root, outside string)
+	}{
+		{
+			name: "file",
+			swap: func(t *testing.T, root, outside string) {
+				t.Helper()
+				managed := filepath.Join(root, "subagents", "agent.md")
+				if err := os.Remove(managed); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(outside, "agent.md"), managed); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+			},
+		},
+		{
+			name: "parent directory",
+			swap: func(t *testing.T, root, outside string) {
+				t.Helper()
+				parent := filepath.Join(root, "subagents")
+				if err := os.RemoveAll(parent); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, parent); err != nil {
+					t.Skipf("symlink unsupported: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "home", "victim", ".config", "CANARY-ROOT")
+			outside := filepath.Join(base, "outside", "CANARY-OUTSIDE")
+			for _, file := range []string{filepath.Join(root, "subagents", "agent.md"), filepath.Join(outside, "agent.md")} {
+				if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				name := "Approved Agent"
+				if strings.HasPrefix(file, outside) {
+					name = "CANARY-OUTSIDE-METADATA"
+				}
+				if err := os.WriteFile(file, []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolved, err := Resolve(policy.Target{ID: "target-a", Root: root, Definitions: []policy.Definition{{Path: "subagents/agent.md"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			tc.swap(t, root, outside)
+			_, err = ReadDefinitionMetadata(resolved.Definitions[0])
+			if err == nil {
+				t.Fatal("metadata reader followed post-resolution symlink swap")
+			}
+			message := err.Error()
+			if !strings.Contains(message, "target-a") || !strings.Contains(message, "subagents/agent.md") {
+				t.Fatalf("error lacks safe location: %q", message)
+			}
+			for _, forbidden := range []string{root, outside, "CANARY-ROOT", "CANARY-OUTSIDE", "CANARY-OUTSIDE-METADATA"} {
+				if strings.Contains(message, forbidden) {
+					t.Fatalf("error leaked %q: %q", forbidden, message)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
+	assertPrivateRootError := func(t *testing.T, err error, classification string, forbidden ...string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("invalid root accepted")
+		}
+		if !strings.Contains(err.Error(), "target-a") || !strings.Contains(err.Error(), classification) {
+			t.Fatalf("root error lacks safe identity/classification: %q", err)
+		}
+		for _, value := range forbidden {
+			if strings.Contains(err.Error(), value) {
+				t.Fatalf("root error leaked root material %q: %q", value, err)
+			}
+		}
+		var pathErr *os.PathError
+		if errors.As(err, &pathErr) {
+			t.Fatalf("root error wraps path-bearing OS error: %v", pathErr)
+		}
+	}
+
+	_, err := Resolve(policy.Target{ID: "target-a"})
+	assertPrivateRootError(t, err, "empty root")
+
+	missingRoot := filepath.Join(t.TempDir(), "CANARY-MISSING-ROOT")
+	_, err = Resolve(policy.Target{ID: "target-a", Root: missingRoot})
+	assertPrivateRootError(t, err, "resolve root failed", missingRoot, "CANARY-MISSING-ROOT")
+
+	t.Run("absolute canonicalization", func(t *testing.T) {
+		removedWorkingDir := t.TempDir()
+		t.Chdir(removedWorkingDir)
+		if err := os.Remove(removedWorkingDir); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Resolve(policy.Target{ID: "target-a", Root: "CANARY-RELATIVE-ROOT"})
+		assertPrivateRootError(t, err, "canonicalize root failed", "CANARY-RELATIVE-ROOT")
+	})
+}
+
+func TestDefinitionIdentityPreservesMarkerSubstrings(t *testing.T) {
+	root := t.TempDir()
+	definitionPath := filepath.Join(root, "secretariat", "tokenizer.md")
+	if err := os.MkdirAll(filepath.Dir(definitionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(definitionPath, []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(policy.Target{ID: "tokenizer=primary", Root: root, Definitions: []policy.Definition{{Path: "secretariat/tokenizer.md"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := ReadDefinitionMetadata(resolved.Definitions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != "tokenizer" {
+		t.Fatalf("path fallback=%q want tokenizer", metadata.Name)
+	}
+
+	if err := os.Remove(definitionPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ReadDefinitionMetadata(resolved.Definitions[0])
+	if err == nil || !strings.Contains(err.Error(), "tokenizer=primary:secretariat/tokenizer.md") {
+		t.Fatalf("identity marker substrings were redacted: %v", err)
+	}
+}
+
+func TestDefinitionDisplayNameRedactsSecretMaterial(t *testing.T) {
+	root := t.TempDir()
+	definitionPath := filepath.Join(root, "agent.md")
+	if err := os.WriteFile(definitionPath, []byte("---\nname: 'Agent token=CANARY-SECRET'\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(policy.Target{ID: "target-a", Root: root, Definitions: []policy.Definition{{Path: "agent.md"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := ReadDefinitionMetadata(resolved.Definitions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name != "Agent" || strings.Contains(metadata.Name, "CANARY-SECRET") {
+		t.Fatalf("display name was not safely redacted: %q", metadata.Name)
+	}
+}
+
+func TestDefinitionPathFallbackIsNeverEmpty(t *testing.T) {
+	root := t.TempDir()
+	definitionPath := filepath.Join(root, ".md")
+	if err := os.WriteFile(definitionPath, []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(policy.Target{ID: "target-a", Root: root, Definitions: []policy.Definition{{Path: ".md"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := ReadDefinitionMetadata(resolved.Definitions[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Name == "" {
+		t.Fatal("valid policy path produced an empty fallback")
 	}
 }
 

@@ -2,7 +2,6 @@ package target
 
 import (
 	"errors"
-	"os"
 	"path"
 	"strings"
 	"unicode"
@@ -29,11 +28,12 @@ type definitionMetadataWire struct {
 	} `yaml:"polytoken"`
 }
 
-// ReadDefinitionMetadata reads exactly one resolver-approved canonical file. It
-// intentionally extracts only display and managed-model metadata; arbitrary
-// frontmatter and body content never cross the target package boundary.
+// ReadDefinitionMetadata reads exactly one resolver-approved file through an
+// anchored root and verifies its filesystem identity before reading. It extracts
+// only display and managed-model metadata; arbitrary frontmatter and body content
+// never cross the target package boundary.
 func ReadDefinitionMetadata(definition ResolvedDefinition) (DefinitionMetadata, error) {
-	raw, err := os.ReadFile(definition.canonicalPath)
+	raw, err := readResolvedDefinition(definition)
 	if err != nil {
 		return DefinitionMetadata{}, definitionError(definition.TargetID, definition.PolicyPath, errors.New("read failed"))
 	}
@@ -45,7 +45,7 @@ func ReadDefinitionMetadata(definition ResolvedDefinition) (DefinitionMetadata, 
 	if err := yaml.Unmarshal(block, &wire); err != nil {
 		return DefinitionMetadata{}, definitionError(definition.TargetID, definition.PolicyPath, errors.New("invalid frontmatter"))
 	}
-	metadata := DefinitionMetadata{Name: sanitizeLabel(wire.Name)}
+	metadata := DefinitionMetadata{Name: sanitizeDisplayName(wire.Name)}
 	if metadata.Name == "" {
 		metadata.Name = pathFallback(definition.PolicyPath)
 	}
@@ -57,18 +57,42 @@ func ReadDefinitionMetadata(definition ResolvedDefinition) (DefinitionMetadata, 
 }
 
 func pathFallback(policyPath string) string {
-	base := path.Base(policyPath)
-	ext := path.Ext(base)
-	return sanitizeLabel(strings.TrimSuffix(base, ext))
+	base := normalizePublicIdentity(path.Base(policyPath))
+	withoutExt := normalizePublicIdentity(strings.TrimSuffix(base, path.Ext(base)))
+	if withoutExt != "" {
+		return withoutExt
+	}
+	if base != "" {
+		return base
+	}
+	return "definition"
 }
 
-func sanitizeLabel(value string) string {
+func sanitizeDisplayName(value string) string {
+	clean := normalizeLabel(value, 0)
+	lower := strings.ToLower(clean)
+	redactAt := len(clean)
+	for _, marker := range []string{"api_key", "apikey", "authorization", "bearer", "credential", "secret", "token"} {
+		if at := strings.Index(lower, marker); at >= 0 && at < redactAt {
+			redactAt = at
+		}
+	}
+	clean = strings.TrimSpace(clean[:redactAt])
+	return normalizeLabel(clean, maxDefinitionNameRunes)
+}
+
+func normalizePublicIdentity(value string) string {
+	return normalizeLabel(value, maxDefinitionNameRunes)
+}
+
+func normalizeLabel(value string, maxRunes int) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
 	}
 	var b strings.Builder
 	lastSpace := false
+	runes := 0
 	for _, r := range value {
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
 			if b.Len() > 0 && !lastSpace {
@@ -77,22 +101,12 @@ func sanitizeLabel(value string) string {
 			}
 			continue
 		}
-		if r == '=' {
-			break
-		}
 		b.WriteRune(r)
 		lastSpace = false
-		if len([]rune(b.String())) >= maxDefinitionNameRunes {
+		runes++
+		if maxRunes > 0 && runes >= maxRunes {
 			break
 		}
 	}
-	clean := strings.TrimSpace(b.String())
-	lower := strings.ToLower(clean)
-	for _, marker := range []string{"api_key", "apikey", "authorization", "bearer", "credential", "secret", "token"} {
-		if at := strings.Index(lower, marker); at >= 0 {
-			clean = strings.TrimSpace(clean[:at])
-			break
-		}
-	}
-	return clean
+	return strings.TrimSpace(b.String())
 }
