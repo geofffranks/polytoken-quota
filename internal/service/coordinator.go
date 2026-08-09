@@ -38,6 +38,7 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
@@ -140,6 +141,8 @@ type transactionInput struct {
 	// Reconcile is set by QuotaCheck to trigger the full stage/validate/publish
 	// flow after observations are applied.
 	Reconcile bool
+	// Verbose requests the verbose reconcile trace in target outcomes.
+	Verbose bool
 }
 
 // Rejected/stale outcomes are non-mutating and exit 1.
@@ -172,8 +175,9 @@ func (c *Coordinator) HandleEvent(ctx context.Context, e hook.Event) Outcome {
 // Reconcile regenerates candidates from the current policy and persisted state.
 // With dryRun it reports managed-field diffs and validation intent without
 // mutating state or targets, while still locking and recovering first.
-func (c *Coordinator) Reconcile(ctx context.Context, dryRun, keepStaging bool) Outcome {
-	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun, KeepStaging: keepStaging})
+// With verbose it populates each target outcome with a decision trace.
+func (c *Coordinator) Reconcile(ctx context.Context, dryRun, keepStaging, verbose bool) Outcome {
+	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun, KeepStaging: keepStaging, Verbose: verbose})
 }
 
 // Sync imports current managed fields as desired intent (guarded unless forced),
@@ -466,7 +470,7 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	c.step("publish-targets")
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
@@ -511,7 +515,7 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	c.step("publish-targets")
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
@@ -540,7 +544,7 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 	timeout := c.validationTimeout(desired)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false))
 	}
 	return outcomes
 }
@@ -552,7 +556,7 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 // (render:/stage:/validate:/publish:/record-pending: suffixed with the target
 // id); the coarse Set/Clear path passes false so the whole batch reports only
 // the batch-level reconcile/publish-targets steps emitted by its caller.
-func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging bool) TargetOutcome {
+func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging, verbose bool) TargetOutcome {
 	id := targetID(rt)
 	step := func(name string) {
 		if detailed {
@@ -560,17 +564,25 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		}
 	}
 	step("render")
-	ranks, _ := ComputeRanking(desired, next, c.now())
+	ranks, rankingResult := ComputeRanking(desired, next, c.now())
 	plan, err := c.Builder.Build(desired, next, rt.Policy, ranks)
 	if err != nil {
 		step("record-pending")
-		return pendingOutcome(id, next.Revision, "render", err)
+		out := pendingOutcome(id, next.Revision, "render", err)
+		if verbose {
+			out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+		}
+		return out
 	}
 	step("stage")
 	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan)
 	if err != nil {
 		step("record-pending")
-		return pendingOutcome(id, next.Revision, "stage", err)
+		out := pendingOutcome(id, next.Revision, "stage", err)
+		if verbose {
+			out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+		}
+		return out
 	}
 	// The Validator adapter runs validation against a no-cleanup copy of the
 	// candidate so the staged files survive into publish (applyOne renames the
@@ -591,6 +603,9 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 			cleanupCandidate = false
 			outcome.StagingRoot = candidate.Root
 		}
+		if verbose {
+			outcome.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+		}
 		return outcome
 	}
 	if publish {
@@ -598,16 +613,28 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		tx, err := c.buildTransaction(prior, next, rt, plan, candidate)
 		if err != nil {
 			step("record-pending")
-			return pendingOutcome(id, next.Revision, "publish", err)
+			out := pendingOutcome(id, next.Revision, "publish", err)
+			if verbose {
+				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+			}
+			return out
 		}
 		// ApplyUnderLock: the Coordinator already holds the transaction lock;
 		// the publisher must NOT re-acquire it (flock LOCK_EX is not re-entrant).
 		if _, err := c.Publish.ApplyUnderLock(ctx, tx); err != nil {
 			step("record-pending")
-			return pendingOutcome(id, next.Revision, "publish", err)
+			out := pendingOutcome(id, next.Revision, "publish", err)
+			if verbose {
+				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+			}
+			return out
 		}
 	}
-	return appliedOutcome(id, next.Revision)
+	out := appliedOutcome(id, next.Revision)
+	if verbose {
+		out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
+	}
+	return out
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -624,6 +651,24 @@ func (c *Coordinator) now() time.Time {
 		return c.Clock.Now()
 	}
 	return time.Now()
+}
+
+// buildTraceSafe assembles the verbose decision trace from the ranking result
+// and plan. It converts the routing.RankingResult into RankEntryReports and
+// delegates to buildTrace.
+func (c *Coordinator) buildTraceSafe(desired policy.Desired, next state.State, rt RegisteredTarget, ranks reconcile.RankLookup, rankingResult routing.RankingResult, plan reconcile.Plan) *ReconcileTrace {
+	entries := make([]RankEntryReport, 0, len(rankingResult.Entries))
+	for _, e := range rankingResult.Entries {
+		entries = append(entries, RankEntryReport{
+			MappingID:   e.MappingID,
+			Rank:        e.Rank,
+			OffPeak:     e.OffPeak,
+			Eligible:    e.Eligible,
+			Explanation: e.Explanation,
+		})
+	}
+	tr := buildTrace(desired, next, rt.Policy, ranks, entries, plan)
+	return &tr
 }
 
 func (c *Coordinator) validationTimeout(desired policy.Desired) time.Duration {

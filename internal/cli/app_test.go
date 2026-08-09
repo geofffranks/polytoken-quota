@@ -79,7 +79,7 @@ func (s *depsSpy) HandleEvent(context.Context, hook.Event) service.Outcome {
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) Reconcile(context.Context, bool, bool) service.Outcome {
+func (s *depsSpy) Reconcile(context.Context, bool, bool, bool) service.Outcome {
 	s.Mutations++
 	return service.Outcome{Accepted: true}
 }
@@ -497,7 +497,7 @@ type outcomeSpy struct{ outcome service.Outcome }
 
 func (s *outcomeSpy) Init(context.Context) service.Outcome                    { return s.outcome }
 func (s *outcomeSpy) HandleEvent(context.Context, hook.Event) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Reconcile(context.Context, bool, bool) service.Outcome   { return s.outcome }
+func (s *outcomeSpy) Reconcile(context.Context, bool, bool, bool) service.Outcome { return s.outcome }
 func (s *outcomeSpy) Sync(context.Context, bool) service.Outcome              { return s.outcome }
 func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.Outcome {
 	return s.outcome

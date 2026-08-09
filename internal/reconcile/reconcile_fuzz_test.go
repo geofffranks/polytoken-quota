@@ -63,7 +63,7 @@ func assertNoInjectedOrDisabled(t *testing.T, d policy.Desired, s state.State, p
 			if err != nil {
 				t.Fatalf("emitted model %q absent from managed mappings: %v", spelling, err)
 			}
-			if mappingMode(d, s, mid) == state.ModeDisabled {
+			if MappingMode(d, s, mid) == state.ModeDisabled {
 				t.Fatalf("emitted disabled model %q", spelling)
 			}
 		}

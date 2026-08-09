@@ -16,6 +16,9 @@ type TargetOutcome struct {
 	// StagingRoot is populated only when an explicitly requested dry-run retains
 	// a failed staging candidate for diagnosis.
 	StagingRoot string
+	// Trace carries the verbose decision data (provider modes, ranking, chain
+	// survivors, edits). It is populated only when the caller requests --verbose.
+	Trace *ReconcileTrace
 }
 
 // Outcome is the result of a mutation operation. Accepted is false when the

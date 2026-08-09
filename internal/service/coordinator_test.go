@@ -257,7 +257,7 @@ func TestRejectedInputDoesNotMutate(t *testing.T) {
 
 func TestDryRunIsNonMutating(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	out := spy.Coordinator.Reconcile(context.Background(), true, false)
+	out := spy.Coordinator.Reconcile(context.Background(), true, false, false)
 	if out.Error != nil || spy.StateSaves != 0 || spy.Publishes != 0 || spy.ValidationIntents == 0 {
 		t.Fatalf("out=%+v saves=%d publishes=%d intents=%d", out, spy.StateSaves, spy.Publishes, spy.ValidationIntents)
 	}
@@ -275,7 +275,7 @@ func TestPendingValidationCarriesAttemptTimestampAndDiagnostics(t *testing.T) {
 		},
 	}}
 
-	out := spy.Coordinator.Reconcile(context.Background(), false, false)
+	out := spy.Coordinator.Reconcile(context.Background(), false, false, false)
 	if out.PendingCount() != 1 {
 		t.Fatalf("out=%+v", out)
 	}
@@ -291,7 +291,7 @@ func TestPendingValidationCarriesAttemptTimestampAndDiagnostics(t *testing.T) {
 func TestDryRunKeepStagingCleansSuccessfulCandidate(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	spy.stageRoot = t.TempDir()
-	out := spy.Coordinator.Reconcile(context.Background(), true, true)
+	out := spy.Coordinator.Reconcile(context.Background(), true, true, false)
 	if out.PendingCount() != 0 || out.Targets[0].StagingRoot != "" {
 		t.Fatalf("out=%+v", out)
 	}
@@ -303,7 +303,7 @@ func TestDryRunKeepStagingRetainsFailedCandidate(t *testing.T) {
 	spy.Coordinator.Validate = failingValidator{result: validate.Result{Error: &validate.CommandError{
 		Stage: validate.ConfigValidate, Summary: "config validate: invalid model",
 	}}}
-	out := spy.Coordinator.Reconcile(context.Background(), true, true)
+	out := spy.Coordinator.Reconcile(context.Background(), true, true, false)
 	if out.PendingCount() != 1 || out.Targets[0].StagingRoot == "" {
 		t.Fatalf("out=%+v", out)
 	}
@@ -321,7 +321,7 @@ func TestDryRunPendingValidationCarriesAttemptTimestamp(t *testing.T) {
 		Stage: validate.ConfigValidate, Summary: "config validate: invalid model",
 	}}}
 
-	out := spy.Coordinator.Reconcile(context.Background(), true, false)
+	out := spy.Coordinator.Reconcile(context.Background(), true, false, false)
 	if out.PendingCount() != 1 || !out.Targets[0].Pending.AttemptedAt.Equal(when) {
 		t.Fatalf("out=%+v", out)
 	}
@@ -467,7 +467,7 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 	}{
 		{"init", func(c *Coordinator) Outcome { return c.Init(ctx) }},
 		{"event", func(c *Coordinator) Outcome { return c.HandleEvent(ctx, event(hook.QuotaLow, 3)) }},
-		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false) }},
+		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false, false) }},
 		{"sync", func(c *Coordinator) Outcome { return c.Sync(ctx, true) }},
 		{"set", func(c *Coordinator) Outcome { return c.Set(ctx, "codex", state.ProviderPatch{Quota: &low}) }},
 		{"clear", func(c *Coordinator) Outcome { return c.Clear(ctx, state.Selector{All: true}) }},

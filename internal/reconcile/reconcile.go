@@ -103,12 +103,12 @@ func modeRank(m state.Mode) int {
 	}
 }
 
-// mappingMode derives a mapping's effective mode from the observed state of its
+// MappingMode derives a mapping's effective mode from the observed state of its
 // CodExBar providers (the state machine keys providers by their CodExBar ID). A
 // provider absent from the observed state is healthy. When a mapping covers several
 // providers, the most-degraded mode wins, so a degraded provider never leaves its
 // models over-promoted.
-func mappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mode {
+func MappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mode {
 	m, ok := d.Providers[id]
 	if !ok {
 		return state.ModeNormal
@@ -221,7 +221,7 @@ func Build(desired policy.Desired, observed state.State, target policy.Target, r
 	for _, idStr := range ids {
 		id := policy.MappingID(idStr)
 		mapping := desired.Providers[id]
-		mode := mappingMode(desired, observed, id)
+		mode := MappingMode(desired, observed, id)
 		bases := make([]string, 0, len(mapping.Models))
 		for base := range mapping.Models {
 			bases = append(bases, base)
@@ -276,7 +276,7 @@ func resolveSurvivors(desired policy.Desired, observed state.State, chain policy
 		if err != nil {
 			return nil, err
 		}
-		switch mode := mappingMode(desired, observed, mid); mode {
+		switch mode := MappingMode(desired, observed, mid); mode {
 		case state.ModeDisabled:
 			continue
 		case state.ModeReserve:
