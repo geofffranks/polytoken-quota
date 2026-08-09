@@ -246,16 +246,19 @@ func TestValidateRelease(t *testing.T) {
 		t.Fatalf("empty configured should return empty, got %v", got)
 	}
 
-	r.Register(freshEvidence("codex")) // codex is fresh; zai is absent
+	usage := CodexUsageEvidence(fixedNow)
+	reset := CodexResetCreditsEvidence(fixedNow)
+	r.Register(usage)
+	r.Register(reset)
 	statuses := ValidateRelease(r, []string{"codex", "zai"}, fixedNow)
-	if len(statuses) != 2 {
-		t.Fatalf("got %d statuses, want 2", len(statuses))
+	if len(statuses) != 3 {
+		t.Fatalf("got %d statuses, want codex usage/reset plus zai", len(statuses))
 	}
-	if statuses[0].State != EvidenceFresh {
-		t.Fatalf("codex should be fresh, got %s: %s", statuses[0].State, statuses[0].Reason)
+	if statuses[0].State != EvidenceFresh || statuses[1].State != EvidenceFresh {
+		t.Fatalf("codex contracts should be fresh, got %+v", statuses[:2])
 	}
-	if statuses[1].State != EvidenceAbsent {
-		t.Fatalf("zai should be absent, got %s", statuses[1].State)
+	if statuses[2].State != EvidenceAbsent {
+		t.Fatalf("zai should be absent, got %s", statuses[2].State)
 	}
 }
 
@@ -266,6 +269,39 @@ func TestValidateRelease(t *testing.T) {
 // own redaction regexes so the guard matches production sanitization.
 func containsSecretPattern(s string) bool {
 	return reBearer.MatchString(s) || reSecretKV.MatchString(s) || reURLCreds.MatchString(s)
+}
+
+func TestCodexResetCreditsRequiresOwnFreshEvidence(t *testing.T) {
+	r := NewEvidenceRegistry()
+	usage := CodexUsageEvidence(fixedNow)
+	reset := CodexResetCreditsEvidence(fixedNow)
+	r.Register(usage)
+	r.Register(reset)
+
+	if got := r.StatusContract("codex", CodexUsageContract, fixedNow); got.State != EvidenceFresh {
+		t.Fatalf("usage evidence = %s, want fresh", got.State)
+	}
+	if got := r.StatusContract("codex", CodexResetCreditsContract, fixedNow); got.State != EvidenceFresh {
+		t.Fatalf("reset-credit evidence = %s, want fresh", got.State)
+	}
+
+	// Re-registering usage must not overwrite the independent reset contract.
+	usage.Endpoint = "https://chatgpt.com/backend-api/wham/usage-v2"
+	r.Register(usage)
+	gotReset, ok := r.GetContract("codex", CodexResetCreditsContract)
+	if !ok || gotReset.Endpoint != reset.Endpoint {
+		t.Fatalf("reset evidence overwritten by usage registration: %+v, %v", gotReset, ok)
+	}
+
+	// Reset-credit enrichment has its own freshness gate.
+	reset.ReviewBy = fixedNow.Add(-time.Hour)
+	r.Register(reset)
+	if got := r.StatusContract("codex", CodexUsageContract, fixedNow); got.State != EvidenceFresh {
+		t.Fatalf("usage evidence changed with reset expiry: %s", got.State)
+	}
+	if got := r.StatusContract("codex", CodexResetCreditsContract, fixedNow); got.State != EvidenceExpired {
+		t.Fatalf("reset evidence = %s, want expired", got.State)
+	}
 }
 
 func TestEvidenceReasonsAreSanitized(t *testing.T) {

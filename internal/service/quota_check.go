@@ -110,6 +110,12 @@ func applyQuotaObservations(next state.State, desired policy.Desired, attempts m
 				good := snap
 				ps.QuotaSnapshot = &good
 			}
+			if snap.UsageSummary != nil {
+				ps.ResetCredits = quota.MergeCodexUsageSummary(ps.ResetCredits, snap.UsageSummary)
+			}
+			if snap.ResetCredits != nil {
+				ps.ResetCredits = quota.MergeResetCreditObservation(ps.ResetCredits, *snap.ResetCredits)
+			}
 			fresh[cb] = ps
 		}
 	}

@@ -15,10 +15,10 @@ import (
 )
 
 // CurrentSchema is the on-disk state schema version this build reads and writes.
-// Load accepts older known schemas (0/1) by migrating them in memory to
+// Load accepts older known schemas (0/1/2) by migrating them in memory to
 // CurrentSchema and rejects any newer, unknown schema by failing closed. Save
 // always persists CurrentSchema.
-const CurrentSchema = 2
+const CurrentSchema = 3
 
 // Mode is the reconciler-internal effective operating mode derived from a
 // provider's independent quota and availability axes. It is never persisted to
@@ -106,6 +106,9 @@ type ProviderState struct {
 	// the state machine.
 	QuotaSnapshot *quota.QuotaSnapshot
 	QuotaAttempt  *quota.QuotaSnapshot
+	// ResetCredits is the independent Codex reset-credit sub-observation and
+	// ordinary usage-summary provenance added in schema v3.
+	ResetCredits quota.ResetCreditState
 	// Routing records the last routing-policy decision metadata for this
 	// provider. It is a value type (always present, zero-valued until ranked).
 	Routing ProviderRouting

@@ -305,10 +305,36 @@ func configuredProviders() []string {
 // evidence here so the release gate recognizes it as fresh.
 func buildReleaseRegistry() *quota.EvidenceRegistry {
 	reg := quota.NewEvidenceRegistry()
-	reg.Register(quota.CodexEvidence(time.Now()))
+	reg.Register(quota.CodexUsageEvidence(time.Now()))
+	reg.Register(quota.CodexResetCreditsEvidence(time.Now()))
 	reg.Register(quota.ZaiEvidence(time.Now()))
 	reg.Register(quota.AnthropicEvidence(time.Now()))
 	return reg
+}
+
+func TestReleaseEvidenceValidatesBothCodexContracts(t *testing.T) {
+	reg := buildReleaseRegistry()
+	now := time.Now()
+	statuses := quota.ValidateRelease(reg, []string{"codex"}, now)
+	if len(statuses) != 2 || statuses[0].State != quota.EvidenceFresh || statuses[1].State != quota.EvidenceFresh {
+		t.Fatalf("release validation must require fresh codex usage/reset contracts: %+v", statuses)
+	}
+	for _, contractID := range []string{quota.CodexUsageContract, quota.CodexResetCreditsContract} {
+		e, ok := reg.GetContract("codex", contractID)
+		if !ok {
+			t.Fatalf("missing codex/%s release evidence", contractID)
+		}
+		if e.FixturePath == "" {
+			t.Fatalf("codex/%s evidence lacks fixture path", contractID)
+		}
+		fixturePath := strings.TrimPrefix(filepath.ToSlash(e.FixturePath), "contract/")
+		if _, err := os.Stat(filepath.Clean(fixturePath)); err != nil {
+			t.Fatalf("codex/%s fixture %q unavailable: %v", contractID, e.FixturePath, err)
+		}
+		if got := reg.StatusContract("codex", contractID, now); got.State != quota.EvidenceFresh {
+			t.Fatalf("codex/%s evidence=%s: %s", contractID, got.State, got.Reason)
+		}
+	}
 }
 
 func TestReleaseEvidenceGate(t *testing.T) {
@@ -318,12 +344,18 @@ func TestReleaseEvidenceGate(t *testing.T) {
 	}
 	reg := buildReleaseRegistry()
 	statuses := quota.ValidateRelease(reg, configured, time.Now())
-	if len(statuses) != len(configured) {
-		t.Fatalf("got %d statuses for %d configured providers", len(statuses), len(configured))
+	wantStatuses := len(configured)
+	for _, provider := range configured {
+		if provider == "codex" {
+			wantStatuses++ // codex expands to usage + reset-credit contracts
+		}
 	}
-	for i, s := range statuses {
+	if len(statuses) != wantStatuses {
+		t.Fatalf("got %d statuses, want %d configured contracts", len(statuses), wantStatuses)
+	}
+	for _, s := range statuses {
 		if s.State != quota.EvidenceFresh {
-			t.Errorf("provider %s: release evidence is %s, want fresh: %s", configured[i], s.State, s.Reason)
+			t.Errorf("release evidence is %s, want fresh: %s", s.State, s.Reason)
 		}
 	}
 }

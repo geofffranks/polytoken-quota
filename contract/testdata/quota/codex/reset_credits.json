@@ -1,0 +1,23 @@
+{
+  "available_count": 2,
+  "credits": [
+    {
+      "id": "synthetic-credit-1",
+      "reset_type": "codex_rate_limits",
+      "status": "available",
+      "granted_at": "2026-06-01T00:00:00Z",
+      "expires_at": "2027-01-01T00:00:00Z",
+      "title": "Synthetic reset credit",
+      "description": "Synthetic contract fixture"
+    },
+    {
+      "id": "synthetic-credit-2",
+      "reset_type": "codex_rate_limits",
+      "status": "available",
+      "granted_at": "2026-06-02T00:00:00.000Z",
+      "expires_at": null,
+      "title": "Synthetic reset credit",
+      "description": "Synthetic contract fixture"
+    }
+  ]
+}

@@ -52,6 +52,104 @@ type QuotaSnapshot struct {
 	Availability QuotaAvailability
 	Status       SourceStatus
 	Error        string
+
+	// Codex-only additive observations. Optional reset-credit enrichment never
+	// changes Status or Availability, which remain ordinary-usage signals.
+	UsageSummary *CodexUsageSummary
+	ResetCredits *ResetCreditAttempt
+}
+
+// UsageCredits is the ordinary /wham/usage credits object. Balance retains the
+// provider's original decimal string, including exponent notation.
+type UsageCredits struct {
+	HasCredits *bool
+	Unlimited  *bool
+	Balance    *string
+}
+
+// SpendControl is the monthly individual-limit observation, distinct from
+// ordinary credits and reset-credit inventory.
+type SpendControl struct {
+	Limit     *float64
+	Used      *float64
+	Remaining *float64
+	ResetAt   *time.Time
+}
+
+// CodexUsageSummary records when ordinary credits/spend-control were observed.
+type CodexUsageSummary struct {
+	ObservedAt   time.Time
+	Credits      *UsageCredits
+	SpendControl *SpendControl
+}
+
+// CreditAttemptStatus classifies the optional reset-credit enrichment attempt.
+type CreditAttemptStatus string
+
+const (
+	CreditAttemptSuccess CreditAttemptStatus = "success"
+	CreditAttemptPartial CreditAttemptStatus = "partial"
+	CreditAttemptFailed  CreditAttemptStatus = "failed"
+	CreditAttemptSkipped CreditAttemptStatus = "skipped"
+)
+
+// ResetCreditInventory is the privacy-filtered successful sub-observation. The
+// expiry slice has one entry per available item; nil means expiry was absent.
+type ResetCreditInventory struct {
+	ServerAvailableCount int
+	UsableCount          int
+	AvailableExpiries    []*time.Time
+	DiscrepancyCount     int
+	SkippedCount         int
+	ObservedAt           time.Time
+}
+
+// ResetCreditAttempt is the latest optional endpoint attempt. Inventory is set
+// only when a valid (possibly partial) inventory was decoded.
+type ResetCreditAttempt struct {
+	Status    CreditAttemptStatus
+	At        time.Time
+	Inventory *ResetCreditInventory
+	Error     string
+}
+
+// ResetCreditState keeps reset-credit success/attempt provenance independent
+// from the ordinary usage summary.
+type ResetCreditState struct {
+	LastSuccess   *ResetCreditInventory
+	LatestAttempt *ResetCreditAttempt
+	UsageSummary  *CodexUsageSummary
+}
+
+// MergeResetCreditObservation applies the durable sub-observation matrix.
+func MergeResetCreditObservation(prior ResetCreditState, attempt ResetCreditAttempt) ResetCreditState {
+	attempt.Error = SanitizeText(attempt.Error)
+	prior.LatestAttempt = &attempt
+	if (attempt.Status == CreditAttemptSuccess || attempt.Status == CreditAttemptPartial) && attempt.Inventory != nil {
+		prior.LastSuccess = attempt.Inventory
+	}
+	return prior
+}
+
+// MergeCodexUsageSummary updates only ordinary usage provenance.
+func MergeCodexUsageSummary(prior ResetCreditState, summary *CodexUsageSummary) ResetCreditState {
+	prior.UsageSummary = summary
+	return prior
+}
+
+// UsableCountAt filters recorded available-item expiries at report time without
+// mutating durable history. Nil expiry remains usable because it is unknown.
+func (s ResetCreditState) UsableCountAt(asOf time.Time) *int {
+	if s.LastSuccess == nil {
+		return nil
+	}
+	count := 0
+	for _, expiry := range s.LastSuccess.AvailableExpiries {
+		if expiry == nil || expiry.After(asOf) {
+			count++
+		}
+	}
+	return &count
 }
 
 // QuotaClass is the derived quota bucket the routing policy consumes. Unknown

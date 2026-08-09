@@ -30,7 +30,15 @@ import (
 
 // codexUsageEndpoint is the primary Codex (ChatGPT) usage endpoint recorded in
 // the contract evidence. It is HTTPS and takes no query parameters or body.
-const codexUsageEndpoint = "https://chatgpt.com/backend-api/wham/usage"
+const (
+	codexUsageEndpoint        = "https://chatgpt.com/backend-api/wham/usage"
+	codexResetCreditsEndpoint = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+
+	// CodexUsageContract and CodexResetCreditsContract are independent evidence
+	// contract ids under the codex provider key.
+	CodexUsageContract        = "usage"
+	CodexResetCreditsContract = "reset_credits"
+)
 
 // codexProviderName is the evidence-registry key and adapter identifier.
 const codexProviderName = "codex"
@@ -51,19 +59,37 @@ type CodexSource struct {
 	Now         func() time.Time
 }
 
-// CodexEvidence returns the sanitized contract evidence for the Codex adapter.
-// Register it in an EvidenceRegistry so the gate recognizes "codex" as fresh.
-// ReviewBy is one year after now per the evidence review policy.
-func CodexEvidence(now time.Time) Evidence {
+// CodexEvidence is the compatibility name for mandatory usage evidence.
+func CodexEvidence(now time.Time) Evidence { return CodexUsageEvidence(now) }
+
+// CodexUsageEvidence returns the mandatory /wham/usage contract evidence.
+func CodexUsageEvidence(now time.Time) Evidence {
 	return Evidence{
 		Provider:    codexProviderName,
+		ContractID:  CodexUsageContract,
 		Endpoint:    codexUsageEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "oauth-bearer",
-		SchemaNote:  "rate_limit primary/secondary windows + individual_limit + additional_rate_limits + credits",
+		SchemaNote:  "rate_limit windows + individual_limit spend control + ordinary credits",
 		FixturePath: "contract/testdata/quota/codex/pro.json",
 		RecordedAt:  now,
 		ReviewBy:    now.AddDate(1, 0, 0),
+	}
+}
+
+// CodexResetCreditsEvidence returns the optional account-scoped inventory
+// contract evidence. Its volatile schema is reviewed every three months.
+func CodexResetCreditsEvidence(now time.Time) Evidence {
+	return Evidence{
+		Provider:    codexProviderName,
+		ContractID:  CodexResetCreditsContract,
+		Endpoint:    codexResetCreditsEndpoint,
+		Method:      http.MethodGet,
+		AuthType:    "oauth-bearer-account",
+		SchemaNote:  "non-negative available_count + credits status and optional ISO-8601 expires_at",
+		FixturePath: "contract/testdata/quota/codex/reset_credits.json",
+		RecordedAt:  now,
+		ReviewBy:    now.AddDate(0, 3, 0),
 	}
 }
 
@@ -109,7 +135,7 @@ func (c *CodexSource) evidenceStatus() EvidenceStatus {
 			Reason: "provider " + codexProviderName + " has no recorded contract evidence; record evidence before enabling",
 		}
 	}
-	return c.Evidence.Status(codexProviderName, c.now())
+	return c.Evidence.StatusContract(codexProviderName, CodexUsageContract, c.now())
 }
 
 // Fetch retrieves the current Codex quota snapshot. It fails closed when the
@@ -149,7 +175,8 @@ func (c *CodexSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		return c.fail(msg), errors.New(msg)
 	}
 
-	windows, partial, perr := parseCodexUsage(resp.Body)
+	observedAt := c.now()
+	windows, summary, partial, perr := parseCodexUsage(resp.Body, observedAt)
 	if perr != nil {
 		msg := "codex: invalid response body (could not decode JSON)"
 		return c.fail(msg), errors.New(msg)
@@ -159,13 +186,16 @@ func (c *CodexSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 	if partial || len(windows) == 0 {
 		status = SourcePartial
 	}
-	return QuotaSnapshot{
+	snap := QuotaSnapshot{
 		MappingID:    c.mappingID,
-		CheckedAt:    c.now(),
+		CheckedAt:    observedAt,
 		Windows:      windows,
 		Availability: determineAvailability(windows),
 		Status:       status,
-	}, nil
+		UsageSummary: summary,
+	}
+	snap.ResetCredits = c.fetchResetCredits(ctx, token, accountID, observedAt)
+	return snap, nil
 }
 
 // fail returns a sanitized failed snapshot for this source's mapping.
@@ -257,16 +287,133 @@ func (c *CodexSource) buildRequest(ctx context.Context, token, accountID string)
 	return req, nil
 }
 
+func (c *CodexSource) fetchResetCredits(ctx context.Context, token, accountID string, observedAt time.Time) *ResetCreditAttempt {
+	if accountID == "" {
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: "codex reset-credit enrichment skipped: account context unavailable"}
+	}
+	if c.Evidence == nil {
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: "codex reset-credit enrichment skipped: contract evidence absent"}
+	}
+	st := c.Evidence.StatusContract(codexProviderName, CodexResetCreditsContract, observedAt)
+	if st.State != EvidenceFresh {
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: SanitizeText("codex reset-credit enrichment skipped: " + st.Reason)}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexResetCreditsEndpoint, nil)
+	if err != nil {
+		return creditFailure(observedAt, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "polytoken-quota")
+	req.Header.Set("OpenAI-Beta", "codex-1")
+	req.Header.Set("originator", "Codex Desktop")
+	// Header map assignment intentionally preserves the evidenced endpoint-specific
+	// capitalization; net/http Header.Set would canonicalize ID to Id.
+	req.Header["ChatGPT-Account-ID"] = []string{accountID}
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return creditFailure(observedAt, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return creditFailure(observedAt, fmt.Errorf("codex reset-credit request failed (HTTP %d)", resp.StatusCode))
+	}
+	inventory, partial, err := parseResetCreditInventory(resp.Body, observedAt)
+	if err != nil {
+		return creditFailure(observedAt, errors.New("codex reset-credit response was invalid"))
+	}
+	status := CreditAttemptSuccess
+	if partial {
+		status = CreditAttemptPartial
+	}
+	return &ResetCreditAttempt{Status: status, At: observedAt, Inventory: inventory}
+}
+
+func creditFailure(at time.Time, err error) *ResetCreditAttempt {
+	return &ResetCreditAttempt{Status: CreditAttemptFailed, At: at, Error: SanitizeError(err)}
+}
+
+func parseResetCreditInventory(body []byte, observedAt time.Time) (*ResetCreditInventory, bool, error) {
+	var payload struct {
+		AvailableCount *int `json:"available_count"`
+		Credits        []struct {
+			Status    string           `json:"status"`
+			ExpiresAt *json.RawMessage `json:"expires_at"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.AvailableCount == nil || *payload.AvailableCount < 0 {
+		return nil, false, errors.New("invalid reset-credit inventory")
+	}
+	inventory := &ResetCreditInventory{ServerAvailableCount: *payload.AvailableCount, ObservedAt: observedAt}
+	partial := false
+	for _, item := range payload.Credits {
+		if item.Status != "available" {
+			inventory.SkippedCount++
+			if item.Status != "redeeming" && item.Status != "redeemed" && item.Status != "expired" {
+				inventory.DiscrepancyCount++
+				partial = true
+			}
+			continue
+		}
+		var expiry *time.Time
+		if item.ExpiresAt != nil && string(*item.ExpiresAt) != "null" {
+			var raw string
+			if err := json.Unmarshal(*item.ExpiresAt, &raw); err != nil {
+				inventory.SkippedCount++
+				inventory.DiscrepancyCount++
+				partial = true
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				inventory.SkippedCount++
+				inventory.DiscrepancyCount++
+				partial = true
+				continue
+			}
+			parsed = parsed.UTC()
+			expiry = &parsed
+		}
+		inventory.AvailableExpiries = append(inventory.AvailableExpiries, expiry)
+		if expiry == nil || expiry.After(observedAt) {
+			inventory.UsableCount++
+		} else {
+			inventory.SkippedCount++
+			inventory.DiscrepancyCount++
+			partial = true
+		}
+	}
+	if inventory.UsableCount != inventory.ServerAvailableCount {
+		partial = true
+		if inventory.DiscrepancyCount == 0 {
+			inventory.DiscrepancyCount = absInt(inventory.ServerAvailableCount - inventory.UsableCount)
+		}
+	}
+	return inventory, partial, nil
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 // --- Response parsing (lenient, per-element) ------------------------------
 
 // parseCodexUsage parses the Codex usage body into windows. The top-level body
 // must be valid JSON (otherwise an error is returned). Individual windows are
 // decoded independently: a malformed window is skipped and partial is set true
 // rather than failing the whole response. Unknown fields are ignored.
-func parseCodexUsage(body []byte) (windows []QuotaWindow, partial bool, err error) {
+func parseCodexUsage(body []byte, observedAt time.Time) (windows []QuotaWindow, summary *CodexUsageSummary, partial bool, err error) {
 	var top codexUsageTop
 	if err := json.Unmarshal(body, &top); err != nil {
-		return nil, false, err
+		return nil, nil, false, err
+	}
+	summary = &CodexUsageSummary{ObservedAt: observedAt}
+	if credits, bad := decodeUsageCredits(top.Credits); bad {
+		partial = true
+	} else {
+		summary.Credits = credits
 	}
 
 	// rate_limit holds the primary (session) and secondary (weekly) windows and
@@ -289,12 +436,13 @@ func parseCodexUsage(body []byte) (windows []QuotaWindow, partial bool, err erro
 	}
 
 	// individual_limit: top-level takes precedence over rate_limit.individual_limit.
-	indivRaw := top.IndividualLimit
+	indivRaw := firstRaw(top.IndividualLimit, top.IndividualLimitAlias)
 	if len(indivRaw) == 0 {
-		indivRaw = rl.IndividualLimit
+		indivRaw = firstRaw(rl.IndividualLimit, rl.IndividualLimitAlias)
 	}
 	if w, ok, bad := decodeIndividualLimit(indivRaw); ok {
 		windows = append(windows, w)
+		summary.SpendControl = spendControlFromWindow(w)
 	} else if bad {
 		partial = true
 	}
@@ -316,7 +464,59 @@ func parseCodexUsage(body []byte) (windows []QuotaWindow, partial bool, err erro
 		}
 	}
 
-	return windows, partial, nil
+	return windows, summary, partial, nil
+}
+
+func decodeUsageCredits(raw json.RawMessage) (*UsageCredits, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var value struct {
+		HasCredits *bool           `json:"has_credits"`
+		Unlimited  *bool           `json:"unlimited"`
+		Balance    json.RawMessage `json:"balance"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, true
+	}
+	credits := &UsageCredits{HasCredits: value.HasCredits, Unlimited: value.Unlimited}
+	if len(value.Balance) > 0 && string(value.Balance) != "null" {
+		var balance string
+		if err := json.Unmarshal(value.Balance, &balance); err == nil {
+			parsed, err := strconv.ParseFloat(strings.TrimSpace(balance), 64)
+			if err != nil {
+				return nil, true
+			}
+			if _, err := finiteOrErr(parsed); err != nil {
+				return nil, true
+			}
+		} else {
+			if _, err := flexFloat(value.Balance); err != nil {
+				return nil, true
+			}
+			balance = string(value.Balance)
+		}
+		credits.Balance = &balance
+	}
+	return credits, false
+}
+
+func firstRaw(values ...json.RawMessage) json.RawMessage {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func spendControlFromWindow(w QuotaWindow) *SpendControl {
+	spend := &SpendControl{Limit: w.Limit, Used: w.Used, ResetAt: w.ResetAt}
+	if w.Limit != nil && w.Used != nil {
+		remaining := *w.Limit - *w.Used
+		spend.Remaining = &remaining
+	}
+	return spend
 }
 
 // codexUsageTop is the top-level usage envelope. Sub-objects are kept as raw
@@ -324,13 +524,16 @@ func parseCodexUsage(body []byte) (windows []QuotaWindow, partial bool, err erro
 type codexUsageTop struct {
 	RateLimit            json.RawMessage `json:"rate_limit"`
 	IndividualLimit      json.RawMessage `json:"individual_limit"`
+	IndividualLimitAlias json.RawMessage `json:"individualLimit"`
 	AdditionalRateLimits json.RawMessage `json:"additional_rate_limits"`
+	Credits              json.RawMessage `json:"credits"`
 }
 
 type codexRateLimitRaw struct {
-	PrimaryWindow   json.RawMessage `json:"primary_window"`
-	SecondaryWindow json.RawMessage `json:"secondary_window"`
-	IndividualLimit json.RawMessage `json:"individual_limit"`
+	PrimaryWindow        json.RawMessage `json:"primary_window"`
+	SecondaryWindow      json.RawMessage `json:"secondary_window"`
+	IndividualLimit      json.RawMessage `json:"individual_limit"`
+	IndividualLimitAlias json.RawMessage `json:"individualLimit"`
 }
 
 type codexAdditionalLimitRaw struct {

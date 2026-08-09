@@ -144,7 +144,8 @@ func (u unsupportedSource) Fetch(context.Context) (quota.QuotaSnapshot, error) {
 func NewQuotaPoller() QuotaPoller {
 	evidence := quota.NewEvidenceRegistry()
 	now := time.Now()
-	evidence.Register(quota.CodexEvidence(now))
+	evidence.Register(quota.CodexUsageEvidence(now))
+	evidence.Register(quota.CodexResetCreditsEvidence(now))
 	evidence.Register(quota.ZaiEvidence(now))
 	evidence.Register(quota.AnthropicEvidence(now))
 	return &QuotaPollerImpl{

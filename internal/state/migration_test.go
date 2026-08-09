@@ -118,12 +118,50 @@ func TestLoadMissingReturnsFreshV2(t *testing.T) {
 func TestLoadRejectsFutureSchema(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "state.json")
-	for _, schema := range []int{3, 99} {
+	for _, schema := range []int{4, 99} {
 		writeFile(t, p, `{"Schema": `+strconv.Itoa(schema)+`, "Providers": {}, "Targets": {}}`)
 		st := Store{Path: p, Now: time.Now, RecoveredRetention: 24 * time.Hour}
 		if _, err := st.Load(); err == nil {
 			t.Fatalf("schema %d: expected error, got nil", schema)
 		}
+	}
+}
+
+func TestStateV2ToV3CreditsMigrationRoundTrip(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	p := filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, p, `{"Schema":2,"Revision":42,"Providers":{"codex":{"Quota":"normal","Availability":"available"}},"Targets":{}}`)
+	st := Store{Path: p, Now: func() time.Time { return now }, RecoveredRetention: 24 * time.Hour}
+	migrated, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Schema != 3 || migrated.Providers["codex"].ResetCredits.LastSuccess != nil || migrated.Providers["codex"].ResetCredits.LatestAttempt != nil || migrated.Providers["codex"].ResetCredits.UsageSummary != nil {
+		t.Fatalf("v2 migration mismatch: %+v", migrated.Providers["codex"])
+	}
+	future := now.Add(24 * time.Hour)
+	balance := "0E-10"
+	ps := migrated.Providers["codex"]
+	ps.ResetCredits = quota.ResetCreditState{
+		LastSuccess:   &quota.ResetCreditInventory{ServerAvailableCount: 2, UsableCount: 2, AvailableExpiries: []*time.Time{&future, nil}, ObservedAt: now},
+		LatestAttempt: &quota.ResetCreditAttempt{Status: quota.CreditAttemptSuccess, At: now},
+		UsageSummary:  &quota.CodexUsageSummary{ObservedAt: now, Credits: &quota.UsageCredits{Balance: &balance}},
+	}
+	migrated.Providers["codex"] = ps
+	if err := st.Save(migrated); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.Providers["codex"].ResetCredits
+	if loaded.Schema != 3 || got.LastSuccess == nil || got.LastSuccess.ServerAvailableCount != 2 || len(got.LastSuccess.AvailableExpiries) != 2 || got.LastSuccess.AvailableExpiries[1] != nil || got.UsageSummary == nil || *got.UsageSummary.Credits.Balance != balance {
+		t.Fatalf("v3 round trip lost credit state: schema=%d credits=%+v", loaded.Schema, got)
+	}
+	writeFile(t, p, `{"Schema":4,"Providers":{},"Targets":{}}`)
+	if _, err := st.Load(); err == nil {
+		t.Fatal("newer schema must be rejected; downgrade is unsupported")
 	}
 }
 

@@ -70,7 +70,8 @@ func sanitizeSnapshots(s State) State {
 	for k, ps := range providers {
 		snap, snapChanged := sanitizeSnap(ps.QuotaSnapshot)
 		attempt, attemptChanged := sanitizeSnap(ps.QuotaAttempt)
-		if !snapChanged && !attemptChanged {
+		credits, creditsChanged := sanitizeResetCredits(ps.ResetCredits)
+		if !snapChanged && !attemptChanged && !creditsChanged {
 			continue
 		}
 		if !changed {
@@ -83,6 +84,7 @@ func sanitizeSnapshots(s State) State {
 		}
 		ps.QuotaSnapshot = snap
 		ps.QuotaAttempt = attempt
+		ps.ResetCredits = credits
 		providers[k] = ps
 	}
 	if !changed {
@@ -124,6 +126,20 @@ func sanitizeDiagnostics(s State) State {
 	return next
 }
 
+func sanitizeResetCredits(credits quota.ResetCreditState) (quota.ResetCreditState, bool) {
+	if credits.LatestAttempt == nil || credits.LatestAttempt.Error == "" {
+		return credits, false
+	}
+	cleaned := quota.SanitizeText(credits.LatestAttempt.Error)
+	if cleaned == credits.LatestAttempt.Error {
+		return credits, false
+	}
+	attempt := *credits.LatestAttempt
+	attempt.Error = cleaned
+	credits.LatestAttempt = &attempt
+	return credits, true
+}
+
 func sanitizeSnap(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
 	if snap == nil || snap.Error == "" {
 		return snap, false
@@ -146,9 +162,9 @@ func (e strErr) Error() string { return string(e) }
 // Load reads and decodes the state file. A missing file returns a fresh, empty
 // state (Schema CurrentSchema) with initialized maps and no error.
 //
-// Schema handling is additive and backward-compatible: schemas 0 and 1 are
-// legacy v1 documents and are migrated in memory to CurrentSchema (the new
-// quota/routing/history fields default to nil/zero); schema CurrentSchema is
+// Schema handling is additive and backward-compatible: schemas 0, 1, and 2 are
+// legacy documents and are migrated in memory to CurrentSchema (new additive
+// fields default to nil/zero); schema CurrentSchema is
 // loaded as-is. Any newer, unknown schema fails closed — Load returns an error
 // rather than silently accepting a format it does not know. Nil maps from a
 // sparse file are normalized to empty maps so callers can assign without
@@ -169,8 +185,8 @@ func (st Store) Load() (State, error) {
 	if s.Schema > CurrentSchema {
 		return State{}, fmt.Errorf("state: unsupported schema %d in %s (current %d)", s.Schema, st.Path, CurrentSchema)
 	}
-	// Legacy v1 (schema 0/1) or current (2): normalize to the current schema.
-	// The additive fields are absent in v1 documents and decode to nil/zero.
+	// Legacy schemas 0/1/2 or current: normalize to the current schema. The
+	// additive credit fields are absent in older documents and decode nil/zero.
 	s.Schema = CurrentSchema
 	if s.Providers == nil {
 		s.Providers = map[string]ProviderState{}

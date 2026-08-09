@@ -27,6 +27,7 @@ import (
 // categories, and metadata.
 type Evidence struct {
 	Provider    string    // adapter name: "codex", "zai"
+	ContractID  string    // endpoint contract within the provider; empty for legacy single-endpoint adapters
 	Endpoint    string    // sanitized base URL (no credentials, no query secrets)
 	Method      string    // HTTP method: "GET", "POST"
 	AuthType    string    // credential reference category: "oauth-bearer", "api-key"
@@ -114,44 +115,77 @@ func EvaluateEvidence(e *Evidence, now time.Time) EvidenceStatus {
 // EvidenceRegistry holds sanitized contract evidence for provider adapters.
 // It is not safe for concurrent use; the coordinator (a later task) serializes
 // access.
+type evidenceKey struct {
+	provider   string
+	contractID string
+}
+
 type EvidenceRegistry struct {
-	records map[string]Evidence
+	records map[evidenceKey]Evidence
 }
 
 // NewEvidenceRegistry returns an empty EvidenceRegistry.
 func NewEvidenceRegistry() *EvidenceRegistry {
-	return &EvidenceRegistry{records: make(map[string]Evidence)}
+	return &EvidenceRegistry{records: make(map[evidenceKey]Evidence)}
 }
 
-// Register adds or replaces the evidence record for a provider (keyed by
-// Evidence.Provider).
+// Register adds or replaces exactly one provider endpoint contract.
 func (r *EvidenceRegistry) Register(e Evidence) {
 	if r.records == nil {
-		r.records = make(map[string]Evidence)
+		r.records = make(map[evidenceKey]Evidence)
 	}
-	r.records[e.Provider] = e
+	r.records[evidenceKey{provider: e.Provider, contractID: e.ContractID}] = e
 }
 
-// Get returns the raw evidence record for provider, or false when none is
-// registered. The returned pointer is safe to use independently of the registry.
+// Get returns the provider's default contract. Codex usage is its compatibility
+// default; other providers use their legacy empty contract id.
 func (r *EvidenceRegistry) Get(provider string) (*Evidence, bool) {
-	e, ok := r.records[provider]
+	if e, ok := r.GetContract(provider, ""); ok {
+		return e, true
+	}
+	if provider == codexProviderName {
+		return r.GetContract(provider, CodexUsageContract)
+	}
+	return nil, false
+}
+
+// GetContract returns one endpoint contract without affecting sibling records.
+func (r *EvidenceRegistry) GetContract(provider, contractID string) (*Evidence, bool) {
+	e, ok := r.records[evidenceKey{provider: provider, contractID: contractID}]
 	if !ok {
 		return nil, false
 	}
-	return &e, ok
+	return &e, true
 }
 
 // Status returns the evaluated freshness of evidence for provider. A missing
 // provider yields EvidenceAbsent with a provider-specific remediation reason.
 func (r *EvidenceRegistry) Status(provider string, now time.Time) EvidenceStatus {
-	e, ok := r.records[provider]
+	contractID := ""
+	if provider == codexProviderName {
+		contractID = CodexUsageContract
+	}
+	return r.StatusContract(provider, contractID, now)
+}
+
+// StatusContract evaluates one endpoint contract independently.
+func (r *EvidenceRegistry) StatusContract(provider, contractID string, now time.Time) EvidenceStatus {
+	e, ok := r.records[evidenceKey{provider: provider, contractID: contractID}]
+	// Preserve compatibility with pre-endpoint generic Codex usage evidence.
+	// Optional reset-credit evidence never falls back to this record.
+	if !ok && provider == codexProviderName && contractID == CodexUsageContract {
+		e, ok = r.records[evidenceKey{provider: provider}]
+	}
 	if !ok {
+		contract := ""
+		if contractID != "" {
+			contract = "/" + contractID
+		}
 		return EvidenceStatus{
 			State: EvidenceAbsent,
 			Reason: fmt.Sprintf(
-				"provider %s has no recorded contract evidence; record evidence before enabling",
-				provider),
+				"provider %s%s has no recorded contract evidence; record evidence before enabling",
+				provider, contract),
 		}
 	}
 	return EvaluateEvidence(&e, now)
@@ -159,9 +193,13 @@ func (r *EvidenceRegistry) Status(provider string, now time.Time) EvidenceStatus
 
 // Providers returns all registered provider names in sorted order.
 func (r *EvidenceRegistry) Providers() []string {
-	out := make([]string, 0, len(r.records))
+	seen := make(map[string]bool)
 	for k := range r.records {
-		out = append(out, k)
+		seen[k.provider] = true
+	}
+	out := make([]string, 0, len(seen))
+	for provider := range seen {
+		out = append(out, provider)
 	}
 	sort.Strings(out)
 	return out
@@ -188,9 +226,22 @@ func SupportFromEvidence(es EvidenceStatus) SupportStatus {
 // this function performs no assertions itself so it can be reused in doctor
 // diagnostics and dry runs.
 func ValidateRelease(registry *EvidenceRegistry, configured []string, now time.Time) []EvidenceStatus {
-	statuses := make([]EvidenceStatus, len(configured))
-	for i, p := range configured {
-		statuses[i] = registry.Status(p, now)
+	var statuses []EvidenceStatus
+	for _, provider := range configured {
+		contracts := []string{""}
+		if provider == codexProviderName {
+			contracts = []string{CodexUsageContract, CodexResetCreditsContract}
+		}
+		for _, contractID := range contracts {
+			status := registry.StatusContract(provider, contractID, now)
+			if status.State == EvidenceFresh {
+				evidence, _ := registry.GetContract(provider, contractID)
+				if evidence == nil || evidence.FixturePath == "" {
+					status = EvidenceStatus{State: EvidenceIncomplete, Reason: fmt.Sprintf("provider %s/%s release evidence is incomplete (missing fixture_path); record complete evidence", provider, contractID)}
+				}
+			}
+			statuses = append(statuses, status)
+		}
 	}
 	return statuses
 }

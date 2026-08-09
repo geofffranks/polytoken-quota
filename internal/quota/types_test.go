@@ -144,6 +144,67 @@ func TestNextResetAtNilWhenNone(t *testing.T) {
 	}
 }
 
+func TestResetCreditObservationMergeMatrix(t *testing.T) {
+	asOf := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	future := asOf.Add(time.Hour)
+	past := asOf.Add(-time.Hour)
+	success := ResetCreditAttempt{
+		Status: CreditAttemptSuccess,
+		At:     asOf.Add(-2 * time.Hour),
+		Inventory: &ResetCreditInventory{ServerAvailableCount: 2, UsableCount: 2,
+			AvailableExpiries: []*time.Time{&future, nil}, ObservedAt: asOf.Add(-2 * time.Hour)},
+	}
+	state := MergeResetCreditObservation(ResetCreditState{}, success)
+	if state.LastSuccess == nil || state.LatestAttempt.Status != CreditAttemptSuccess {
+		t.Fatalf("success merge=%+v", state)
+	}
+
+	// Failed and repeated failed attempts preserve prior success and age from it.
+	failedAt := asOf.Add(-time.Hour)
+	state = MergeResetCreditObservation(state, ResetCreditAttempt{Status: CreditAttemptFailed, At: failedAt, Error: "HTTP 500"})
+	prior := state.LastSuccess
+	state = MergeResetCreditObservation(state, ResetCreditAttempt{Status: CreditAttemptFailed, At: asOf, Error: "HTTP 503"})
+	if state.LastSuccess != prior || !state.LatestAttempt.At.Equal(asOf) {
+		t.Fatalf("failure must preserve success/update attempt: %+v", state)
+	}
+
+	// A fresh usage summary updates provenance but never overwrites inventory.
+	balance := "1E+2"
+	summary := &CodexUsageSummary{ObservedAt: asOf, Credits: &UsageCredits{Balance: &balance}}
+	state = MergeCodexUsageSummary(state, summary)
+	if state.UsageSummary != summary || state.LastSuccess != prior {
+		t.Fatalf("usage summary clobbered inventory: %+v", state)
+	}
+
+	// Partial valid inventory becomes the new last success and latest partial attempt.
+	partial := ResetCreditAttempt{Status: CreditAttemptPartial, At: asOf.Add(time.Minute), Inventory: &ResetCreditInventory{ServerAvailableCount: 2, UsableCount: 1, DiscrepancyCount: 1, ObservedAt: asOf.Add(time.Minute)}}
+	state = MergeResetCreditObservation(state, partial)
+	if state.LastSuccess != partial.Inventory || state.LatestAttempt.Status != CreditAttemptPartial {
+		t.Fatalf("partial inventory not accepted: %+v", state)
+	}
+
+	// Skipped attempts preserve success; no prior success remains unknown.
+	state = MergeResetCreditObservation(state, ResetCreditAttempt{Status: CreditAttemptSkipped, At: asOf.Add(2 * time.Minute), Error: "evidence stale"})
+	if state.LastSuccess != partial.Inventory {
+		t.Fatalf("skipped attempt erased success: %+v", state)
+	}
+	empty := MergeResetCreditObservation(ResetCreditState{}, ResetCreditAttempt{Status: CreditAttemptFailed, At: asOf})
+	if empty.LastSuccess != nil || empty.UsableCountAt(asOf) != nil {
+		t.Fatalf("no prior success must remain unknown: %+v", empty)
+	}
+
+	// Report-time expiry filtering is as-of based and does not rewrite history;
+	// absent expiry remains usable/unknown rather than zero expiry.
+	history := &ResetCreditInventory{ServerAvailableCount: 3, UsableCount: 3, AvailableExpiries: []*time.Time{&past, &future, nil}, ObservedAt: asOf.Add(-2 * time.Hour)}
+	state.LastSuccess = history
+	if got := state.UsableCountAt(asOf); got == nil || *got != 2 {
+		t.Fatalf("usable at as-of=%v want 2", got)
+	}
+	if len(state.LastSuccess.AvailableExpiries) != 3 || state.LastSuccess.AvailableExpiries[0] != &past {
+		t.Fatal("report-time filtering rewrote durable history")
+	}
+}
+
 func TestSanitizeErrorNil(t *testing.T) {
 	if got := SanitizeError(nil); got != "" {
 		t.Fatalf("nil error -> %q want empty", got)

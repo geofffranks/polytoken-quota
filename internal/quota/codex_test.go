@@ -3,6 +3,7 @@ package quota
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -170,6 +171,151 @@ const codexPrecedenceBody = `{
   },
   "individual_limit": { "limit": 222, "used": 22, "remaining_percent": 80, "resets_at": 1800000000 }
 }`
+
+type sequenceDoer struct {
+	responses []*http.Response
+	calls     []*http.Request
+}
+
+func (d *sequenceDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls = append(d.calls, req)
+	if len(d.responses) == 0 {
+		return nil, errors.New("unexpected request")
+	}
+	resp := d.responses[0]
+	d.responses = d.responses[1:]
+	return resp, nil
+}
+
+func codexSourceWithEvidence(t *testing.T, doer HTTPDoer, usage, reset Evidence) *CodexSource {
+	t.Helper()
+	reg := NewEvidenceRegistry()
+	if usage.Provider != "" {
+		reg.Register(usage)
+	}
+	if reset.Provider != "" {
+		reg.Register(reset)
+	}
+	return &CodexSource{
+		mappingID:   "codex-test",
+		Client:      &BoundedClient{Transport: doer, Timeout: time.Second, MaxBodyBytes: 1 << 20},
+		Credentials: &fakeResolver{val: codexTestAuthJSON},
+		Evidence:    reg,
+		Now:         func() time.Time { return codexTestNow },
+	}
+}
+
+func TestResetCreditEvidenceFailureDoesNotBlockUsage(t *testing.T) {
+	cases := []struct {
+		name  string
+		reset Evidence
+	}{
+		{name: "absent"},
+		{name: "stale", reset: func() Evidence {
+			e := CodexResetCreditsEvidence(codexTestNow)
+			e.ReviewBy = codexTestNow.Add(-time.Hour)
+			return e
+		}()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doer := &sequenceDoer{responses: []*http.Response{bodyResponse(200, []byte(codexProBody))}}
+			src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), tc.reset)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status == SourceFailed || snap.Availability != QuotaAvailable {
+				t.Fatalf("ordinary usage blocked by optional evidence: snap=%+v err=%v", snap, err)
+			}
+			if len(doer.calls) != 1 {
+				t.Fatalf("calls=%d want usage request only", len(doer.calls))
+			}
+			if snap.ResetCredits == nil || snap.ResetCredits.Status != CreditAttemptSkipped || snap.ResetCredits.Error == "" {
+				t.Fatalf("missing sanitized skipped enrichment attempt: %+v", snap.ResetCredits)
+			}
+			if strings.Contains(snapshotSecretSurface(snap)+snap.ResetCredits.Error, codexTestAccount) {
+				t.Fatal("skipped attempt leaks account context")
+			}
+		})
+	}
+}
+
+func TestCodexUsageCreditsContract(t *testing.T) {
+	doer := &sequenceDoer{responses: []*http.Response{bodyResponse(200, []byte(codexProBody))}}
+	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), Evidence{})
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.UsageSummary == nil || snap.UsageSummary.Credits == nil {
+		t.Fatalf("missing ordinary credit observation: %+v", snap.UsageSummary)
+	}
+	credits := snap.UsageSummary.Credits
+	if credits.HasCredits == nil || *credits.HasCredits || credits.Unlimited == nil || *credits.Unlimited {
+		t.Fatalf("credit booleans not preserved: %+v", credits)
+	}
+	if credits.Balance == nil || *credits.Balance != "0E-10" {
+		t.Fatalf("balance=%v want original exponent decimal string", credits.Balance)
+	}
+}
+
+func TestCodexSpendControlContract(t *testing.T) {
+	body := `{"rate_limit":{"primary_window":{"used_percent":1},"individualLimit":{"limit":"100000.50","used":7761,"remaining_percent":"92.239","resets_at":1782864000}}}`
+	doer := &sequenceDoer{responses: []*http.Response{bodyResponse(200, []byte(body))}}
+	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), Evidence{})
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spend := snap.UsageSummary.SpendControl
+	if spend == nil || spend.Limit == nil || *spend.Limit != 100000.5 || spend.Used == nil || *spend.Used != 7761 || spend.Remaining == nil || *spend.Remaining != 92239.5 {
+		t.Fatalf("spend-control values not preserved: %+v", spend)
+	}
+	wantReset := time.Unix(1782864000, 0).UTC()
+	if spend.ResetAt == nil || !spend.ResetAt.Equal(wantReset) {
+		t.Fatalf("spend reset=%v want %v", spend.ResetAt, wantReset)
+	}
+}
+
+func TestCodexResetCreditInventoryContract(t *testing.T) {
+	future := codexTestNow.Add(24 * time.Hour).Format(time.RFC3339)
+	past := codexTestNow.Add(-time.Hour).Format(time.RFC3339)
+	body := `{"available_count":4,"credits":[` +
+		`{"id":"secret-id-1","type":"limit_reset","title":"private title","description":"private description","status":"available","expires_at":"` + future + `"},` +
+		`{"id":"secret-id-2","status":"available"},` +
+		`{"id":"secret-id-3","status":"available","expires_at":"` + past + `"},` +
+		`{"id":"secret-id-4","status":"mystery"},` +
+		`{"id":"secret-id-5","status":"redeemed"}]}`
+	doer := &sequenceDoer{responses: []*http.Response{
+		bodyResponse(200, []byte(codexMinimalBody)),
+		bodyResponse(200, []byte(body)),
+	}}
+	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), CodexResetCreditsEvidence(codexTestNow))
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doer.calls) != 2 {
+		t.Fatalf("calls=%d want usage + reset inventory", len(doer.calls))
+	}
+	req := doer.calls[1]
+	accountHeader := req.Header["ChatGPT-Account-ID"]
+	if req.URL.String() != "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits" || req.Header.Get("OpenAI-Beta") != "codex-1" || req.Header.Get("originator") != "Codex Desktop" || len(accountHeader) != 1 || accountHeader[0] != codexTestAccount {
+		t.Fatalf("reset request contract mismatch: url=%s headers=%v", req.URL, req.Header)
+	}
+	attempt := snap.ResetCredits
+	if attempt == nil || attempt.Status != CreditAttemptPartial || attempt.Inventory == nil {
+		t.Fatalf("reset attempt=%+v want partial inventory", attempt)
+	}
+	inv := attempt.Inventory
+	if inv.ServerAvailableCount != 4 || inv.UsableCount != 2 || inv.DiscrepancyCount != 2 || inv.SkippedCount != 3 || len(inv.AvailableExpiries) != 3 || inv.AvailableExpiries[1] != nil {
+		t.Fatalf("inventory semantics mismatch: %+v", inv)
+	}
+	persisted := fmt.Sprintf("%+v", snap)
+	for _, prohibited := range []string{"secret-id", "private title", "private description", "limit_reset", "redeemed", "mystery"} {
+		if strings.Contains(persisted, prohibited) {
+			t.Fatalf("normalized observation persists prohibited %q: %s", prohibited, persisted)
+		}
+	}
+}
 
 // --- Evidence gate --------------------------------------------------------
 
