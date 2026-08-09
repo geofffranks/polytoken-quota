@@ -118,7 +118,7 @@ assert_contains "$weekly" 'group: weekly-patch-release' 'weekly release concurre
 assert_contains "$weekly" 'actions/checkout@v6' 'weekly release checks out source'
 assert_contains "$weekly" 'fetch-depth: 0' 'weekly release checks out full history'
 assert_contains "$weekly" 'first release' 'weekly release clearly refuses the first release'
-assert_contains "$weekly" 'gh release list .*--json tagName' 'weekly release enumerates GitHub releases only'
+assert_contains "$weekly" 'gh release list .*--exclude-drafts .*--exclude-pre-releases .*--json tagName' 'weekly release excludes draft and pre-releases when enumerating GitHub releases'
 if grep -Eq 'git tag --list|sort -V' "$weekly"; then echo 'FAIL: weekly release uses repository tags or GNU sort -V' >&2; exit 1; fi
 assert_contains "$weekly" '\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$' 'weekly release filters strict stable semver tags'
 assert_contains "$weekly" 'selected release tag is not present locally' 'weekly release clearly checks selected release tag locally'
@@ -134,11 +134,14 @@ assert_contains "$weekly" '-f[[:space:]]+"tag=' 'weekly release dispatch include
 weekly_tmp=$(mktemp -d)
 archive_tmp=''
 trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
-printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 not-a-tag > "$weekly_tmp/released-tags"
+printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 v9.9.9 not-a-tag > "$weekly_tmp/released-tags"
 printf '%s\n' v9.9.9 v2.0.0 > "$weekly_tmp/repository-only-tags"
 selected=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/released-tags" | sort | tail -n1 | cut -d' ' -f2)
-test "$selected" = v1.10.0 || { echo "FAIL: local released-tag fixture selected $selected" >&2; exit 1; }
-echo 'PASS: weekly tag selection uses released tags and ignores repository-only tags'
+test "$selected" = v9.9.9 || { echo "FAIL: local released-tag fixture selected $selected" >&2; exit 1; }
+grep -Fxv v9.9.9 "$weekly_tmp/released-tags" > "$weekly_tmp/releases-without-drafts"
+selected_without_draft=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/releases-without-drafts" | sort | tail -n1 | cut -d' ' -f2)
+test "$selected_without_draft" = v1.10.0 || { echo "FAIL: draft stable-looking tag was not excluded: $selected_without_draft" >&2; exit 1; }
+echo 'PASS: weekly tag selection uses released tags, ignores repository-only tags, and excludes draft stable-looking tags'
 
 # Validate the real release shape locally: cross-build every supported target, package
 # the resulting binary and VERSION, inspect contents, verify SHA-256 checksums, and

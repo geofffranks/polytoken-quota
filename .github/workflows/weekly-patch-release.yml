@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           tags_tmp=$(mktemp)
           trap 'rm -f "$tags_tmp"' EXIT
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' > "$tags_tmp"
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' > "$tags_tmp"
           latest=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$tags_tmp" | sort | tail -n1 | cut -d' ' -f2 || true)
           if [[ -z "$latest" ]]; then
             echo 'Refusing to create the first release: no existing stable vX.Y.Z GitHub Release was found.' >&2
