@@ -45,8 +45,8 @@ assert_exact_block() {
   local file=$1 start=$2 expected=$3 description=$4
   local actual
   actual=$(awk -v start="$start" '
-    $0 == start { in_block = 1; next }
-    in_block && $0 !~ /^  / { exit }
+    $0 == start { in_block = 1; start_indent = match($0, /[^ ]/) - 1; next }
+    in_block && (match($0, /[^ ]/) - 1) <= start_indent { exit }
     in_block { print }
   ' "$file")
   [[ "$actual" == "$expected" ]] || {
@@ -90,14 +90,10 @@ assert_contains "$release" 'if \[\[ ! "\$tag" =~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[
 assert_contains "$release" 'ref: \$\{\{ needs\.preflight\.outputs\.tag \}\}' 'release checks out the selected tag'
 assert_contains "$release" 'go-version-file: go\.mod' 'release setup-go reads go.mod'
 assert_contains "$release" 'matrix:' 'release defines a build matrix'
-for target in 'os: darwin' 'arch: arm64' 'arch: amd64' 'os: linux'; do
-  assert_contains "$release" "$target" "release matrix includes $target"
-done
-[[ $(grep -Ec '^          - os:' "$release") -eq 4 ]] || { echo "FAIL: release matrix has exactly four targets" >&2; exit 1; }
-echo 'PASS: release matrix has exactly four targets'
+assert_exact_block "$release" '        include:' $'          - os: darwin\n            arch: arm64\n          - os: darwin\n            arch: amd64\n          - os: linux\n            arch: arm64\n          - os: linux\n            arch: amd64' 'release matrix has exactly the four supported OS/ARCH pairs'
 assert_contains "$release" 'CGO_ENABLED: 0' 'release builds with CGO disabled'
 assert_contains "$release" 'go build -ldflags .*main\.Version=.*TAG' 'release embeds the selected tag in the binary'
-assert_contains "$release" 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner' 'release archives have deterministic tar metadata'
+assert_contains "$release" 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='"'"'u\+rw,go\+r-w'"'"' -cf - VERSION polytoken-quota' 'release archives have the exact deterministic tar recipe'
 assert_contains "$release" 'gzip -n' 'release archives suppress gzip timestamps'
 assert_contains "$release" 'sha256sum polytoken-quota-' 'release checksums cover archives'
 assert_contains "$release" '> checksums.txt' 'release writes checksums.txt'
@@ -112,10 +108,10 @@ printf 'v1.2.3\\n' > "$archive_tmp/bin/VERSION"
 chmod 0755 "$archive_tmp/bin/polytoken-quota"
 chmod 0644 "$archive_tmp/bin/VERSION"
 for pass in one two; do
-  (cd "$archive_tmp/bin" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode=go+u,go-w -cf - polytoken-quota VERSION | gzip -n > "../polytoken-quota-linux-amd64-$pass.tar.gz")
+  (cd "$archive_tmp/bin" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "../polytoken-quota-linux-amd64-$pass.tar.gz")
 done
 cmp "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" "$archive_tmp/polytoken-quota-linux-amd64-two.tar.gz"
-tar -tzf "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" | diff -u <(printf 'polytoken-quota\nVERSION\n') -
+tar -tzf "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
 echo 'PASS: deterministic archive recipe is repeatable with sorted members, normalized ownership, modes, mtime, and gzip'
 
 echo "workflow contracts passed (${#workflows[@]} file(s))"
