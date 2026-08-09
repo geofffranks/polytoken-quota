@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_DATE_EPOCH: 0
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release-tag.outputs.tag }}
+    steps:
+      - name: Select and validate release tag
+        id: release-tag
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Verify existing GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release-tag.outputs.tag }}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+  build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: darwin
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: amd64
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+          TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH=0
+          archive="polytoken-quota-${GOOS}-${GOARCH}.tar.gz"
+          staging="$(mktemp -d)"
+          trap 'rm -rf "$staging"' EXIT
+          install -m 0755 /dev/null "$staging/polytoken-quota"
+          go build -ldflags '-X main.Version='"$TAG" -o "$staging/polytoken-quota" ./cmd/polytoken-quota
+          printf '%s\n' "$TAG" > "$staging/VERSION"
+          chmod 0755 "$staging/polytoken-quota"
+          chmod 0644 "$staging/VERSION"
+          (cd "$staging" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "$GITHUB_WORKSPACE/$archive")
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.os }}-${{ matrix.arch }}
+          path: polytoken-quota-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(polytoken-quota-*.tar.gz)
+          test "${#archives[@]}" -eq 4
+          sha256sum polytoken-quota-*.tar.gz > checksums.txt
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release upload "$TAG" polytoken-quota-*.tar.gz checksums.txt --repo "$GITHUB_REPOSITORY" --clobber
