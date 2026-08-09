@@ -85,11 +85,18 @@ jobs:
           staging="$(mktemp -d)"
           trap 'rm -rf "$staging"' EXIT
           install -m 0755 /dev/null "$staging/polytoken-quota"
-          go build -ldflags '-X main.Version='"$TAG" -o "$staging/polytoken-quota" ./cmd/polytoken-quota
+          go build -trimpath -ldflags '-buildid= -w -X main.Version='"$TAG" -o "$staging/polytoken-quota" ./cmd/polytoken-quota
           printf '%s\n' "$TAG" > "$staging/VERSION"
           chmod 0755 "$staging/polytoken-quota"
           chmod 0644 "$staging/VERSION"
-          (cd "$staging" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "$GITHUB_WORKSPACE/$archive")
+          package_archive() {
+            if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+              tar --format=ustar --mtime='1970-01-01 00:00:00' --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota
+            else
+              tar --format=ustar --mtime='1970-01-01 00:00:00' --uid=0 --gid=0 --uname='' --gname='' -cf - VERSION polytoken-quota
+            fi
+          }
+          (cd "$staging" && package_archive | gzip -n > "$GITHUB_WORKSPACE/$archive")
       - name: Upload archive artifact
         uses: actions/upload-artifact@v4
         with:

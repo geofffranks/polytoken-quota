@@ -32,14 +32,17 @@ jobs:
           tags_tmp=$(mktemp)
           trap 'rm -f "$tags_tmp"' EXIT
           gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName' > "$tags_tmp"
-          git tag --list >> "$tags_tmp"
-          latest=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$tags_tmp" | sort -V | tail -n1 || true)
+          latest=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$tags_tmp" | sort | tail -n1 | cut -d' ' -f2 || true)
           if [[ -z "$latest" ]]; then
-            echo 'Refusing to create the first release: no existing stable vX.Y.Z release or tag was found.' >&2
+            echo 'Refusing to create the first release: no existing stable vX.Y.Z GitHub Release was found.' >&2
             exit 1
           fi
           if ! git rev-parse --verify "refs/tags/$latest" >/dev/null 2>&1; then
             git fetch --no-tags origin "refs/tags/$latest:refs/tags/$latest"
+          fi
+          if ! git rev-parse --verify "refs/tags/$latest^{commit}" >/dev/null 2>&1; then
+            echo "selected release tag is not present locally: $latest" >&2
+            exit 1
           fi
           commits=$(git rev-list --count "$latest..HEAD")
           if [[ "$commits" -eq 0 ]]; then

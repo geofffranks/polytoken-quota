@@ -99,8 +99,9 @@ assert_contains "$release" 'go-version-file: go\.mod' 'release setup-go reads go
 assert_contains "$release" 'matrix:' 'release defines a build matrix'
 assert_exact_block "$release" '        include:' $'          - os: darwin\n            arch: arm64\n          - os: darwin\n            arch: amd64\n          - os: linux\n            arch: arm64\n          - os: linux\n            arch: amd64' 'release matrix has exactly the four supported OS/ARCH pairs'
 assert_contains "$release" 'CGO_ENABLED: 0' 'release builds with CGO disabled'
-assert_contains "$release" 'go build -ldflags .*main\.Version=.*TAG' 'release embeds the selected tag in the binary'
-assert_contains "$release" 'tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='"'"'u\+rw,go\+r-w'"'"' -cf - VERSION polytoken-quota' 'release archives have the exact deterministic tar recipe'
+assert_contains "$release" 'go build -trimpath -ldflags .*main\.Version=.*TAG' 'release uses trimpath and embeds the selected tag in the binary'
+assert_contains "$release" 'buildid= -w' 'release uses deterministic linker/build-id flags'
+assert_contains "$release" 'tar .*--mtime='"'"'1970-01-01 00:00:00'"'"'.*--uid=0.*--gid=0.*--uname='"'"''"'"'.*--gname='"'"''"'"'' 'release archives have portable deterministic tar metadata'
 assert_contains "$release" 'gzip -n' 'release archives suppress gzip timestamps'
 assert_contains "$release" 'sha256sum polytoken-quota-' 'release checksums cover archives'
 assert_contains "$release" '> checksums.txt' 'release writes checksums.txt'
@@ -117,10 +118,10 @@ assert_contains "$weekly" 'group: weekly-patch-release' 'weekly release concurre
 assert_contains "$weekly" 'actions/checkout@v6' 'weekly release checks out source'
 assert_contains "$weekly" 'fetch-depth: 0' 'weekly release checks out full history'
 assert_contains "$weekly" 'first release' 'weekly release clearly refuses the first release'
-assert_contains "$weekly" 'gh release list .*--json tagName' 'weekly release enumerates GitHub releases'
-assert_contains "$weekly" 'git tag --list' 'weekly release enumerates repository tags'
+assert_contains "$weekly" 'gh release list .*--json tagName' 'weekly release enumerates GitHub releases only'
+if grep -Eq 'git tag --list|sort -V' "$weekly"; then echo 'FAIL: weekly release uses repository tags or GNU sort -V' >&2; exit 1; fi
 assert_contains "$weekly" '\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$' 'weekly release filters strict stable semver tags'
-assert_contains "$weekly" 'sort -V' 'weekly release selects highest valid semver tag'
+assert_contains "$weekly" 'selected release tag is not present locally' 'weekly release clearly checks selected release tag locally'
 assert_contains "$weekly" 'git rev-list --count' 'weekly release counts commits since selected release'
 assert_contains "$weekly" 'No commits since' 'weekly release skips when there are no new commits'
 assert_contains "$weekly" 'conflict' 'weekly release detects a conflicting next tag'
@@ -133,24 +134,34 @@ assert_contains "$weekly" '-f[[:space:]]+"tag=' 'weekly release dispatch include
 weekly_tmp=$(mktemp -d)
 archive_tmp=''
 trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
-printf '%s\n' v1.2.3 v1.10.0 v2.0.0 v2.0.0-rc1 not-a-tag v1.9.9 > "$weekly_tmp/tags"
-selected=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$weekly_tmp/tags" | sort -V | tail -n1)
-test "$selected" = v2.0.0 || { echo "FAIL: local tag fixture selected $selected" >&2; exit 1; }
-echo 'PASS: weekly tag selection contract is locally tested without remote calls'
+printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 not-a-tag > "$weekly_tmp/released-tags"
+printf '%s\n' v9.9.9 v2.0.0 > "$weekly_tmp/repository-only-tags"
+selected=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/released-tags" | sort | tail -n1 | cut -d' ' -f2)
+test "$selected" = v1.10.0 || { echo "FAIL: local released-tag fixture selected $selected" >&2; exit 1; }
+echo 'PASS: weekly tag selection uses released tags and ignores repository-only tags'
 
 # Validate the real release shape locally: cross-build every supported target, package
 # the resulting binary and VERSION, inspect contents, verify SHA-256 checksums, and
-# repeat packaging. This deliberately makes no GitHub/network calls. YAML is checked
-# textually above; when PyYAML is available we additionally parse every workflow, and
-# otherwise this documented lightweight fallback avoids adding a parser dependency.
+# compare outputs from two distinct workspace paths. This deliberately makes no
+# GitHub/network calls. YAML is checked textually above; when PyYAML is available we
+# additionally parse every workflow and assert required top-level structure (handling
+# YAML 1.1's boolean interpretation of the `on` key), otherwise this documented
+# lightweight fallback avoids adding a parser dependency.
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
   python3 - "$workflow_dir" <<'PY'
 import pathlib, sys, yaml
 for path in pathlib.Path(sys.argv[1]).glob("*.y*ml"):
     with path.open() as stream:
-        yaml.safe_load(stream)
+        data = yaml.safe_load(stream)
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path}: expected top-level mapping")
+    triggers = data.get("on", data.get(True))
+    if not isinstance(triggers, (dict, list, str)):
+        raise SystemExit(f"{path}: missing valid on trigger block")
+    if "jobs" not in data or not isinstance(data["jobs"], dict) or not data["jobs"]:
+        raise SystemExit(f"{path}: missing non-empty jobs mapping")
 PY
-  echo 'PASS: workflows parse with PyYAML'
+  echo 'PASS: workflows parse and have structural top-level YAML shape (YAML 1.1 on handled)'
 else
   echo 'INFO: PyYAML unavailable; using lightweight textual YAML contract checks'
 fi
@@ -166,25 +177,42 @@ else
   echo 'FAIL: neither sha256sum nor shasum is available' >&2
   exit 1
 fi
-for target in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
-  os=${target%-*}; arch=${target#*-}
-  mkdir -p "$archive_tmp/$target/root"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o "$archive_tmp/$target/root/polytoken-quota" ./cmd/polytoken-quota
-  printf '%s\n' v1.2.3 > "$archive_tmp/$target/root/VERSION"
-  chmod 0755 "$archive_tmp/$target/root/polytoken-quota"
-  chmod 0644 "$archive_tmp/$target/root/VERSION"
-  for pass in one two; do
-    (cd "$archive_tmp/$target/root" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz")
-    tar -tzf "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
-    tar -xOzf "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz" VERSION > "$archive_tmp/$target/VERSION-$pass"
-    cmp "$archive_tmp/$target/VERSION-$pass" <(printf 'v1.2.3\n')
+workspace_a="$archive_tmp/workspace-a"
+workspace_b="$archive_tmp/workspace-b"
+mkdir -p "$workspace_a" "$workspace_b"
+cp -R "$repo_root/." "$workspace_a/"
+cp -R "$repo_root/." "$workspace_b/"
+mkdir -p "$archive_tmp/output-a" "$archive_tmp/output-b"
+(cd "$workspace_a" && CGO_ENABLED=0 go build -trimpath -ldflags '-buildid= -w -X main.Version=v1.2.3' -o "$archive_tmp/version-check" ./cmd/polytoken-quota)
+version_output=$(env -i PATH= "$archive_tmp/version-check" --version)
+test "$version_output" = 'polytoken-quota v1.2.3' || { echo "FAIL: linked executable version output: $version_output" >&2; exit 1; }
+echo 'PASS: linked executable reports version with empty PATH'
+for workspace in a b; do
+  root_var="workspace_$workspace"
+  workspace_root=${!root_var}
+  output_dir="$archive_tmp/output-$workspace"
+  for target in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+    os=${target%-*}; arch=${target#*-}
+    staging="$archive_tmp/$workspace-$target/root"
+    mkdir -p "$staging"
+    (cd "$workspace_root" && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags '-buildid= -w -X main.Version=v1.2.3' -o "$staging/polytoken-quota" ./cmd/polytoken-quota)
+    printf '%s\n' v1.2.3 > "$staging/VERSION"
+    chmod 0755 "$staging/polytoken-quota"
+    chmod 0644 "$staging/VERSION"
+    archive="$output_dir/polytoken-quota-$target.tar.gz"
+    (cd "$staging" && if tar --version 2>/dev/null | grep -q 'GNU tar'; then tar --format=ustar --mtime='1970-01-01 00:00:00' --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota; else tar --format=ustar --mtime='1970-01-01 00:00:00' --uid=0 --gid=0 --uname='' --gname='' -cf - VERSION polytoken-quota; fi | gzip -n > "$archive")
+    tar -tzf "$archive" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
+    tar -xOzf "$archive" VERSION > "$archive_tmp/$workspace-$target-VERSION"
+    cmp "$archive_tmp/$workspace-$target-VERSION" <(printf 'v1.2.3\n')
   done
-  cmp "$archive_tmp/$target/polytoken-quota-$target-one.tar.gz" "$archive_tmp/$target/polytoken-quota-$target-two.tar.gz"
-  cp "$archive_tmp/$target/polytoken-quota-$target-one.tar.gz" "$archive_tmp/"
-  (cd "$archive_tmp" && hash_file "polytoken-quota-$target-one.tar.gz") >> "$archive_tmp/checksums.txt"
+  (cd "$output_dir" && hash_file polytoken-quota-*.tar.gz) > "$output_dir/checksums.txt"
+  (cd "$output_dir" && verify_hashes checksums.txt >/dev/null)
 done
-(cd "$archive_tmp" && verify_hashes checksums.txt >/dev/null)
-echo 'PASS: real four-target cross-builds, archive inspection, checksum verification, and deterministic repeat packaging'
+for target in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+  cmp "$archive_tmp/output-a/polytoken-quota-$target.tar.gz" "$archive_tmp/output-b/polytoken-quota-$target.tar.gz"
+done
+cmp "$archive_tmp/output-a/checksums.txt" "$archive_tmp/output-b/checksums.txt"
+echo 'PASS: real four-target cross-builds, archive inspection, checksum verification, and deterministic packaging across distinct workspaces'
 
 dependabot="$repo_root/.github/dependabot.yml"
 [[ -f "$dependabot" ]] || { echo "error: required Dependabot config not found: $dependabot" >&2; exit 1; }
@@ -250,6 +278,7 @@ for archive in \
 done
 assert_contains "$readme" 'sha256sum --check checksums\.txt' 'README documents checksum verification'
 assert_contains "$readme" 'shasum -a 256 -c checksums\.txt' 'README documents macOS checksum verification'
+assert_contains "$readme" 'Download all five release assets' 'README instructs downloading all assets before checksum verification'
 assert_contains "$readme" 'VERSION' 'README documents the VERSION file'
 assert_contains "$readme" -- '--version' 'README documents --version behavior'
 assert_contains "$readme" 'No release is assumed to exist yet' 'README does not claim a release already exists'

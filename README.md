@@ -46,7 +46,7 @@ Releases, when published, provide one archive for each supported target:
 - `polytoken-quota-linux-arm64.tar.gz`
 - `polytoken-quota-linux-amd64.tar.gz`
 
-Download the archive for the machine's `GOOS`/`GOARCH` pair and `checksums.txt` from the same GitHub release. Verify the download before extracting it:
+Download all five release assets (the four archives and `checksums.txt`) from the same GitHub release before verifying the archive:
 
 ```sh
 sha256sum --check checksums.txt
