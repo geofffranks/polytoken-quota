@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"gopkg.in/yaml.v3"
 )
@@ -125,6 +127,9 @@ func loadBytes(data []byte) (Desired, error) {
 		}
 		d.Providers[id] = m
 	}
+	if err := validateMappingIdentities(d); err != nil {
+		return Desired{}, err
+	}
 
 	op, err := operationalFromWire(w.Operational)
 	if err != nil {
@@ -146,6 +151,28 @@ func loadBytes(data []byte) (Desired, error) {
 		d.Projects = append(d.Projects, t)
 	}
 	return d, nil
+}
+
+// validateMappingIdentities keeps routing-control mapping IDs unambiguous with
+// aliases owned by other mappings. Equality with a mapping's own aliases is valid.
+func validateMappingIdentities(d Desired) error {
+	ids := make([]string, 0, len(d.Providers))
+	for id := range d.Providers {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		for _, ownerID := range ids {
+			if ownerID == id {
+				continue
+			}
+			owner := d.Providers[MappingID(ownerID)]
+			if slices.Contains(owner.CodexBarProviders, id) || slices.Contains(owner.PolytokenProviders, id) {
+				return fmt.Errorf("policy: mapping %q conflicts with an alias owned by mapping %q", quota.SanitizeText(id), quota.SanitizeText(ownerID))
+			}
+		}
+	}
+	return nil
 }
 
 // ResolveModel resolves a base model name to exactly one provider mapping by exact

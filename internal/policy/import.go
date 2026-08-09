@@ -206,6 +206,9 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 	if err := buildProviders(&d, global.Config.Providers, owner); err != nil {
 		return Desired{}, nil, err
 	}
+	if err := validateMappingIdentities(d); err != nil {
+		return Desired{}, nil, err
+	}
 
 	var offGraph []offGraphRef
 	gt, goff := buildTarget(global, owner)

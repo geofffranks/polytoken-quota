@@ -70,6 +70,8 @@ type coordinatorSpy struct {
 	files             map[string]string
 	stageRoot         string
 	resolveErr        error
+	desired           policy.Desired
+	recovered         state.State
 }
 
 func newCoordinatorSpy(specs ...string) *coordinatorSpy {
@@ -131,6 +133,9 @@ func (s *coordinatorSpy) Lock(context.Context) (func() error, error) {
 
 // --- PolicyLoader ---
 func (s *coordinatorSpy) LoadPolicy() (policy.Desired, error) {
+	if s.desired.Providers != nil {
+		return s.desired, nil
+	}
 	return policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex-mapping": {
 			CodexBarProviders: []string{"codex"},
@@ -204,6 +209,9 @@ func (s *coordinatorSpy) Validate(_ context.Context, c staging.Candidate, _ time
 // Recover returns the observed state at revision 1 so an accepted event
 // advances to revision 2 (the Coordinator uses the recovered state).
 func (s *coordinatorSpy) Recover(context.Context, state.State) (state.State, error) {
+	if s.recovered.Providers != nil {
+		return s.recovered, nil
+	}
 	return state.State{Revision: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{}}, nil
 }
 
@@ -413,8 +421,8 @@ func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
 		call       func(*Coordinator) Outcome
 		transition string
 	}{
-		{"disable", func(c *Coordinator) Outcome { return c.Disable(context.Background(), "codex") }, "manual-disable"},
-		{"enable", func(c *Coordinator) Outcome { return c.Enable(context.Background(), "codex") }, "manual-enable"},
+		{"disable", func(c *Coordinator) Outcome { return c.Disable(context.Background(), "codex-mapping") }, "manual-disable"},
+		{"enable", func(c *Coordinator) Outcome { return c.Enable(context.Background(), "codex-mapping") }, "manual-enable"},
 		{"reset", func(c *Coordinator) Outcome { return c.Reset(context.Background()) }, "manual-reset"},
 	}
 	for _, tc := range cases {
@@ -432,6 +440,104 @@ func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
 	}
 }
 
+func TestRoutingMappingControlsAllAliases(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
+		"codex-pool": {
+			CodexBarProviders: []string{"codex-primary", "codex-secondary"},
+			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+		},
+	}}
+
+	out := spy.Coordinator.Disable(context.Background(), "codex-pool")
+	if !out.Accepted || spy.StateSaves != 1 || spy.Publishes != 1 || count(spy.Trace, "lock") != 1 || count(spy.Trace, "reconcile") != 1 {
+		t.Fatalf("out=%+v trace=%v saves=%d publishes=%d", out, spy.Trace, spy.StateSaves, spy.Publishes)
+	}
+	for _, alias := range []string{"codex-primary", "codex-secondary"} {
+		if !spy.LastSaved.Providers[alias].ManualDisabled {
+			t.Fatalf("alias %q not disabled in saved state: %+v", alias, spy.LastSaved)
+		}
+	}
+	if _, exists := spy.LastSaved.Providers["codex-pool"]; exists {
+		t.Fatalf("mapping ID persisted as provider alias: %+v", spy.LastSaved.Providers)
+	}
+}
+
+func TestRoutingEnablePreservesAutomaticExclusion(t *testing.T) {
+	observedAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
+		"codex-pool": {CodexBarProviders: []string{"codex-primary", "codex-secondary"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}},
+	}}
+	spy.recovered = state.State{Revision: 7, Providers: map[string]state.ProviderState{
+		"codex-primary":   {Quota: state.QuotaExhausted, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 11},
+		"codex-secondary": {Quota: state.QuotaNormal, Availability: state.Unavailable, ManualDisabled: true, AvailabilityAt: observedAt, AvailabilityArrival: 12},
+	}, Targets: map[string]state.TargetState{}}
+
+	out := spy.Coordinator.Enable(context.Background(), "codex-pool")
+	if !out.Accepted {
+		t.Fatalf("out=%+v", out)
+	}
+	primary := spy.LastSaved.Providers["codex-primary"]
+	secondary := spy.LastSaved.Providers["codex-secondary"]
+	if primary.ManualDisabled || primary.Quota != state.QuotaExhausted || !primary.QuotaAt.Equal(observedAt) || primary.QuotaArrival != 11 {
+		t.Fatalf("primary automatic exclusion changed: %+v", primary)
+	}
+	if secondary.ManualDisabled || secondary.Availability != state.Unavailable || !secondary.AvailabilityAt.Equal(observedAt) || secondary.AvailabilityArrival != 12 {
+		t.Fatalf("secondary automatic exclusion changed: %+v", secondary)
+	}
+	if state.EffectiveMode(primary) != state.ModeDisabled || state.EffectiveMode(secondary) != state.ModeDisabled {
+		t.Fatalf("enable incorrectly restored eligibility: primary=%s secondary=%s", state.EffectiveMode(primary), state.EffectiveMode(secondary))
+	}
+}
+
+func TestRoutingResetPreservesAutomaticState(t *testing.T) {
+	observedAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.recovered = state.State{Revision: 4, Providers: map[string]state.ProviderState{
+		"codex-primary": {Quota: state.QuotaExhausted, Availability: state.Unavailable, ManualDisabled: true, QuotaAt: observedAt, AvailabilityAt: observedAt, QuotaArrival: 3, AvailabilityArrival: 4},
+		"zai":           {Quota: state.QuotaLow, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 5},
+	}, Targets: map[string]state.TargetState{}}
+
+	out := spy.Coordinator.Reset(context.Background())
+	if !out.Accepted || spy.StateSaves != 1 || spy.Publishes != 1 {
+		t.Fatalf("out=%+v saves=%d publishes=%d", out, spy.StateSaves, spy.Publishes)
+	}
+	codex := spy.LastSaved.Providers["codex-primary"]
+	zai := spy.LastSaved.Providers["zai"]
+	if codex.ManualDisabled || codex.Quota != state.QuotaExhausted || codex.Availability != state.Unavailable || !codex.QuotaAt.Equal(observedAt) || !codex.AvailabilityAt.Equal(observedAt) || codex.QuotaArrival != 3 || codex.AvailabilityArrival != 4 {
+		t.Fatalf("codex automatic state changed: %+v", codex)
+	}
+	if zai.ManualDisabled || zai.Quota != state.QuotaLow || zai.Availability != state.Available || !zai.QuotaAt.Equal(observedAt) || zai.QuotaArrival != 5 {
+		t.Fatalf("zai automatic state changed: %+v", zai)
+	}
+}
+
+func TestRoutingControlRejectsNonMappingIDs(t *testing.T) {
+	for _, identity := range []string{"codex-primary", "polytoken-codex", "codex/gpt"} {
+		t.Run(identity, func(t *testing.T) {
+			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+			spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
+				"codex-pool": {
+					CodexBarProviders:  []string{"codex-primary"},
+					PolytokenProviders: []string{"polytoken-codex"},
+					Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+				},
+			}}
+			before := state.State{Revision: 9, Providers: map[string]state.ProviderState{"codex-primary": {Quota: state.QuotaLow, Availability: state.Available}}, Targets: map[string]state.TargetState{}}
+			spy.recovered = before
+
+			out := spy.Coordinator.Disable(context.Background(), identity)
+			if out.Accepted || out.Error == nil || spy.StateSaves != 0 || spy.Publishes != 0 || count(spy.Trace, "reconcile") != 0 {
+				t.Fatalf("identity=%q out=%+v trace=%v saves=%d publishes=%d", identity, out, spy.Trace, spy.StateSaves, spy.Publishes)
+			}
+			if !reflect.DeepEqual(spy.recovered, before) {
+				t.Fatalf("rejected identity mutated recovered state: before=%+v after=%+v", before, spy.recovered)
+			}
+		})
+	}
+}
+
 func TestManualProviderCommandsRejectUnknownProviderWithoutMutation(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	out := spy.Coordinator.Disable(context.Background(), "unknown")
@@ -442,7 +548,7 @@ func TestManualProviderCommandsRejectUnknownProviderWithoutMutation(t *testing.T
 
 func TestManualDisablePersistsWhenTargetApplicationIsPending(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", "invalid")
-	out := spy.Coordinator.Disable(context.Background(), "codex")
+	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
 	if !out.Accepted || out.PendingCount() != 1 || spy.StateSaves != 1 {
 		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
 	}
@@ -454,7 +560,7 @@ func TestManualDisablePersistsWhenTargetApplicationIsPending(t *testing.T) {
 func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
 	spy := newCoordinatorSpy()
 	spy.resolveErr = errors.New("target resolution failed")
-	out := spy.Coordinator.Disable(context.Background(), "codex")
+	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
 	if !out.Accepted || out.Error == nil || out.PendingCount() != 1 || spy.StateSaves != 1 {
 		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
 	}

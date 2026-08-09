@@ -285,7 +285,7 @@ func DisableProvider(s State, provider string, at time.Time) (State, error) {
 	if provider == "" {
 		return s, errors.New("state: disable requires a provider")
 	}
-	return updateManualDisable(s, provider, true, at)
+	return SetManualDisabled(s, []string{provider}, true, at)
 }
 
 // EnableProvider clears one provider's manual disable without changing its
@@ -294,7 +294,34 @@ func EnableProvider(s State, provider string, at time.Time) (State, error) {
 	if provider == "" {
 		return s, errors.New("state: enable requires a provider")
 	}
-	return updateManualDisable(s, provider, false, at)
+	return SetManualDisabled(s, []string{provider}, false, at)
+}
+
+// SetManualDisabled updates every supplied provider alias as one immutable state
+// transition, preserving all automatic quota and availability observations.
+func SetManualDisabled(s State, providers []string, disabled bool, at time.Time) (State, error) {
+	nextProviders := make(map[string]ProviderState, len(s.Providers)+len(providers))
+	for k, v := range s.Providers {
+		nextProviders[k] = v
+	}
+	for _, provider := range providers {
+		if provider == "" {
+			return s, errors.New("state: manual routing control requires non-empty provider aliases")
+		}
+		ps := nextProviders[provider]
+		if ps.Quota == "" {
+			ps.Quota = QuotaNormal
+		}
+		if ps.Availability == "" {
+			ps.Availability = Available
+		}
+		ps.ManualDisabled = disabled
+		ps.ManualDisabledAt = at
+		nextProviders[provider] = ps
+	}
+	next := s
+	next.Providers = nextProviders
+	return next, nil
 }
 
 // ResetManualDisables clears manual disables for every tracked provider while
@@ -308,26 +335,6 @@ func ResetManualDisables(s State, at time.Time) (State, error) {
 		}
 		providers[provider] = ps
 	}
-	next := s
-	next.Providers = providers
-	return next, nil
-}
-
-func updateManualDisable(s State, provider string, disabled bool, at time.Time) (State, error) {
-	providers := make(map[string]ProviderState, len(s.Providers)+1)
-	for k, v := range s.Providers {
-		providers[k] = v
-	}
-	ps := providers[provider]
-	if ps.Quota == "" {
-		ps.Quota = QuotaNormal
-	}
-	if ps.Availability == "" {
-		ps.Availability = Available
-	}
-	ps.ManualDisabled = disabled
-	ps.ManualDisabledAt = at
-	providers[provider] = ps
 	next := s
 	next.Providers = providers
 	return next, nil

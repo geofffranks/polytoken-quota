@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,61 @@ func TestLoadRejectsAmbiguousProviders(t *testing.T) {
 				t.Fatalf("err=%v want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestPolicyRejectsCrossMappingIDAliasCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "codexbar alias",
+			yaml: "version: 1\nproviders:\n  alpha: {codexbar_providers: [shared], models: [alpha/m]}\n  shared: {codexbar_providers: [own], models: [shared/m]}",
+		},
+		{
+			name: "polytoken alias",
+			yaml: "version: 1\nproviders:\n  alpha: {polytoken_providers: [shared], models: [alpha/m]}\n  shared: {polytoken_providers: [own], models: [shared/m]}",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), `mapping "shared"`) || !strings.Contains(err.Error(), `mapping "alpha"`) {
+				t.Fatalf("err=%v want deterministic cross-mapping identity collision", err)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		mappings []SourceMapping
+	}{
+		{
+			name: "codexbar import",
+			mappings: []SourceMapping{
+				{ID: "alpha", CodexBarProviders: []string{"shared"}, Models: map[string]ModelBaseline{"alpha/m": {Enabled: true}}},
+				{ID: "shared", CodexBarProviders: []string{"own"}, Models: map[string]ModelBaseline{"shared/m": {Enabled: true}}},
+			},
+		},
+		{
+			name: "polytoken import",
+			mappings: []SourceMapping{
+				{ID: "alpha", PolytokenProviders: []string{"shared"}, Models: map[string]ModelBaseline{"alpha/m": {Enabled: true}}},
+				{ID: "shared", PolytokenProviders: []string{"own"}, Models: map[string]ModelBaseline{"shared/m": {Enabled: true}}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := staticReader{global: SourceSet{Config: SourceConfig{Providers: tc.mappings}}}
+			if _, _, err := Init(context.Background(), reader); err == nil || !strings.Contains(err.Error(), `mapping "shared"`) {
+				t.Fatalf("import err=%v want cross-mapping identity collision", err)
+			}
+		})
+	}
+
+	ownAlias := "version: 1\nproviders:\n  alpha: {codexbar_providers: [alpha], polytoken_providers: [alpha], models: [alpha/m]}"
+	if _, err := Load(writeTemp(t, ownAlias)); err != nil {
+		t.Fatalf("mapping ID equal to its own aliases rejected: %v", err)
 	}
 }
 

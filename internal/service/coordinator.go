@@ -29,7 +29,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"time"
 
@@ -209,16 +208,16 @@ func (c *Coordinator) Clear(ctx context.Context, sel state.Selector) Outcome {
 	return c.transact(ctx, txClear, transactionInput{Selector: sel})
 }
 
-// Disable marks one configured provider as manually disabled, reconciles all
-// targets, and publishes the accepted state even when targets remain pending.
-func (c *Coordinator) Disable(ctx context.Context, provider string) Outcome {
-	return c.transact(ctx, txDisable, transactionInput{Provider: provider})
+// Disable marks every CodexBar alias owned by one exact mapping ID as manually
+// disabled, then reconciles all targets and publishes the accepted state.
+func (c *Coordinator) Disable(ctx context.Context, mappingID string) Outcome {
+	return c.transact(ctx, txDisable, transactionInput{Provider: mappingID})
 }
 
-// Enable clears one configured provider's manual disable and reconciles all
-// targets using the current automatic provider state.
-func (c *Coordinator) Enable(ctx context.Context, provider string) Outcome {
-	return c.transact(ctx, txEnable, transactionInput{Provider: provider})
+// Enable clears the manual disable on every CodexBar alias owned by one exact
+// mapping ID while preserving each alias's automatic provider state.
+func (c *Coordinator) Enable(ctx context.Context, mappingID string) Outcome {
+	return c.transact(ctx, txEnable, transactionInput{Provider: mappingID})
 }
 
 // Reset clears every manual provider disable while preserving automatic state,
@@ -460,27 +459,23 @@ func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, i
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
 
-// transactManual applies a manual provider transition and reconciles all targets
-// with the same coarse trace used by Set/Clear.
+// transactManual resolves exact mapping IDs, applies their owned aliases as one
+// manual transition, and reconciles all targets with the Set/Clear coarse trace.
 func (c *Coordinator) transactManual(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind) Outcome {
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	var mapping policy.Mapping
 	if kind != txReset {
 		if in.Provider == "" {
-			return Outcome{Accepted: false, Error: errors.New("service: manual provider command requires a provider")}
+			return Outcome{Accepted: false, Error: errors.New("service: manual provider command requires a mapping ID")}
 		}
-		configured := false
-		for _, mapping := range desired.Providers {
-			if slices.Contains(mapping.CodexBarProviders, in.Provider) || slices.Contains(mapping.PolytokenProviders, in.Provider) {
-				configured = true
-				break
-			}
-		}
-		if !configured {
-			return Outcome{Accepted: false, Error: fmt.Errorf("service: provider %q is not configured", in.Provider)}
+		var ok bool
+		mapping, ok = desired.Providers[policy.MappingID(in.Provider)]
+		if !ok {
+			return Outcome{Accepted: false, Error: fmt.Errorf("service: mapping %q is not configured", sanitizeFailure(in.Provider))}
 		}
 	}
 	c.step("load-state")
@@ -489,10 +484,10 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	switch kind {
 	case txDisable:
 		c.step("manual-disable")
-		next, err = state.DisableProvider(observed, in.Provider, c.now())
+		next, err = state.SetManualDisabled(observed, mapping.CodexBarProviders, true, c.now())
 	case txEnable:
 		c.step("manual-enable")
-		next, err = state.EnableProvider(observed, in.Provider, c.now())
+		next, err = state.SetManualDisabled(observed, mapping.CodexBarProviders, false, c.now())
 	case txReset:
 		c.step("manual-reset")
 		next, err = state.ResetManualDisables(observed, c.now())
