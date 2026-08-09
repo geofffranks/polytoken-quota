@@ -17,7 +17,10 @@ if (($#)); then
     [[ "$workflow" = /* ]] && workflows+=("$workflow") || workflows+=("$repo_root/$workflow")
   done
 else
-  mapfile -t workflows < <(find "$workflow_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
+  workflows=()
+  while IFS= read -r workflow; do
+    workflows+=("$workflow")
+  done < <(find "$workflow_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print | sort)
 fi
 
 if ((${#workflows[@]} == 0)); then
@@ -38,12 +41,27 @@ assert_contains() {
   echo "PASS: $description"
 }
 
-assert_contains "$ci" '^on:' 'CI workflow declares triggers'
-assert_contains "$ci" '^  push:' 'CI workflow triggers on push'
-assert_contains "$ci" '^    branches: \[main\]$' 'CI workflow limits pushes to main'
-assert_contains "$ci" '^  pull_request:' 'CI workflow triggers on pull requests'
-assert_contains "$ci" '^permissions: *$' 'CI workflow declares permissions'
-assert_contains "$ci" '^  contents: read$' 'CI workflow uses read-only contents permission'
+assert_exact_block() {
+  local file=$1 start=$2 expected=$3 description=$4
+  local actual
+  actual=$(awk -v start="$start" '
+    $0 == start { in_block = 1; next }
+    in_block && $0 !~ /^  / { exit }
+    in_block { print }
+  ' "$file")
+  [[ "$actual" == "$expected" ]] || {
+    echo "FAIL: $description ($file)" >&2
+    echo "expected:" >&2
+    printf '%s\n' "$expected" >&2
+    echo "actual:" >&2
+    printf '%s\n' "$actual" >&2
+    exit 1
+  }
+  echo "PASS: $description"
+}
+
+assert_exact_block "$ci" 'on:' $'  push:\n    branches: [main]\n  pull_request:' 'CI workflow has exactly push-to-main and pull-request triggers'
+assert_exact_block "$ci" 'permissions:' '  contents: read' 'CI workflow has exactly read-only contents permission'
 assert_contains "$ci" 'actions/setup-go@v6' 'CI uses approved setup-go major tag'
 assert_contains "$ci" 'go-version-file: go\.mod' 'CI setup-go reads repository Go directive'
 assert_contains "$ci" 'go env GOVERSION' 'CI checks the installed Go version'
