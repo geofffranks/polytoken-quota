@@ -247,6 +247,14 @@ assert_contains "$bump" 'go.dev/dl/\?mode=json' 'Go bump discovers releases from
 assert_contains "$bump" 'stable == true' 'Go bump selects stable releases only'
 assert_contains "$bump" 'go mod edit -go=' 'Go bump updates the exact go.mod directive'
 assert_contains "$bump" 'go mod tidy' 'Go bump runs go mod tidy'
+python3 - "$bump" <<'PY'
+import pathlib, sys
+workflow = pathlib.Path(sys.argv[1]).read_text()
+expected = "re.subn(r'go\\s*[0-9]+\\.[0-9]+\\.[0-9]+', 'go ' + version, text)"
+if expected not in workflow:
+    raise SystemExit('FAIL: Go bump documentation replacement must accept go 1.2.3 and go1.2.3 forms')
+print('PASS: Go bump documentation replacement accepts spaced and unspaced Go versions')
+PY
 assert_contains "$bump" 'uses: actions/setup-go@v6' 'Go bump installs discovered Go version'
 assert_contains "$bump" 'go-version: \$\{\{ steps\.latest\.outputs\.version \}\}' 'Go bump setup uses discovered version output'
 assert_contains "$bump" 'go\.sum' 'Go bump handles go.sum changes'

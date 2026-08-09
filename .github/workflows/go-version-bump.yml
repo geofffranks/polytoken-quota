@@ -61,7 +61,7 @@ jobs:
           for name in ("AGENTS.md", "README.md"):
               path = pathlib.Path(name)
               text = path.read_text()
-              updated, count = re.subn(r'go[0-9]+\.[0-9]+\.[0-9]+', 'go' + version, text)
+              updated, count = re.subn(r'go\s*[0-9]+\.[0-9]+\.[0-9]+', 'go ' + version, text)
               if count == 0:
                   raise SystemExit(f"no documented Go version in {name}")
               path.write_text(updated)
