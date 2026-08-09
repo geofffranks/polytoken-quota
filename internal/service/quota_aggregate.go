@@ -26,6 +26,7 @@ func aggregateMappingState(codexBarProviders []string, providers map[string]stat
 		}
 		if state.EffectiveMode(ps) == state.ModeDisabled {
 			out.Quota = state.QuotaExhausted
+			out.ManualDisabled = out.ManualDisabled || ps.ManualDisabled
 		} else if out.Quota != state.QuotaExhausted && state.EffectiveMode(ps) == state.ModeReserve {
 			out.Quota = state.QuotaLow
 		}

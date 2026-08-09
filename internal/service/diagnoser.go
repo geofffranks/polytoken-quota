@@ -10,9 +10,7 @@ import (
 	"context"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
-	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
-	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -102,108 +100,20 @@ var (
 // reconciliation outcome into a StatusReport. It is read-only: it never mutates
 // state or targets. A load or resolution error yields a report carrying only the
 // error-safe fields (empty providers/targets) rather than panicking.
-func (c *Coordinator) Status(_ context.Context, _ bool) StatusReport {
-	report := StatusReport{}
-	if c.State == nil {
-		report.Error = "no state store configured"
-		return report
+func (c *Coordinator) Status(ctx context.Context, _ bool) StatusReport {
+	snapshot := c.BuildDiagnosticSnapshot(ctx)
+	view := snapshot.StatusView()
+	report := StatusReport{
+		Revision: snapshot.revision, Targets: append([]TargetStatus(nil), snapshot.targets...),
+		Pending: snapshot.pending, Drift: snapshot.drift, Problem: snapshot.problem,
+		Quota: cloneLegacyQuota(snapshot.legacyQuota), Error: view.Error,
 	}
-	observed, err := c.State.LoadState()
-	if err != nil {
-		// A malformed or unreadable state file must never render as a clean
-		// "in sync" report; surface the sanitized failure so the CLI can exit
-		// non-zero.
-		report.Error = sanitizeFailure(err.Error())
-		return report
-	}
-	report.Revision = observed.Revision
-
-	// Provider axes in stable (sorted) order so output is deterministic.
-	for _, name := range sortedProviderNames(observed.Providers) {
-		ps := observed.Providers[name]
+	for _, provider := range view.Providers {
 		report.Providers = append(report.Providers, ProviderStatus{
-			Provider:       name,
-			Quota:          ps.Quota,
-			Availability:   ps.Availability,
-			Mode:           state.EffectiveMode(ps),
-			ManualDisabled: ps.ManualDisabled,
-			Reason:         providerReason(ps),
+			Provider: provider.MappingID, Quota: state.Quota(provider.QuotaClass),
+			Availability: provider.Availability, Mode: provider.EffectiveMode,
+			ManualDisabled: provider.ManualDisabled, Reason: provider.Reason,
 		})
-	}
-
-	// Per-target attempted/applied revision and pending flag.
-	for _, id := range sortedTargetIDs(observed.Targets) {
-		ts := observed.Targets[id]
-		report.Targets = append(report.Targets, TargetStatus{
-			TargetID:          id,
-			AttemptedRevision: ts.AttemptedRevision,
-			AppliedRevision:   ts.AppliedRevision,
-			Pending:           ts.Pending != nil,
-		})
-		if ts.Pending != nil {
-			report.Pending++
-		}
-	}
-
-	// Quota projections are composed from the same read-only service method used
-	// by `quota status`, ensuring status and quota status cannot diverge.
-	quotaReport := c.QuotaStatus(context.Background())
-	report.Quota = quotaReport.Providers
-	report.Problem = quotaReport.Problem
-
-	// Routing projections are only shown when policy loading succeeds. Disabled
-	// routing is explicit and intentionally carries no ranking entries.
-	if c.Policy != nil {
-		if desired, perr := c.Policy.LoadPolicy(); perr == nil {
-			report.RoutingEnabled = desired.Routing.Enabled
-			if desired.Routing.Enabled {
-				rankLookup, ranking := ComputeRanking(desired, observed, c.now())
-				for _, entry := range ranking.Entries {
-					report.Ranking = append(report.Ranking, RankEntryReport{
-						MappingID:   entry.MappingID,
-						Rank:        entry.Rank,
-						OffPeak:     entry.OffPeak,
-						Eligible:    entry.Eligible,
-						Explanation: entry.Explanation,
-					})
-				}
-				appendChainOrders := func(target policy.Target) {
-					chains := []struct {
-						name  string
-						chain policy.Chain
-					}{
-						{"full", target.Full}, {"mini", target.Mini},
-						{"nano", target.Nano}, {"classifier", target.Classifier},
-					}
-					for _, ch := range chains {
-						if len(ch.chain) == 0 {
-							continue
-						}
-						effective, err := reconcile.EffectiveOrder(desired, observed, ch.chain, rankLookup)
-						if err != nil {
-							continue
-						}
-						report.EffectiveOrders = append(report.EffectiveOrders, ChainOrderReport{
-							TargetID: target.ID, Chain: ch.name,
-							Desired: append([]string(nil), ch.chain...), Effective: effective,
-						})
-					}
-				}
-				appendChainOrders(desired.Global)
-				for _, target := range desired.Projects {
-					appendChainOrders(target)
-				}
-			}
-		}
-	}
-
-	// Drift: any target whose attempted revision exceeds its applied revision is
-	// not yet fully reconciled with the live files.
-	for _, ts := range observed.Targets {
-		if ts.AttemptedRevision > ts.AppliedRevision {
-			report.Drift = true
-			break
-		}
 	}
 	return report
 }

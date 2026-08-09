@@ -42,44 +42,14 @@ type RankingReport struct {
 // observed state and returns it for display. It is read-only: it never mutates
 // state, policy, or targets. A load error yields a report carrying only the
 // sanitized error string. The injected clock supplies "now".
-func (c *Coordinator) RankingExplain(_ context.Context) RankingReport {
-	report := RankingReport{Now: c.now()}
-	if c.Policy == nil || c.State == nil {
-		report.Error = "policy or state unavailable"
-		return report
+func (c *Coordinator) RankingExplain(ctx context.Context) RankingReport {
+	view := c.BuildDiagnosticSnapshot(ctx).RoutingExplainView()
+	return RankingReport{
+		Enabled: view.RoutingEnabled,
+		Now:     view.AsOf,
+		Entries: append([]RankEntryReport(nil), view.Ranks...),
+		Error:   view.Error,
 	}
-	desired, err := c.Policy.LoadPolicy()
-	if err != nil {
-		report.Error = sanitizeMsg("load policy: ", err)
-		return report
-	}
-	observed, err := c.State.LoadState()
-	if err != nil {
-		report.Error = sanitizeMsg("load state: ", err)
-		return report
-	}
-	report.Enabled = desired.Routing.Enabled
-	_, result := ComputeRanking(desired, observed, c.now())
-	report.Entries = make([]RankEntryReport, 0, len(result.Entries))
-	for _, e := range result.Entries {
-		report.Entries = append(report.Entries, RankEntryReport{
-			MappingID:   e.MappingID,
-			Rank:        e.Rank,
-			OffPeak:     e.OffPeak,
-			Eligible:    e.Eligible,
-			Explanation: e.Explanation,
-		})
-	}
-	return report
-}
-
-// QuotaWindowReport is one window's sanitized quota observation.
-type QuotaWindowReport struct {
-	Name         string   `json:"name"`
-	Used         *float64 `json:"used,omitempty"`
-	Limit        *float64 `json:"limit,omitempty"`
-	UsagePercent *float64 `json:"usage_percent,omitempty"`
-	Remaining    *float64 `json:"remaining,omitempty"`
 }
 
 // QuotaSnapshotReport is the sanitized snapshot for one provider mapping: the
@@ -94,13 +64,6 @@ type QuotaSnapshotReport struct {
 	Attempt        *QuotaAttemptReport     `json:"attempt,omitempty"`
 	LastRank       int                     `json:"last_rank,omitempty"`
 	LastDecisionAt time.Time               `json:"last_decision_at,omitempty"`
-}
-
-// QuotaAttemptReport is the sanitized last attempt (success or failure).
-type QuotaAttemptReport struct {
-	Status    quota.SourceStatus `json:"status"`
-	Error     string             `json:"error,omitempty"`
-	CheckedAt time.Time          `json:"checked_at,omitempty"`
 }
 
 // QuotaStatusReport is the result of the quota status command. Problem is true
@@ -207,29 +170,6 @@ func (c *Coordinator) QuotaStatus(_ context.Context) QuotaStatusReport {
 		report.Providers = append(report.Providers, entry)
 	}
 	return report
-}
-
-// windowsReport maps a snapshot's windows to sanitized reports, including the
-// derived remaining fraction.
-func windowsReport(s *quota.QuotaSnapshot) []QuotaWindowReport {
-	if s == nil || len(s.Windows) == 0 {
-		return nil
-	}
-	out := make([]QuotaWindowReport, 0, len(s.Windows))
-	for _, w := range s.Windows {
-		wr := QuotaWindowReport{
-			Name:         w.Name,
-			Used:         w.Used,
-			Limit:        w.Limit,
-			UsagePercent: w.UsagePercent,
-		}
-		// EffectiveRemaining is a per-snapshot minimum; show the window's own
-		// remaining for display via the quota package's exported per-window method
-		// (single source of truth, shared with the routing policy).
-		wr.Remaining = w.Remaining()
-		out = append(out, wr)
-	}
-	return out
 }
 
 // providerHasProblem reports whether a provider has a pending quota problem: a
