@@ -30,7 +30,7 @@ jobs:
           test -n "$version" && test "$version" != null
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Set up discovered Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ steps.latest.outputs.version }}
           cache: true
