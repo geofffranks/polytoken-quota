@@ -141,15 +141,30 @@ func sanitizeResetCredits(credits quota.ResetCreditState) (quota.ResetCreditStat
 }
 
 func sanitizeSnap(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
-	if snap == nil || snap.Error == "" {
-		return snap, false
-	}
-	cleaned := quota.SanitizeError(strErr(snap.Error))
-	if cleaned == snap.Error {
+	if snap == nil {
 		return snap, false
 	}
 	out := *snap
-	out.Error = cleaned
+	changed := false
+	if snap.Error != "" {
+		cleaned := quota.SanitizeError(strErr(snap.Error))
+		if cleaned != snap.Error {
+			out.Error = cleaned
+			changed = true
+		}
+	}
+	if snap.ResetCredits != nil && snap.ResetCredits.Error != "" {
+		cleaned := quota.SanitizeText(snap.ResetCredits.Error)
+		if cleaned != snap.ResetCredits.Error {
+			attempt := *snap.ResetCredits
+			attempt.Error = cleaned
+			out.ResetCredits = &attempt
+			changed = true
+		}
+	}
+	if !changed {
+		return snap, false
+	}
 	return &out, true
 }
 

@@ -194,7 +194,7 @@ func (c *CodexSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		Status:       status,
 		UsageSummary: summary,
 	}
-	snap.ResetCredits = c.fetchResetCredits(ctx, token, accountID, observedAt)
+	snap.ResetCredits = c.fetchResetCredits(ctx, token, accountID)
 	return snap, nil
 }
 
@@ -287,20 +287,20 @@ func (c *CodexSource) buildRequest(ctx context.Context, token, accountID string)
 	return req, nil
 }
 
-func (c *CodexSource) fetchResetCredits(ctx context.Context, token, accountID string, observedAt time.Time) *ResetCreditAttempt {
+func (c *CodexSource) fetchResetCredits(ctx context.Context, token, accountID string) *ResetCreditAttempt {
 	if accountID == "" {
-		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: "codex reset-credit enrichment skipped: account context unavailable"}
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: c.now(), Error: "codex reset-credit enrichment skipped: account context unavailable"}
 	}
 	if c.Evidence == nil {
-		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: "codex reset-credit enrichment skipped: contract evidence absent"}
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: c.now(), Error: "codex reset-credit enrichment skipped: contract evidence absent"}
 	}
-	st := c.Evidence.StatusContract(codexProviderName, CodexResetCreditsContract, observedAt)
+	st := c.Evidence.StatusContract(codexProviderName, CodexResetCreditsContract, c.now())
 	if st.State != EvidenceFresh {
-		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: observedAt, Error: SanitizeText("codex reset-credit enrichment skipped: " + st.Reason)}
+		return &ResetCreditAttempt{Status: CreditAttemptSkipped, At: c.now(), Error: SanitizeText("codex reset-credit enrichment skipped: " + st.Reason)}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, codexResetCreditsEndpoint, nil)
 	if err != nil {
-		return creditFailure(observedAt, err)
+		return creditFailure(c.now(), err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
@@ -311,6 +311,7 @@ func (c *CodexSource) fetchResetCredits(ctx context.Context, token, accountID st
 	// capitalization; net/http Header.Set would canonicalize ID to Id.
 	req.Header["ChatGPT-Account-ID"] = []string{accountID}
 	resp, err := c.Client.Do(req)
+	observedAt := c.now()
 	if err != nil {
 		return creditFailure(observedAt, err)
 	}
@@ -319,7 +320,7 @@ func (c *CodexSource) fetchResetCredits(ctx context.Context, token, accountID st
 	}
 	inventory, partial, err := parseResetCreditInventory(resp.Body, observedAt)
 	if err != nil {
-		return creditFailure(observedAt, errors.New("codex reset-credit response was invalid"))
+		return creditFailure(c.now(), errors.New("codex reset-credit response was invalid"))
 	}
 	status := CreditAttemptSuccess
 	if partial {
@@ -334,18 +335,25 @@ func creditFailure(at time.Time, err error) *ResetCreditAttempt {
 
 func parseResetCreditInventory(body []byte, observedAt time.Time) (*ResetCreditInventory, bool, error) {
 	var payload struct {
-		AvailableCount *int `json:"available_count"`
-		Credits        []struct {
-			Status    string           `json:"status"`
-			ExpiresAt *json.RawMessage `json:"expires_at"`
-		} `json:"credits"`
+		AvailableCount *int              `json:"available_count"`
+		Credits        []json.RawMessage `json:"credits"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.AvailableCount == nil || *payload.AvailableCount < 0 {
 		return nil, false, errors.New("invalid reset-credit inventory")
 	}
 	inventory := &ResetCreditInventory{ServerAvailableCount: *payload.AvailableCount, ObservedAt: observedAt}
 	partial := false
-	for _, item := range payload.Credits {
+	for _, rawItem := range payload.Credits {
+		var item struct {
+			Status    string           `json:"status"`
+			ExpiresAt *json.RawMessage `json:"expires_at"`
+		}
+		if err := json.Unmarshal(rawItem, &item); err != nil {
+			inventory.SkippedCount++
+			inventory.DiscrepancyCount++
+			partial = true
+			continue
+		}
 		if item.Status != "available" {
 			inventory.SkippedCount++
 			if item.Status != "redeeming" && item.Status != "redeemed" && item.Status != "expired" {

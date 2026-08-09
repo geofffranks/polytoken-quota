@@ -271,6 +271,81 @@ func containsSecretPattern(s string) bool {
 	return reBearer.MatchString(s) || reSecretKV.MatchString(s) || reURLCreds.MatchString(s)
 }
 
+func TestValidateReleaseRejectsNonFreshCodexResetContract(t *testing.T) {
+	usage := CodexUsageEvidence(fixedNow)
+	reset := CodexResetCreditsEvidence(fixedNow)
+	legacy := usage
+	legacy.ContractID = ""
+	legacyRegistry := NewEvidenceRegistry()
+	legacyRegistry.Register(legacy)
+	if got := legacyRegistry.Status("codex", fixedNow); got.State != EvidenceFresh {
+		t.Fatalf("legacy generic evidence should authorize runtime usage, got %+v", got)
+	}
+
+	cases := []struct {
+		name        string
+		evidence    []Evidence
+		wantStates  []EvidenceState
+		wantReasons []string
+	}{
+		{
+			name:        "reset evidence absent",
+			evidence:    []Evidence{usage},
+			wantStates:  []EvidenceState{EvidenceFresh, EvidenceAbsent},
+			wantReasons: []string{"", "provider codex/reset_credits has no recorded contract evidence; record evidence before enabling"},
+		},
+		{
+			name: "reset evidence stale",
+			evidence: []Evidence{usage, func() Evidence {
+				stale := reset
+				stale.ReviewBy = fixedNow.Add(-time.Hour)
+				return stale
+			}()},
+			wantStates:  []EvidenceState{EvidenceFresh, EvidenceExpired},
+			wantReasons: []string{"", "provider codex contract evidence expired on 2026-06-15; re-verify and update"},
+		},
+		{
+			name:       "legacy generic codex evidence only",
+			evidence:   []Evidence{legacy},
+			wantStates: []EvidenceState{EvidenceIncomplete, EvidenceAbsent},
+			wantReasons: []string{
+				"provider codex/usage release evidence is incomplete (missing fixture_path); record complete evidence",
+				"provider codex/reset_credits has no recorded contract evidence; record evidence before enabling",
+			},
+		},
+		{
+			name: "reset fixture path blank",
+			evidence: []Evidence{usage, func() Evidence {
+				blank := reset
+				blank.FixturePath = ""
+				return blank
+			}()},
+			wantStates:  []EvidenceState{EvidenceFresh, EvidenceIncomplete},
+			wantReasons: []string{"", "provider codex/reset_credits release evidence is incomplete (missing fixture_path); record complete evidence"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := NewEvidenceRegistry()
+			for _, evidence := range tc.evidence {
+				reg.Register(evidence)
+			}
+			statuses := ValidateRelease(reg, []string{"codex"}, fixedNow)
+			if len(statuses) != 2 {
+				t.Fatalf("statuses=%+v want ordered usage/reset pair", statuses)
+			}
+			for i, want := range tc.wantStates {
+				if statuses[i].State != want {
+					t.Fatalf("status[%d]=%s want %s; all=%+v", i, statuses[i].State, want, statuses)
+				}
+				if statuses[i].Reason != tc.wantReasons[i] {
+					t.Fatalf("reason[%d]=%q want %q", i, statuses[i].Reason, tc.wantReasons[i])
+				}
+			}
+		})
+	}
+}
+
 func TestCodexResetCreditsRequiresOwnFreshEvidence(t *testing.T) {
 	r := NewEvidenceRegistry()
 	usage := CodexUsageEvidence(fixedNow)

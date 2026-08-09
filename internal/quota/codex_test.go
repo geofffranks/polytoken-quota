@@ -238,6 +238,178 @@ func TestResetCreditEvidenceFailureDoesNotBlockUsage(t *testing.T) {
 	}
 }
 
+func TestResetCreditOptionalFailuresDoNotBlockUsage(t *testing.T) {
+	cases := []struct {
+		name        string
+		credentials string
+		responses   []*http.Response
+		wantCalls   int
+		wantStatus  CreditAttemptStatus
+	}{
+		{
+			name:        "account missing",
+			credentials: `{"OPENAI_API_KEY":"synthetic-api-key"}`,
+			responses:   []*http.Response{bodyResponse(200, []byte(codexMinimalBody))},
+			wantCalls:   1,
+			wantStatus:  CreditAttemptSkipped,
+		},
+		{
+			name:        "reset server failure",
+			credentials: codexTestAuthJSON,
+			responses: []*http.Response{
+				bodyResponse(200, []byte(codexMinimalBody)),
+				bodyResponse(503, []byte(`Bearer reset-5xx-canary account=private`)),
+			},
+			wantCalls:  2,
+			wantStatus: CreditAttemptFailed,
+		},
+		{
+			name:        "reset malformed response",
+			credentials: codexTestAuthJSON,
+			responses: []*http.Response{
+				bodyResponse(200, []byte(codexMinimalBody)),
+				bodyResponse(200, []byte(`{"available_count":1,"credits":[Bearer malformed-canary]}`)),
+			},
+			wantCalls:  2,
+			wantStatus: CreditAttemptFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doer := &sequenceDoer{responses: tc.responses}
+			src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), CodexResetCreditsEvidence(codexTestNow))
+			src.Credentials = &fakeResolver{val: tc.credentials}
+			snap, err := src.Fetch(context.Background())
+			if err != nil {
+				t.Fatalf("optional reset failure returned source error: %v", err)
+			}
+			if snap.Status != SourceFresh || snap.Availability != QuotaAvailable || snap.Error != "" {
+				t.Fatalf("ordinary usage changed by optional reset failure: %+v", snap)
+			}
+			if len(doer.calls) != tc.wantCalls {
+				t.Fatalf("calls=%d want %d", len(doer.calls), tc.wantCalls)
+			}
+			if snap.ResetCredits == nil || snap.ResetCredits.Status != tc.wantStatus || snap.ResetCredits.Error == "" {
+				t.Fatalf("reset attempt=%+v want status=%s with sanitized provenance", snap.ResetCredits, tc.wantStatus)
+			}
+			for _, canary := range []string{"reset-5xx-canary", "private", "malformed-canary", codexTestAccount, codexTestBearer} {
+				if strings.Contains(snap.ResetCredits.Error, canary) {
+					t.Fatalf("reset provenance leaks %q: %q", canary, snap.ResetCredits.Error)
+				}
+			}
+		})
+	}
+}
+
+func TestResetCreditMalformedItemsAreIsolated(t *testing.T) {
+	body := `{"available_count":1,"credits":[` +
+		`{"status":"available"},` +
+		`42,` +
+		`{"status":17},` +
+		`{"status":"available","expires_at":"not-a-timestamp"}]}`
+	doer := &sequenceDoer{responses: []*http.Response{
+		bodyResponse(200, []byte(codexMinimalBody)),
+		bodyResponse(200, []byte(body)),
+	}}
+	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), CodexResetCreditsEvidence(codexTestNow))
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := snap.ResetCredits
+	if attempt == nil || attempt.Status != CreditAttemptPartial || attempt.Inventory == nil {
+		t.Fatalf("attempt=%+v want partial inventory retaining valid sibling", attempt)
+	}
+	inv := attempt.Inventory
+	if inv.ServerAvailableCount != 1 || inv.UsableCount != 1 || inv.SkippedCount != 3 || inv.DiscrepancyCount != 3 || len(inv.AvailableExpiries) != 1 {
+		t.Fatalf("isolated inventory=%+v", inv)
+	}
+	merged := MergeResetCreditObservation(ResetCreditState{}, *attempt)
+	if merged.LastSuccess != inv {
+		t.Fatalf("partial inventory did not become new last success: %+v", merged)
+	}
+
+	for _, body := range []string{
+		`{"credits":[]}`,
+		`{"available_count":-1,"credits":[]}`,
+	} {
+		if got, _, err := parseResetCreditInventory([]byte(body), codexTestNow); err == nil || got != nil {
+			t.Fatalf("top-level available_count contract accepted %s: %+v", body, got)
+		}
+	}
+}
+
+type resetCompletionDoer struct {
+	responses []*http.Response
+	calls     int
+	current   *time.Time
+	resetDone time.Time
+}
+
+func (d *resetCompletionDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls++
+	resp := d.responses[0]
+	d.responses = d.responses[1:]
+	if d.calls == 2 {
+		*d.current = d.resetDone
+	}
+	return resp, nil
+}
+
+func TestResetCreditUsesEndpointCompletionTime(t *testing.T) {
+	usageAt := codexTestNow
+	resetDone := usageAt.Add(2 * time.Second)
+	expiresDuringRequest := usageAt.Add(time.Second)
+	current := usageAt
+	body := fmt.Sprintf(`{"available_count":1,"credits":[{"status":"available","expires_at":%q}]}`, expiresDuringRequest.Format(time.RFC3339Nano))
+	doer := &resetCompletionDoer{
+		responses: []*http.Response{
+			bodyResponse(200, []byte(codexMinimalBody)),
+			bodyResponse(200, []byte(body)),
+		},
+		current:   &current,
+		resetDone: resetDone,
+	}
+	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(usageAt), CodexResetCreditsEvidence(usageAt))
+	src.Now = func() time.Time { return current }
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.CheckedAt.Equal(usageAt) {
+		t.Fatalf("usage checked_at=%v want %v", snap.CheckedAt, usageAt)
+	}
+	attempt := snap.ResetCredits
+	if attempt == nil || attempt.Inventory == nil {
+		t.Fatalf("missing reset inventory: %+v", attempt)
+	}
+	if !attempt.At.Equal(resetDone) || !attempt.Inventory.ObservedAt.Equal(resetDone) {
+		t.Fatalf("reset provenance attempt=%v inventory=%v want completion=%v", attempt.At, attempt.Inventory.ObservedAt, resetDone)
+	}
+	if attempt.Status != CreditAttemptPartial || attempt.Inventory.UsableCount != 0 {
+		t.Fatalf("credit expiring during request remained usable: %+v", attempt)
+	}
+
+	current = usageAt
+	failureDoer := &resetCompletionDoer{
+		responses: []*http.Response{
+			bodyResponse(200, []byte(codexMinimalBody)),
+			bodyResponse(503, []byte("synthetic failure")),
+		},
+		current:   &current,
+		resetDone: resetDone,
+	}
+	failureSource := codexSourceWithEvidence(t, failureDoer, CodexUsageEvidence(usageAt), CodexResetCreditsEvidence(usageAt))
+	failureSource.Now = func() time.Time { return current }
+	failedSnap, err := failureSource.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !failedSnap.CheckedAt.Equal(usageAt) || failedSnap.ResetCredits == nil || failedSnap.ResetCredits.Status != CreditAttemptFailed || !failedSnap.ResetCredits.At.Equal(resetDone) {
+		t.Fatalf("reset failure provenance did not use completion time: %+v", failedSnap)
+	}
+}
+
 func TestCodexUsageCreditsContract(t *testing.T) {
 	doer := &sequenceDoer{responses: []*http.Response{bodyResponse(200, []byte(codexProBody))}}
 	src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), Evidence{})

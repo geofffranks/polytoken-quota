@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -323,6 +324,65 @@ func TestSaveSanitizesSnapshotErrorBeforePersist(t *testing.T) {
 		if strings.Contains(string(b), forbidden) {
 			t.Fatalf("persisted state contains secret %q", forbidden)
 		}
+	}
+}
+
+func TestSaveSanitizesNestedResetErrorsWithoutMutatingInput(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	p := filepath.Join(t.TempDir(), "state.json")
+	st := Store{Path: p, Now: func() time.Time { return now }, RecoveredRetention: 24 * time.Hour}
+
+	snapshotRaw := "snapshot reset failed Bearer snapshot-token account=snapshot-account /home/snapshot/private " + strings.Repeat("s", 700)
+	attemptRaw := "attempt reset failed Bearer attempt-token secret=attempt-secret /tmp/attempt/private " + strings.Repeat("a", 700)
+	latestRaw := "latest reset failed Bearer latest-token api_key=latest-secret /home/latest/private " + strings.Repeat("l", 700)
+	snapshotReset := &quota.ResetCreditAttempt{Status: quota.CreditAttemptFailed, At: now, Error: snapshotRaw}
+	attemptReset := &quota.ResetCreditAttempt{Status: quota.CreditAttemptFailed, At: now, Error: attemptRaw}
+	latestReset := &quota.ResetCreditAttempt{Status: quota.CreditAttemptFailed, At: now, Error: latestRaw}
+	s := State{
+		Schema: CurrentSchema,
+		Providers: map[string]ProviderState{
+			"codex": {
+				QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "codex", ResetCredits: snapshotReset},
+				QuotaAttempt:  &quota.QuotaSnapshot{MappingID: "codex", ResetCredits: attemptReset},
+				ResetCredits:  quota.ResetCreditState{LatestAttempt: latestReset},
+			},
+		},
+		Targets: map[string]TargetState{},
+	}
+	if err := st.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := loaded.Providers["codex"]
+	got := []string{
+		provider.QuotaSnapshot.ResetCredits.Error,
+		provider.QuotaAttempt.ResetCredits.Error,
+		provider.ResetCredits.LatestAttempt.Error,
+	}
+	for i, cleaned := range got {
+		if cleaned == "" || len(cleaned) > 512 {
+			t.Fatalf("cleaned nested error %d is empty or unbounded (%d bytes): %q", i, len(cleaned), cleaned)
+		}
+		for _, forbidden := range []string{"snapshot-token", "snapshot-account", "/home/snapshot", "attempt-token", "attempt-secret", "/tmp/attempt", "latest-token", "latest-secret", "/home/latest"} {
+			if strings.Contains(cleaned, forbidden) {
+				t.Fatalf("cleaned nested error %d contains %q: %q", i, forbidden, cleaned)
+			}
+		}
+	}
+	rawFile, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"snapshot-token", "snapshot-account", "/home/snapshot", "attempt-token", "attempt-secret", "/tmp/attempt", "latest-token", "latest-secret", "/home/latest"} {
+		if bytes.Contains(rawFile, []byte(forbidden)) {
+			t.Fatalf("persisted state contains nested reset canary %q", forbidden)
+		}
+	}
+	if snapshotReset.Error != snapshotRaw || attemptReset.Error != attemptRaw || latestReset.Error != latestRaw {
+		t.Fatalf("Save mutated input reset errors: snapshot=%q attempt=%q latest=%q", snapshotReset.Error, attemptReset.Error, latestReset.Error)
 	}
 }
 

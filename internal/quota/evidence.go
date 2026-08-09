@@ -220,9 +220,10 @@ func SupportFromEvidence(es EvidenceStatus) SupportStatus {
 
 // --- Release gate ---------------------------------------------------------
 
-// ValidateRelease returns the evaluated evidence status for each configured
-// provider, in the same order as configured. A release is valid only when every
-// returned status is EvidenceFresh. Callers (the release test) assert that;
+// ValidateRelease returns evaluated evidence statuses in configured-provider
+// order. Each configured Codex provider expands in contract order to usage then
+// reset credits; other providers contribute one status. A release is valid only
+// when every returned status is EvidenceFresh. Callers (the release test) assert that;
 // this function performs no assertions itself so it can be reused in doctor
 // diagnostics and dry runs.
 func ValidateRelease(registry *EvidenceRegistry, configured []string, now time.Time) []EvidenceStatus {

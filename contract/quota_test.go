@@ -337,6 +337,79 @@ func TestReleaseEvidenceValidatesBothCodexContracts(t *testing.T) {
 	}
 }
 
+func TestReleaseEvidenceRejectsNonFreshCodexResetContract(t *testing.T) {
+	now := contractNow
+	usage := quota.CodexUsageEvidence(now)
+	reset := quota.CodexResetCreditsEvidence(now)
+	legacy := usage
+	legacy.ContractID = ""
+	legacyRegistry := quota.NewEvidenceRegistry()
+	legacyRegistry.Register(legacy)
+	if got := legacyRegistry.Status("codex", now); got.State != quota.EvidenceFresh {
+		t.Fatalf("legacy generic evidence should authorize runtime usage, got %+v", got)
+	}
+
+	cases := []struct {
+		name       string
+		evidence   []quota.Evidence
+		wantStates []quota.EvidenceState
+		wantReason string
+	}{
+		{
+			name:       "reset absent",
+			evidence:   []quota.Evidence{usage},
+			wantStates: []quota.EvidenceState{quota.EvidenceFresh, quota.EvidenceAbsent},
+			wantReason: "provider codex/reset_credits has no recorded contract evidence; record evidence before enabling",
+		},
+		{
+			name: "reset stale",
+			evidence: []quota.Evidence{usage, func() quota.Evidence {
+				stale := reset
+				stale.ReviewBy = now.Add(-time.Hour)
+				return stale
+			}()},
+			wantStates: []quota.EvidenceState{quota.EvidenceFresh, quota.EvidenceExpired},
+			wantReason: "provider codex contract evidence expired on 2026-06-15; re-verify and update",
+		},
+		{
+			name:       "legacy generic only",
+			evidence:   []quota.Evidence{legacy},
+			wantStates: []quota.EvidenceState{quota.EvidenceIncomplete, quota.EvidenceAbsent},
+			wantReason: "provider codex/reset_credits has no recorded contract evidence; record evidence before enabling",
+		},
+		{
+			name: "reset fixture blank",
+			evidence: []quota.Evidence{usage, func() quota.Evidence {
+				blank := reset
+				blank.FixturePath = ""
+				return blank
+			}()},
+			wantStates: []quota.EvidenceState{quota.EvidenceFresh, quota.EvidenceIncomplete},
+			wantReason: "provider codex/reset_credits release evidence is incomplete (missing fixture_path); record complete evidence",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := quota.NewEvidenceRegistry()
+			for _, evidence := range tc.evidence {
+				reg.Register(evidence)
+			}
+			statuses := quota.ValidateRelease(reg, []string{"codex"}, now)
+			if len(statuses) != 2 {
+				t.Fatalf("release statuses=%+v want ordered usage/reset pair", statuses)
+			}
+			for i, want := range tc.wantStates {
+				if statuses[i].State != want {
+					t.Fatalf("release status[%d]=%s want %s; all=%+v", i, statuses[i].State, want, statuses)
+				}
+			}
+			if statuses[1].Reason != tc.wantReason {
+				t.Fatalf("release reset reason=%q want %q", statuses[1].Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestReleaseEvidenceGate(t *testing.T) {
 	configured := configuredProviders()
 	if len(configured) == 0 {
