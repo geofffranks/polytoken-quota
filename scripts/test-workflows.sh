@@ -99,6 +99,38 @@ assert_contains "$release" 'sha256sum polytoken-quota-' 'release checksums cover
 assert_contains "$release" '> checksums.txt' 'release writes checksums.txt'
 assert_contains "$release" 'gh release upload .*checksums.txt.*--clobber' 'release uploads all assets with clobber'
 
+weekly="$workflow_dir/weekly-patch-release.yml"
+[[ -f "$weekly" ]] || { echo "error: required weekly patch-release workflow not found: $weekly" >&2; exit 1; }
+assert_exact_block "$weekly" 'on:' $'  schedule:
+    - cron: '\''0 9 * * 1'\''
+  workflow_dispatch:' 'weekly release runs Monday and supports manual dispatch'
+assert_exact_block "$weekly" 'permissions:' $'  contents: write\n  actions: write' 'weekly release has contents and actions write permissions'
+assert_contains "$weekly" 'concurrency:' 'weekly release defines concurrency'
+assert_contains "$weekly" 'group: weekly-patch-release' 'weekly release concurrency prevents simultaneous creation'
+assert_contains "$weekly" 'actions/checkout@v4' 'weekly release checks out source'
+assert_contains "$weekly" 'fetch-depth: 0' 'weekly release checks out full history'
+assert_contains "$weekly" 'first release' 'weekly release clearly refuses the first release'
+assert_contains "$weekly" 'gh release list .*--json tagName' 'weekly release enumerates GitHub releases'
+assert_contains "$weekly" 'git tag --list' 'weekly release enumerates repository tags'
+assert_contains "$weekly" '\^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$' 'weekly release filters strict stable semver tags'
+assert_contains "$weekly" 'sort -V' 'weekly release selects highest valid semver tag'
+assert_contains "$weekly" 'git rev-list --count' 'weekly release counts commits since selected release'
+assert_contains "$weekly" 'No commits since' 'weekly release skips when there are no new commits'
+assert_contains "$weekly" 'conflict' 'weekly release detects a conflicting next tag'
+assert_contains "$weekly" 'gh release create .*--generate-notes' 'weekly release creates generated notes'
+assert_contains "$weekly" '--notes-start-tag' 'weekly release supplies notes start tag'
+assert_contains "$weekly" 'gh workflow run release.yml' 'weekly release dispatches artifact workflow explicitly'
+assert_contains "$weekly" '-f[[:space:]]+"tag=' 'weekly release dispatch includes the next tag'
+
+# Exercise tag selection locally with no GitHub, network, or remote Git calls.
+weekly_tmp=$(mktemp -d)
+archive_tmp=''
+trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
+printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 not-a-tag v1.9.9 > "$weekly_tmp/tags"
+selected=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$weekly_tmp/tags" | sort -V | tail -n1)
+test "$selected" = v1.10.0 || { echo "FAIL: local tag fixture selected $selected" >&2; exit 1; }
+echo 'PASS: weekly tag selection contract is locally tested without remote calls'
+
 # Exercise the archive recipe locally without invoking GitHub or the Go toolchain.
 archive_tmp=$(mktemp -d)
 trap 'rm -rf "$archive_tmp"' EXIT
