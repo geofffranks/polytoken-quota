@@ -208,11 +208,18 @@ func runQuotaCheck(ctx context.Context, args []string, deps Dependencies, stdout
 		return ExitRejected
 	}
 	out := deps.Mutator.QuotaCheck(ctx, provider, reconcile)
-	if out.Error != nil && !jsonOut {
-		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
+	code := MutationExitCode(out)
+	if !jsonOut {
+		if reconcile {
+			// Reconcile outcomes carry actionable pending target details in the
+			// shared mutation reporter, including sanitized summary/remediation.
+			code = mutationExitCode(out, stderr)
+		} else if out.Error != nil {
+			fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
+		}
 	}
 	writeQuotaCheck(stdout, out, jsonOut)
-	return MutationExitCode(out)
+	return code
 }
 
 // writeQuotaCheck renders sanitized quota check diagnostics as text or JSON. It

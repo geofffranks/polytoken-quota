@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 func TestFormatTimeZeroIsEmpty(t *testing.T) {
@@ -426,6 +427,32 @@ func TestQuotaCheckReconcileFlag(t *testing.T) {
 	Run(context.Background(), []string{"quota", "check", "--reconcile"}, strings.NewReader(""), ioDiscard(), ioDiscard(), spy.Dependencies())
 	if !spy.QuotaCheckReconcile {
 		t.Fatal("reconcile=false want true")
+	}
+}
+
+// TestQuotaCheckReconcileReportsPendingDetails verifies an accepted reconcile
+// with a pending target reports the same actionable details as reconcile.
+func TestQuotaCheckReconcileReportsPendingDetails(t *testing.T) {
+	spy := newDepsSpy()
+	spy.QuotaCheckSet = true
+	spy.QuotaCheckOutcome = service.Outcome{
+		Accepted: true,
+		Revision: 7,
+		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+			Stage:       "config_validate",
+			Summary:     "config validate: invalid model",
+			Remediation: "inspect the staged configuration",
+		}}},
+	}
+	var out, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"quota", "check", "--reconcile"}, strings.NewReader(""), &out, &stderr, spy.Dependencies())
+	if code != ExitPending {
+		t.Fatalf("exit=%d want %d; stdout=%q stderr=%q", code, ExitPending, out.String(), stderr.String())
+	}
+	for _, want := range []string{"config validate: invalid model", "inspect the staged configuration"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %q", want, stderr.String())
+		}
 	}
 }
 
