@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify Go version
+        shell: bash
+        run: |
+          expected="go$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          actual="$(go env GOVERSION)"
+          test "$actual" = "$expected" || {
+            echo "expected $expected, got $actual" >&2
+            exit 1
+          }
+      - name: Test
+        run: go test ./...
+      - name: Race test
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
