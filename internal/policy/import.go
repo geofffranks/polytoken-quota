@@ -103,12 +103,19 @@ type ImportReport struct {
 	Warnings  []string
 }
 
+// PublicationResult distinguishes rejection before publication from an accepted
+// publication whose best-effort cleanup or directory durability step warned.
+type PublicationResult struct {
+	Committed bool
+	Warning   error
+}
+
 // Writer durably writes desired.yaml. CreateAtomic is a strict exclusive create
 // that refuses an existing file; ReplaceAtomic performs a same-filesystem
 // atomic replacement of the policy.
 type Writer interface {
-	CreateAtomic(context.Context, Desired) error
-	ReplaceAtomic(context.Context, Desired) error
+	CreateAtomic(context.Context, Desired) (PublicationResult, error)
+	ReplaceAtomic(context.Context, Desired) (PublicationResult, error)
 }
 
 // --- proposal core ----------------------------------------------------------
@@ -351,91 +358,126 @@ func stringsJoin(parts []string, sep string) string {
 
 // --- Writer -----------------------------------------------------------------
 
-// fileWriter writes desired.yaml at path using exclusive-create and
-// same-filesystem atomic rename.
+type policyWriterFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
+
+type policyWriterFS interface {
+	CreateTemp(dir, pattern string) (policyWriterFile, error)
+	Link(oldpath, newpath string) error
+	Rename(oldpath, newpath string) error
+	Remove(path string) error
+	SyncDir(dir string) error
+}
+
+type osPolicyWriterFS struct{}
+
+func (osPolicyWriterFS) CreateTemp(dir, pattern string) (policyWriterFile, error) {
+	return os.CreateTemp(dir, pattern)
+}
+func (osPolicyWriterFS) Link(oldpath, newpath string) error   { return os.Link(oldpath, newpath) }
+func (osPolicyWriterFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+func (osPolicyWriterFS) Remove(path string) error             { return os.Remove(path) }
+func (osPolicyWriterFS) SyncDir(dir string) error             { return syncDir(dir) }
+
+// fileWriter writes desired.yaml through a private same-directory temporary file.
 type fileWriter struct {
 	path string
+	fs   policyWriterFS
 }
 
 // NewWriter returns a Writer that manages desired.yaml at path.
-func NewWriter(path string) Writer { return &fileWriter{path: path} }
+func NewWriter(path string) Writer { return newWriterWithFS(path, osPolicyWriterFS{}) }
 
-// CreateAtomic writes desired.yaml with an exclusive create (O_CREATE|O_EXCL),
-// mode 0600, fsyncing the file and its directory for durability. If the file
-// already exists it returns ErrDesiredExists and leaves the existing bytes
-// untouched.
-func (w *fileWriter) CreateAtomic(_ context.Context, d Desired) error {
-	data, err := marshalDesired(d)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("%w: %s", ErrDesiredExists, w.path)
-		}
-		return fmt.Errorf("policy: create %s: %w", w.path, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return fmt.Errorf("policy: write %s: %w", w.path, err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return fmt.Errorf("policy: sync %s: %w", w.path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("policy: close %s: %w", w.path, err)
-	}
-	return syncDir(filepath.Dir(w.path))
+func newWriterWithFS(path string, fs policyWriterFS) *fileWriter {
+	return &fileWriter{path: path, fs: fs}
 }
 
-// ReplaceAtomic replaces the entire desired.yaml file with the new policy
-// content using an atomic rename. This is a whole-file replacement, not
-// field-level targeted editing — existing comments, key ordering, and
-// unmanaged policy content are NOT preserved. The sync use case replaces the
-// entire desired policy, so full reserialization is correct. For
-// byte-preserving edits to live Polytoken files, use the document package.
-//
-// The serialized policy is written to a temp file in the target's directory
-// (mode 0600), fsynced, renamed over the target, and the directory is fsynced,
-// so a crash cannot leave a partially written file.
-func (w *fileWriter) ReplaceAtomic(_ context.Context, d Desired) error {
+// CreateAtomic publishes a complete private temp with an atomic no-replace hard
+// link. Link success is the commit boundary; later cleanup/durability failures
+// are warnings because desired.yaml is already visible and complete.
+func (w *fileWriter) CreateAtomic(_ context.Context, d Desired) (PublicationResult, error) {
 	data, err := marshalDesired(d)
 	if err != nil {
-		return err
+		return PublicationResult{}, err
 	}
-	dir := filepath.Dir(w.path)
-	tmp, err := os.CreateTemp(dir, ".desired.yaml.*")
+	tmpName, err := w.prepare(data)
 	if err != nil {
-		return fmt.Errorf("policy: create temp: %w", err)
+		return PublicationResult{}, err
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	if err := w.fs.Link(tmpName, w.path); err != nil {
+		_ = w.fs.Remove(tmpName)
+		if errors.Is(err, os.ErrExist) {
+			return PublicationResult{}, fmt.Errorf("%w: %s", ErrDesiredExists, w.path)
+		}
+		return PublicationResult{}, fmt.Errorf("policy: link desired: %w", err)
+	}
+	return w.finishCommitted(tmpName)
+}
+
+// ReplaceAtomic publishes a complete private temp by rename. Rename success is
+// the commit boundary; later cleanup/durability failures are warnings.
+func (w *fileWriter) ReplaceAtomic(_ context.Context, d Desired) (PublicationResult, error) {
+	data, err := marshalDesired(d)
+	if err != nil {
+		return PublicationResult{}, err
+	}
+	tmpName, err := w.prepare(data)
+	if err != nil {
+		return PublicationResult{}, err
+	}
+	if err := w.fs.Rename(tmpName, w.path); err != nil {
+		_ = w.fs.Remove(tmpName)
+		return PublicationResult{}, fmt.Errorf("policy: rename desired: %w", err)
+	}
+	return w.finishCommitted(tmpName)
+}
+
+func (w *fileWriter) prepare(data []byte) (string, error) {
+	dir := filepath.Dir(w.path)
+	tmp, err := w.fs.CreateTemp(dir, ".desired.yaml.*")
+	if err != nil {
+		return "", fmt.Errorf("policy: create temp: %w", err)
+	}
+	name := tmp.Name()
+	fail := func(stage string, err error) (string, error) {
+		_ = tmp.Close()
+		_ = w.fs.Remove(name)
+		return "", fmt.Errorf("policy: %s temp: %w", stage, err)
+	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		cleanup()
-		return fmt.Errorf("policy: write temp: %w", err)
+		return fail("write", err)
 	}
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		cleanup()
-		return fmt.Errorf("policy: chmod temp: %w", err)
+		return fail("chmod", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return fmt.Errorf("policy: sync temp: %w", err)
+		return fail("sync", err)
 	}
 	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("policy: close temp: %w", err)
+		_ = w.fs.Remove(name)
+		return "", fmt.Errorf("policy: close temp: %w", err)
 	}
-	if err := os.Rename(tmpName, w.path); err != nil {
-		cleanup()
-		return fmt.Errorf("policy: rename %s: %w", w.path, err)
+	return name, nil
+}
+
+func (w *fileWriter) finishCommitted(tmpName string) (PublicationResult, error) {
+	result := PublicationResult{Committed: true}
+	if err := w.fs.Remove(tmpName); err != nil && !errors.Is(err, os.ErrNotExist) {
+		result.Warning = fmt.Errorf("policy: cleanup temp: %w", err)
 	}
-	return syncDir(dir)
+	if err := w.fs.SyncDir(filepath.Dir(w.path)); err != nil {
+		warning := fmt.Errorf("policy: sync dir: %w", err)
+		if result.Warning != nil {
+			warning = errors.Join(result.Warning, warning)
+		}
+		result.Warning = warning
+	}
+	return result, nil
 }
 
 // syncDir fsyncs the directory holding a newly created/renamed file so the

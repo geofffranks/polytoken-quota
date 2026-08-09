@@ -12,9 +12,13 @@ package service
 // for Set/Clear) are observable without the dependencies themselves recording.
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -33,6 +37,13 @@ import (
 const validTargetKey = "valid"
 
 type testSourceReader struct{}
+
+type missingPolicyLoader struct{}
+
+func (missingPolicyLoader) LoadPolicy() (policy.Desired, error) {
+	return policy.Desired{}, fs.ErrNotExist
+}
+func (missingPolicyLoader) DesiredExists() bool { return false }
 
 func (testSourceReader) Global(context.Context) (policy.SourceSet, error) {
 	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", CodexBarProviders: []string{"codex"}, PolytokenProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
@@ -130,16 +141,16 @@ func (s *coordinatorSpy) LoadPolicy() (policy.Desired, error) {
 func (s *coordinatorSpy) DesiredExists() bool { return s.desiredExists }
 
 // --- policy.Writer ---
-func (s *coordinatorSpy) CreateAtomic(context.Context, policy.Desired) error {
+func (s *coordinatorSpy) CreateAtomic(context.Context, policy.Desired) (policy.PublicationResult, error) {
 	if s.desiredExists {
-		return policy.ErrDesiredExists
+		return policy.PublicationResult{}, policy.ErrDesiredExists
 	}
 	s.files["desired.yaml"] = "created"
-	return nil
+	return policy.PublicationResult{Committed: true}, nil
 }
-func (s *coordinatorSpy) ReplaceAtomic(context.Context, policy.Desired) error {
+func (s *coordinatorSpy) ReplaceAtomic(context.Context, policy.Desired) (policy.PublicationResult, error) {
 	s.files["desired.yaml"] = "replaced"
-	return nil
+	return policy.PublicationResult{Committed: true}, nil
 }
 
 // --- StateStore ---
@@ -332,6 +343,7 @@ func TestDryRunPendingValidationCarriesAttemptTimestamp(t *testing.T) {
 
 func TestInitTargetResolutionFailureDoesNotCreateDesired(t *testing.T) {
 	spy := newCoordinatorSpy()
+	spy.Coordinator.Policy = missingPolicyLoader{}
 	spy.resolveErr = errors.New("resolve targets failed")
 	spy.Coordinator.Sources = testSourceReader{}
 	out := spy.Coordinator.Init(context.Background())
@@ -360,7 +372,7 @@ func TestInitExistingPolicyIsRejectedCreateOnly(t *testing.T) {
 	if !reflect.DeepEqual(before, spy.Snapshot()) {
 		t.Fatal("rejected init mutated files")
 	}
-	if !reflect.DeepEqual(spy.Trace, []string{"lock", "load-state", "recover", "desired-exists", "unlock"}) {
+	if !reflect.DeepEqual(spy.Trace, []string{"lock", "desired-exists", "unlock"}) {
 		t.Fatalf("trace=%v", spy.Trace)
 	}
 	if !strings.Contains(out.Error.Error(), "use sync --from-polytoken") {
@@ -465,7 +477,7 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 		name string
 		call func(*Coordinator) Outcome
 	}{
-		{"init", func(c *Coordinator) Outcome { return c.Init(ctx) }},
+		{"init", func(c *Coordinator) Outcome { return c.InitWithOptions(ctx, InitOptions{Force: true}) }},
 		{"event", func(c *Coordinator) Outcome { return c.HandleEvent(ctx, event(hook.QuotaLow, 3)) }},
 		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false, false) }},
 		{"sync", func(c *Coordinator) Outcome { return c.Sync(ctx, true) }},
@@ -490,6 +502,223 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInitForceMatrixWithRecoverableJournal proves init classifies desired.yaml
+// under the lock before touching state or recovering a real interrupted publish.
+func TestInitForceMatrixWithRecoverableJournal(t *testing.T) {
+	cases := []struct {
+		name       string
+		desired    []byte
+		loadErr    error
+		force      bool
+		accepted   bool
+		wantExists bool
+	}{
+		{name: "absent-plain", accepted: true, wantExists: true},
+		{name: "valid-existing-plain", desired: validInitDesired(), accepted: false, wantExists: true},
+		{name: "valid-existing-force", desired: validInitDesired(), force: true, accepted: true, wantExists: true},
+		{name: "malformed-force", desired: []byte("version: [malformed\n"), force: true, accepted: false, wantExists: true},
+		{name: "unreadable-force", desired: validInitDesired(), loadErr: os.ErrPermission, force: true, accepted: false, wantExists: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newRecoverableInitFixture(t, tc.desired, tc.loadErr)
+			before := snapshotInitFiles(t, fx.paths...)
+			out := fx.coord.InitWithOptions(context.Background(), InitOptions{Force: tc.force})
+			if out.Accepted != tc.accepted {
+				t.Fatalf("out=%+v want accepted=%v", out, tc.accepted)
+			}
+			if tc.accepted {
+				if out.Error != nil || fx.publisher.recovers != 1 || fx.state.loads != 1 {
+					t.Fatalf("out=%+v recovers=%d loads=%d", out, fx.publisher.recovers, fx.state.loads)
+				}
+			} else {
+				if out.Error == nil || fx.publisher.recovers != 0 || fx.state.loads != 0 {
+					t.Fatalf("out=%+v recovers=%d loads=%d", out, fx.publisher.recovers, fx.state.loads)
+				}
+				after := snapshotInitFiles(t, fx.paths...)
+				if !reflect.DeepEqual(after, before) {
+					t.Fatalf("rejected init mutated durable bytes:\nbefore=%q\nafter =%q", before, after)
+				}
+			}
+			_, statErr := os.Stat(fx.desiredPath)
+			if (statErr == nil) != tc.wantExists {
+				t.Fatalf("desired existence err=%v wantExists=%v", statErr, tc.wantExists)
+			}
+		})
+	}
+}
+
+// TestInitCreatePostCommitFailureReportsAccepted proves a cleanup/durability
+// warning after the create link boundary cannot be reported as a rollback.
+func TestInitCreatePostCommitFailureReportsAccepted(t *testing.T) {
+	spy := newCoordinatorSpy()
+	spy.Coordinator.Policy = missingPolicyLoader{}
+	spy.Coordinator.Sources = testSourceReader{}
+	warning := errors.New("injected post-create cleanup warning")
+	spy.Coordinator.PolicyWriter = postCommitPolicyWriter{createWarning: warning}
+	out := spy.Coordinator.InitWithOptions(context.Background(), InitOptions{})
+	if !out.Accepted || !errors.Is(out.Error, warning) {
+		t.Fatalf("out=%+v want accepted warning", out)
+	}
+}
+
+// TestInitReplacePostCommitFailureReportsAccepted proves a cleanup/durability
+// warning after rename cannot be reported as a rollback.
+func TestInitReplacePostCommitFailureReportsAccepted(t *testing.T) {
+	spy := newCoordinatorSpy("desired-exists")
+	spy.Coordinator.Sources = testSourceReader{}
+	warning := errors.New("injected post-replace cleanup warning")
+	spy.Coordinator.PolicyWriter = postCommitPolicyWriter{replaceWarning: warning}
+	out := spy.Coordinator.InitWithOptions(context.Background(), InitOptions{Force: true})
+	if !out.Accepted || !errors.Is(out.Error, warning) {
+		t.Fatalf("out=%+v want accepted warning", out)
+	}
+}
+
+type postCommitPolicyWriter struct {
+	createWarning  error
+	replaceWarning error
+}
+
+func (w postCommitPolicyWriter) CreateAtomic(context.Context, policy.Desired) (policy.PublicationResult, error) {
+	return policy.PublicationResult{Committed: true, Warning: w.createWarning}, nil
+}
+func (w postCommitPolicyWriter) ReplaceAtomic(context.Context, policy.Desired) (policy.PublicationResult, error) {
+	return policy.PublicationResult{Committed: true, Warning: w.replaceWarning}, nil
+}
+
+type initPolicyLoader struct {
+	FilePolicyLoader
+	err error
+}
+
+func (l initPolicyLoader) LoadPolicy() (policy.Desired, error) {
+	if l.err != nil {
+		return policy.Desired{}, l.err
+	}
+	return l.FilePolicyLoader.LoadPolicy()
+}
+
+type countingStateStore struct {
+	StoreState
+	loads int
+}
+
+func (s *countingStateStore) LoadState() (state.State, error) {
+	s.loads++
+	return s.StoreState.LoadState()
+}
+
+type countingPublisher struct {
+	PublisherAdapter
+	recovers int
+}
+
+func (p *countingPublisher) Recover(ctx context.Context, prior state.State) (state.State, error) {
+	p.recovers++
+	return p.PublisherAdapter.Recover(ctx, prior)
+}
+
+type recoverableInitFixture struct {
+	coord       *Coordinator
+	state       *countingStateStore
+	publisher   *countingPublisher
+	desiredPath string
+	paths       []string
+}
+
+func newRecoverableInitFixture(t *testing.T, desired []byte, loadErr error) recoverableInitFixture {
+	t.Helper()
+	root := t.TempDir()
+	desiredPath := filepath.Join(root, "desired.yaml")
+	statePath := filepath.Join(root, "state.json")
+	liveDir := filepath.Join(root, "live")
+	livePath := filepath.Join(liveDir, "managed.md")
+	tempPath := filepath.Join(liveDir, ".candidate-managed.md")
+	journalPath := filepath.Join(root, "journal", "apply.json")
+	if desired != nil {
+		if err := os.WriteFile(desiredPath, desired, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(liveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldLive := []byte("exact old live bytes\n")
+	newLive := []byte("interrupted candidate bytes\n")
+	if err := os.WriteFile(livePath, oldLive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tempPath, newLive, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := state.Store{Path: statePath}
+	prior := state.State{Schema: 1, Revision: 7, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{}}
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	next := prior
+	next.Revision = 8
+	pub := publish.Publisher{
+		State: store, FS: publish.OSFS{}, JournalPath: journalPath,
+		Backups:     publish.BackupStore{Root: filepath.Join(root, "backups"), Limit: 3},
+		ManagedRoot: liveDir,
+		Fault: func(step string) error {
+			if step == "rename" {
+				return errors.New("seed interrupted publish")
+			}
+			return nil
+		},
+	}
+	_, err := pub.ApplyUnderLock(context.Background(), publish.Transaction{
+		Prior: prior, Next: next, TargetID: "global", ManagedRoot: liveDir,
+		Replacements: []publish.Replacement{{
+			LivePath: livePath, TempPath: tempPath,
+			OldHash: sha256.Sum256(oldLive), NewHash: sha256.Sum256(newLive), Mode: 0o600,
+		}},
+	})
+	if err == nil {
+		t.Fatal("seed publish unexpectedly completed")
+	}
+	pub.Fault = nil
+
+	spy := newCoordinatorSpy()
+	loader := initPolicyLoader{FilePolicyLoader: FilePolicyLoader{Path: desiredPath}, err: loadErr}
+	countState := &countingStateStore{StoreState: StoreState{Store: store}}
+	countPub := &countingPublisher{PublisherAdapter: PublisherAdapter{Publisher: pub}}
+	spy.Coordinator.Lock = publish.NewFileLock(filepath.Join(root, "apply.lock"))
+	spy.Coordinator.Policy = loader
+	spy.Coordinator.PolicyWriter = policy.NewWriter(desiredPath)
+	spy.Coordinator.State = countState
+	spy.Coordinator.Publish = countPub
+	spy.Coordinator.Sources = testSourceReader{}
+	return recoverableInitFixture{
+		coord: &spy.Coordinator, state: countState, publisher: countPub, desiredPath: desiredPath,
+		paths: []string{desiredPath, statePath, livePath, journalPath},
+	}
+}
+
+func validInitDesired() []byte {
+	return []byte("version: 1\nproviders:\n  codex:\n    codexbar_providers: [codex]\n    models: [codex/gpt]\n")
+}
+
+func snapshotInitFiles(t *testing.T, paths ...string) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			out[path] = nil
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[path] = bytes.Clone(data)
+	}
+	return out
 }
 
 // BenchmarkHookReconcile measures the Coordinator's per-hook transaction cost

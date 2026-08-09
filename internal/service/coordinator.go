@@ -156,12 +156,22 @@ const defaultValidationTimeout = 30 * time.Second
 
 // --- public mutators (each enters the single transact path) -----------------
 
-// Init is strict create-only: it rejects an existing desired.yaml with
-// policy.ErrDesiredExists after lock/recovery and before any mutation. Otherwise
-// it proposes a starter policy from sources, writes it create-only, and
-// reconciles all targets.
+// InitOptions controls whether init may replace an existing valid desired.yaml
+// by importing the current managed Polytoken fields.
+type InitOptions struct {
+	Force bool
+}
+
+// Init is the temporary plain-init compatibility wrapper.
 func (c *Coordinator) Init(ctx context.Context) Outcome {
-	return c.transact(ctx, txInit, transactionInput{})
+	return c.InitWithOptions(ctx, InitOptions{})
+}
+
+// InitWithOptions classifies desired.yaml under the lock before state loading or
+// journal recovery. Plain init creates only when absent; forced init replaces
+// only an existing valid policy.
+func (c *Coordinator) InitWithOptions(ctx context.Context, opts InitOptions) Outcome {
+	return c.transact(ctx, txInit, transactionInput{Force: opts.Force})
 }
 
 // HandleEvent applies a decoded CodexBar hook event through the transaction
@@ -180,10 +190,13 @@ func (c *Coordinator) Reconcile(ctx context.Context, dryRun, keepStaging, verbos
 	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun, KeepStaging: keepStaging, Verbose: verbose})
 }
 
-// Sync imports current managed fields as desired intent (guarded unless forced),
-// atomically replaces desired.yaml, reconciles all targets, and publishes state.
+// Sync is the temporary old-CLI bridge. The legacy guard remains for an
+// unforced call; a forced call delegates to the unified forced init path.
 func (c *Coordinator) Sync(ctx context.Context, force bool) Outcome {
-	return c.transact(ctx, txSync, transactionInput{Force: force})
+	if !force {
+		return Outcome{Error: errors.New("service: sync import requires force")}
+	}
+	return c.InitWithOptions(ctx, InitOptions{Force: true})
 }
 
 // Set applies a typed provider override, reconciles all targets, and publishes.
@@ -227,8 +240,9 @@ func (c *Coordinator) QuotaCheck(ctx context.Context, provider string, reconcile
 // --- the common locked transaction path -------------------------------------
 
 // transact is the single entry point for every mutation. It acquires the lock,
-// recovers any prior journal, dispatches to the kind-specific handler, and
-// releases the lock on every return path.
+// performs init's policy preflight before state/recovery, recovers accepted
+// transactions, dispatches to the kind-specific handler, and releases the lock
+// on every return path.
 func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in transactionInput) Outcome {
 	c.step("lock")
 	unlock, err := c.Lock.Lock(ctx)
@@ -239,6 +253,25 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		c.step("unlock")
 		_ = unlock()
 	}()
+
+	var initExisting bool
+	if kind == txInit {
+		_, err := c.Policy.LoadPolicy()
+		switch {
+		case err == nil:
+			initExisting = true
+			if !in.Force {
+				c.step("desired-exists")
+				return Outcome{Error: policy.ErrDesiredExists}
+			}
+		case errors.Is(err, fs.ErrNotExist):
+			if in.Force {
+				return Outcome{Error: fmt.Errorf("service: forced init requires an existing desired.yaml: %w", err)}
+			}
+		default:
+			return Outcome{Error: err}
+		}
+	}
 
 	c.step("load-state")
 	loaded, err := c.State.LoadState()
@@ -254,7 +287,7 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 
 	switch kind {
 	case txInit:
-		return c.transactInit(ctx, recovered)
+		return c.transactInit(ctx, recovered, in, initExisting)
 	case txEvent:
 		return c.transactEvent(ctx, recovered, in)
 	case txReconcile:
@@ -271,25 +304,36 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	return Outcome{Error: errors.New("service: unknown transaction kind")}
 }
 
-// transactInit implements the strict create-only guard and the full create path.
-func (c *Coordinator) transactInit(ctx context.Context, recovered state.State) Outcome {
-	if c.Policy.DesiredExists() {
-		c.step("desired-exists")
-		return Outcome{Accepted: false, Error: policy.ErrDesiredExists}
-	}
+// transactInit builds either a starter proposal or a forced import after the
+// locked preflight and recovery have completed.
+func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, in transactionInput, existing bool) Outcome {
 	if c.Sources == nil {
 		return Outcome{Accepted: false, Error: errors.New("service: init requires a source reader")}
 	}
-	proposed, _, err := policy.Init(ctx, c.Sources)
+	var desired policy.Desired
+	var err error
+	if in.Force {
+		desired, _, err = policy.Import(ctx, c.Sources, recovered, true)
+	} else {
+		desired, _, err = policy.Init(ctx, c.Sources)
+	}
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	desired := proposed
 	c.step("load-sources")
 	if _, err := c.Targets.ResolveTargets(desired); err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	if err := c.PolicyWriter.CreateAtomic(ctx, proposed); err != nil {
+	var published policy.PublicationResult
+	if existing {
+		published, err = c.PolicyWriter.ReplaceAtomic(ctx, desired)
+	} else {
+		published, err = c.PolicyWriter.CreateAtomic(ctx, desired)
+	}
+	if err != nil || !published.Committed {
+		if err == nil {
+			err = errors.New("service: policy publication did not commit")
+		}
 		return Outcome{Accepted: false, Error: err}
 	}
 	observed := recovered
@@ -301,9 +345,9 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State) O
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
 	}
-	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
+	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
 
 // transactEvent accepts a hook event and reconciles all targets with a detailed
@@ -398,7 +442,11 @@ func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, i
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	if err := c.PolicyWriter.ReplaceAtomic(ctx, imported); err != nil {
+	published, err := c.PolicyWriter.ReplaceAtomic(ctx, imported)
+	if err != nil || !published.Committed {
+		if err == nil {
+			err = errors.New("service: policy publication did not commit")
+		}
 		return Outcome{Accepted: false, Error: err}
 	}
 	next := observed
@@ -407,9 +455,9 @@ func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, i
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
 	}
-	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
+	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
 
 // transactManual applies a manual provider transition and reconciles all targets

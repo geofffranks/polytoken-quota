@@ -350,7 +350,7 @@ func TestFilesystemSourceReaderExcludesBackupAndEphemeralFiles(t *testing.T) {
 func TestWriterCreateAtomicRejectsExistingDesired(t *testing.T) {
 	path := writeDesired(t, "existing")
 	before, _ := os.ReadFile(path)
-	err := newWriter(path).CreateAtomic(context.Background(), Desired{})
+	_, err := newWriter(path).CreateAtomic(context.Background(), Desired{})
 	if !errors.Is(err, ErrDesiredExists) {
 		t.Fatalf("err=%v want ErrDesiredExists", err)
 	}
@@ -378,7 +378,7 @@ func TestWriterCreateAtomicCreatesExclusiveWithMode0600(t *testing.T) {
 		},
 		Operational: defaultOperational,
 	}
-	if err := NewWriter(path).CreateAtomic(context.Background(), d); err != nil {
+	if _, err := NewWriter(path).CreateAtomic(context.Background(), d); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -388,7 +388,7 @@ func TestWriterCreateAtomicCreatesExclusiveWithMode0600(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%#o want 0600", info.Mode().Perm())
 	}
-	if err := NewWriter(path).CreateAtomic(context.Background(), Desired{}); !errors.Is(err, ErrDesiredExists) {
+	if _, err := NewWriter(path).CreateAtomic(context.Background(), Desired{}); !errors.Is(err, ErrDesiredExists) {
 		t.Fatalf("second create err=%v want ErrDesiredExists", err)
 	}
 }
@@ -426,4 +426,233 @@ func TestManagedDriftNotAdopted(t *testing.T) {
 		t.Fatalf("after=%+v report=%+v err=%v", after, r, err)
 	}
 	_ = before
+}
+
+// TestPolicyWriterCreateFaultMatrix proves exclusive creation has one atomic
+// no-replace commit boundary. Every earlier fault leaves no destination or
+// partial bytes; cleanup and directory-sync faults after link are committed
+// warnings. The real filesystem still performs every non-faulted operation.
+func TestPolicyWriterCreateFaultMatrix(t *testing.T) {
+	desired := desiredFixture()
+	want, err := marshalDesired(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		stage     string
+		committed bool
+		warning   bool
+	}{
+		{"open", false, false},
+		{"write", false, false},
+		{"chmod", false, false},
+		{"file-fsync", false, false},
+		{"close", false, false},
+		{"link", false, false},
+		{"unlink", true, true},
+		{"dir-fsync", true, true},
+		{"", true, false},
+	} {
+		name := tc.stage
+		if name == "" {
+			name = "success"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "desired.yaml")
+			result, err := newWriterWithFS(path, &policyWriterFaultFS{fail: tc.stage}).CreateAtomic(context.Background(), desired)
+			if tc.committed {
+				if err != nil || !result.Committed || (result.Warning != nil) != tc.warning {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, want) {
+					t.Fatalf("published bytes=%q readErr=%v want=%q", got, readErr, want)
+				}
+				info, statErr := os.Stat(path)
+				if statErr != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("mode=%v statErr=%v want=0600", infoMode(info), statErr)
+				}
+			} else {
+				if err == nil || result.Committed {
+					t.Fatalf("pre-commit stage result=%+v err=%v", result, err)
+				}
+				if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("destination visible after pre-commit fault: %v", statErr)
+				}
+			}
+			if tc.stage != "unlink" {
+				assertNoPolicyTemps(t, dir)
+			}
+		})
+	}
+
+	t.Run("existing-destination", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "desired.yaml")
+		before := []byte("existing-policy-bytes\n")
+		if err := os.WriteFile(path, before, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result, err := newWriterWithFS(path, &policyWriterFaultFS{}).CreateAtomic(context.Background(), desired)
+		if !errors.Is(err, ErrDesiredExists) || result.Committed {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		after, readErr := os.ReadFile(path)
+		if readErr != nil || !bytes.Equal(after, before) {
+			t.Fatalf("existing bytes changed: after=%q err=%v", after, readErr)
+		}
+		assertNoPolicyTemps(t, dir)
+	})
+}
+
+// TestPolicyWriterReplaceFaultMatrix proves rename is replacement's commit
+// boundary: every earlier failure preserves the exact old bytes, while cleanup
+// and directory-fsync failures after rename report committed warnings.
+func TestPolicyWriterReplaceFaultMatrix(t *testing.T) {
+	desired := desiredFixture()
+	want, err := marshalDesired(desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		stage     string
+		committed bool
+		warning   bool
+	}{
+		{"open", false, false},
+		{"write", false, false},
+		{"chmod", false, false},
+		{"file-fsync", false, false},
+		{"close", false, false},
+		{"rename", false, false},
+		{"unlink", true, true},
+		{"dir-fsync", true, true},
+		{"", true, false},
+	} {
+		name := tc.stage
+		if name == "" {
+			name = "success"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "desired.yaml")
+			before := []byte("version: 1\n# exact old policy bytes\n")
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := newWriterWithFS(path, &policyWriterFaultFS{fail: tc.stage}).ReplaceAtomic(context.Background(), desired)
+			if tc.committed {
+				if err != nil || !result.Committed || (result.Warning != nil) != tc.warning {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, want) {
+					t.Fatalf("replacement bytes=%q readErr=%v want=%q", got, readErr, want)
+				}
+			} else {
+				if err == nil || result.Committed {
+					t.Fatalf("pre-commit stage result=%+v err=%v", result, err)
+				}
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, before) {
+					t.Fatalf("old bytes changed: got=%q readErr=%v", got, readErr)
+				}
+			}
+			assertNoPolicyTemps(t, dir)
+		})
+	}
+}
+
+// policyWriterFaultFS injects one stage failure while delegating all other
+// operations to real os calls. It is deliberately narrow to the policy writer.
+type policyWriterFaultFS struct{ fail string }
+
+func (f *policyWriterFaultFS) CreateTemp(dir, pattern string) (policyWriterFile, error) {
+	if f.fail == "open" {
+		return nil, errors.New("injected open failure")
+	}
+	file, err := os.CreateTemp(dir, pattern)
+	if err != nil {
+		return nil, err
+	}
+	return &policyWriterFaultFile{File: file, fail: f.fail}, nil
+}
+func (f *policyWriterFaultFS) Link(oldpath, newpath string) error {
+	if f.fail == "link" {
+		return errors.New("injected link failure")
+	}
+	return os.Link(oldpath, newpath)
+}
+func (f *policyWriterFaultFS) Rename(oldpath, newpath string) error {
+	if f.fail == "rename" {
+		return errors.New("injected rename failure")
+	}
+	return os.Rename(oldpath, newpath)
+}
+func (f *policyWriterFaultFS) Remove(path string) error {
+	if f.fail == "unlink" {
+		return errors.New("injected unlink failure")
+	}
+	return os.Remove(path)
+}
+func (f *policyWriterFaultFS) SyncDir(dir string) error {
+	if f.fail == "dir-fsync" {
+		return errors.New("injected directory fsync failure")
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
+
+type policyWriterFaultFile struct {
+	*os.File
+	fail string
+}
+
+func (f *policyWriterFaultFile) Write(p []byte) (int, error) {
+	if f.fail == "write" {
+		return 0, errors.New("injected write failure")
+	}
+	return f.File.Write(p)
+}
+func (f *policyWriterFaultFile) Chmod(mode os.FileMode) error {
+	if f.fail == "chmod" {
+		return errors.New("injected chmod failure")
+	}
+	return f.File.Chmod(mode)
+}
+func (f *policyWriterFaultFile) Sync() error {
+	if f.fail == "file-fsync" {
+		return errors.New("injected file fsync failure")
+	}
+	return f.File.Sync()
+}
+func (f *policyWriterFaultFile) Close() error {
+	err := f.File.Close()
+	if f.fail == "close" {
+		return errors.New("injected close failure")
+	}
+	return err
+}
+
+func assertNoPolicyTemps(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".desired.yaml.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("policy temp files remain: %v", matches)
+	}
+}
+
+func infoMode(info os.FileInfo) os.FileMode {
+	if info == nil {
+		return 0
+	}
+	return info.Mode().Perm()
 }
