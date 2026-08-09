@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func setFakePolytokenBinary(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	bin := filepath.Join(binDir, "polytoken")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+}
+
 func TestPrintVersionIfRequestedPrintsDefaultVersion(t *testing.T) {
 	var output bytes.Buffer
 	oldVersion := Version
@@ -78,6 +88,7 @@ func TestResolveConfigDefaultsToXDGPolytokenDir(t *testing.T) {
 	t.Setenv("POLYTOKEN_CONFIG_DIR", "")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	setFakePolytokenBinary(t)
 	cfg, err := resolveConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +179,7 @@ func TestLoadPolytokenEnvRejectsMalformedLines(t *testing.T) {
 func TestResolveConfigHonorsConfigDirOverride(t *testing.T) {
 	override := filepath.Join(t.TempDir(), "custom")
 	t.Setenv("POLYTOKEN_CONFIG_DIR", override)
+	setFakePolytokenBinary(t)
 	cfg, err := resolveConfig()
 	if err != nil {
 		t.Fatal(err)

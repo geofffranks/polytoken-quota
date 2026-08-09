@@ -34,7 +34,7 @@ jobs:
           EVENT_TAG: ${{ github.event.release.tag_name }}
         run: |
           tag="${INPUT_TAG:-$EVENT_TAG}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          if [[ ! "$tag" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "invalid release tag: $tag" >&2
             exit 1
           fi
