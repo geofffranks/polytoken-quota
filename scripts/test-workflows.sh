@@ -182,4 +182,29 @@ assert_contains "$bump" 'gh pr create' 'Go bump creates a pull request'
 assert_contains "$bump" 'gh pr merge .*--auto' 'Go bump enables auto-merge'
 assert_contains "$bump" 'unexpected changed file' 'Go bump rejects unapproved changed files'
 
+# Documentation must describe the assets and operational bootstrap procedure.
+readme="$repo_root/README.md"
+agents="$repo_root/AGENTS.md"
+[[ -f "$readme" ]] || { echo "error: README.md not found: $readme" >&2; exit 1; }
+[[ -f "$agents" ]] || { echo "error: AGENTS.md not found: $agents" >&2; exit 1; }
+for archive in \
+  polytoken-quota-darwin-arm64.tar.gz \
+  polytoken-quota-darwin-amd64.tar.gz \
+  polytoken-quota-linux-arm64.tar.gz \
+  polytoken-quota-linux-amd64.tar.gz; do
+  assert_contains "$readme" "\`$archive\`" "README documents release archive $archive"
+done
+assert_contains "$readme" 'sha256sum --check checksums\.txt' 'README documents checksum verification'
+assert_contains "$readme" 'VERSION' 'README documents the VERSION file'
+assert_contains "$readme" -- '--version' 'README documents --version behavior'
+assert_contains "$readme" 'No release is assumed to exist yet' 'README does not claim a release already exists'
+assert_contains "$agents" 'go.mod.*sole authority' 'AGENTS documents go.mod as exact Go authority'
+assert_contains "$agents" 'go[[:space:]]+1\.26\.5' 'AGENTS documents the exact Go requirement'
+assert_contains "$agents" 'manually create the first stable' 'AGENTS documents manual first-release bootstrap'
+assert_contains "$agents" 'manually dispatch.*Release' 'AGENTS documents manual release dispatch'
+assert_contains "$agents" 'Release workflow cannot be dispatched' 'AGENTS documents manual packaging fallback'
+assert_contains "$agents" 'Allow auto-merge' 'AGENTS documents auto-merge repository setting'
+assert_contains "$agents" 'Read and write permissions' 'AGENTS documents workflow permissions setting'
+assert_contains "$agents" 'scripts/test-contract\.sh.*opt-in' 'AGENTS documents opt-in contract suite'
+
 echo "workflow contracts passed (${#workflows[@]} file(s))"

@@ -37,6 +37,31 @@ polytoken-quota sync --from-polytoken
 
 Review the generated policy before enabling quota polling or routing. Use `polytoken-quota doctor` for actionable configuration, mapping, quota, drift, and validation diagnostics.
 
+## Release downloads
+
+Releases, when published, provide one archive for each supported target:
+
+- `polytoken-quota-darwin-arm64.tar.gz`
+- `polytoken-quota-darwin-amd64.tar.gz`
+- `polytoken-quota-linux-arm64.tar.gz`
+- `polytoken-quota-linux-amd64.tar.gz`
+
+Download the archive for the machine's `GOOS`/`GOARCH` pair and `checksums.txt` from the same GitHub release. Verify the download before extracting it:
+
+```sh
+sha256sum --check checksums.txt
+```
+
+The archive contains the `polytoken-quota` executable and a `VERSION` file. Extract it and place the executable somewhere on `PATH`, for example:
+
+```sh
+tar -xzf polytoken-quota-linux-amd64.tar.gz
+install -m 0755 polytoken-quota ~/.local/bin/polytoken-quota
+./polytoken-quota --version
+```
+
+Release builds embed the `vX.Y.Z` release tag in the executable, and the same tag is recorded in `VERSION`; `--version` reports that embedded version. No release is assumed to exist yet: if no release download is available, build from the repository with the commands above.
+
 ## Configuration
 
 All `polytoken-quota` configuration lives in:

@@ -25,27 +25,39 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 
 ## Install / release convention
 
-Local `go build` / `go install` first. CI and release packaging are maintained by
-`.github/workflows/ci.yml`, `.github/workflows/release.yml`, and the weekly release
-workflow. The release/install file set is `README.md` only (`INSTALL_CONVENTION_FILES=README.md`).
+Build locally with `go build` or `go install`, or download a published release archive as documented in `README.md`. Release assets are exactly `polytoken-quota-darwin-arm64.tar.gz`, `polytoken-quota-darwin-amd64.tar.gz`, `polytoken-quota-linux-arm64.tar.gz`, and `polytoken-quota-linux-amd64.tar.gz`, plus `checksums.txt`. No release is assumed to exist yet. The release/install file set is `README.md` only (`INSTALL_CONVENTION_FILES=README.md`).
+
+The `go` directive in `go.mod` is the sole authority for the required Go version; the current directive is `go 1.26.5`. CI and release use `actions/setup-go` with `go-version-file: go.mod` and verify `go env GOVERSION` against that directive; the copies in `README.md` and this file are maintained by the Go Version Bump workflow.
+
+The six repository automation surfaces are:
+
+- **CI** (`.github/workflows/ci.yml`): pull requests and pushes to `main`; test, race-test, vet, and build.
+- **Release** (`.github/workflows/release.yml`): build the four archives for an existing `vX.Y.Z` GitHub release and upload checksums.
+- **Weekly Patch Release** (`.github/workflows/weekly-patch-release.yml`): Monday `09:00 UTC` plus manual dispatch; create the next patch release only after a prior stable release exists.
+- **Dependabot Auto-Merge** (`.github/workflows/dependabot-auto-merge.yml`): metadata-only patch/minor dependency updates with auto-merge.
+- **Go Version Bump** (`.github/workflows/go-version-bump.yml`): Monday `10:00 UTC` plus manual dispatch; update `go.mod`, `go.sum`, and documentation through an auto-merged pull request.
+- **Dependabot** (`.github/dependabot.yml`): weekly Go module and GitHub Actions update proposals.
+
+Before relying on weekly automation, a maintainer must manually create the first stable `vX.Y.Z` GitHub release and matching repository tag, then manually dispatch **Release** with that tag to publish its archives. The weekly workflow deliberately refuses to create the first release. If the Release workflow cannot be dispatched, create the release and run the release packaging workflow manually from its `workflow_dispatch` input; do not remove the first-release guard.
+
+Repository settings required for these workflows: enable **Allow auto-merge**; set Actions workflow permissions to **Read and write permissions** (the workflows still declare least-privilege job permissions); and allow GitHub Actions to create and approve pull requests where repository policy requires that setting. Weekly release requires `contents: write` and `actions: write`; Dependabot auto-merge and Go Version Bump require `contents: write` and `pull-requests: write`.
 
 ## Commands
 
-Standard commands (module is bootstrapped in a later task; until `go.mod` exists
-these are the canonical commands to use once code lands):
+| Purpose | Command |
+|---|---|
+| Build | `go build ./...` |
+| Install | `go install ./cmd/polytoken-quota` |
+| Test (all) | `go test ./... -count=1` |
+| Test (focused) | `go test ./internal/<pkg> -run <Test> -count=1` |
+| Race | `go test -race ./...` |
+| Vet | `go vet ./...` |
+| Fuzz | `go test -run=^$ -fuzz=<FuzzTarget> -fuzztime=20s` |
+| Build check | `go build ./...` |
+| Workflow policy | `scripts/test-workflows.sh` |
+| Contract | `scripts/test-contract.sh` (opt-in external binary) |
 
-| Purpose        | Command                                            |
-|---------------|---------------------------------------------------|
-| Build         | `go build ./...`                                   |
-| Test (all)    | `go test ./...`                                    |
-| Test (focused)| `go test ./internal/<pkg> -run <Test> -count=1`    |
-| Race          | `go test -race ./...`                              |
-| Vet / lint    | `go vet ./...`                                     |
-| Fuzz          | `go test -run=^$ -fuzz=<FuzzTarget> -fuzztime=20s` |
-| Contract      | `scripts/test-contract.sh` (opt-in external binary)|
-
-Contract tests invoke the real Polytoken binary against complete private staging
-roots; they are opt-in and never run as part of the default `go test ./...`.
+Contract tests invoke the real Polytoken binary against complete private staging roots; they are opt-in and never run as part of the default `go test ./...`. They require `POLYTOKEN_BINARY` or a `polytoken` binary on `PATH`, and they must not target live configuration.
 
 ## Artifact policy
 
