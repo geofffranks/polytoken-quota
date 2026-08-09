@@ -126,9 +126,9 @@ assert_contains "$weekly" '-f[[:space:]]+"tag=' 'weekly release dispatch include
 weekly_tmp=$(mktemp -d)
 archive_tmp=''
 trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
-printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 not-a-tag v1.9.9 > "$weekly_tmp/tags"
+printf '%s\n' v1.2.3 v1.10.0 v2.0.0 v2.0.0-rc1 not-a-tag v1.9.9 > "$weekly_tmp/tags"
 selected=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$weekly_tmp/tags" | sort -V | tail -n1)
-test "$selected" = v1.10.0 || { echo "FAIL: local tag fixture selected $selected" >&2; exit 1; }
+test "$selected" = v2.0.0 || { echo "FAIL: local tag fixture selected $selected" >&2; exit 1; }
 echo 'PASS: weekly tag selection contract is locally tested without remote calls'
 
 # Exercise the archive recipe locally without invoking GitHub or the Go toolchain.
