@@ -1,0 +1,39 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect Dependabot metadata
+        id: metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          metadata=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}")
+          author=$(jq -r '.user.login' <<<"$metadata")
+          dependabot_metadata=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/dependabot/metadata")
+          update_type=$(jq -r '.update_type' <<<"$dependabot_metadata")
+          test "$author" = dependabot[bot]
+          case "$update_type" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) echo "not a patch/minor Dependabot update"; exit 0 ;;
+          esac
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+      - name: Enable auto-merge
+        if: steps.metadata.outputs.eligible == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR_NUMBER" --auto --squash --repo "$GITHUB_REPOSITORY"

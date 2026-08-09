@@ -1,0 +1,88 @@
+name: Go Version Bump
+
+on:
+  schedule:
+    - cron: '0 10 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: go-version-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Discover latest stable Go
+        id: latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(curl --fail --silent --show-error https://go.dev/dl/?mode=json | jq -r '[.[] | select(.stable == true and (.version | test("^go[0-9]+\\.[0-9]+\\.[0-9]+$")))] | .[0].version | sub("^go"; "")')
+          test -n "$version" && test "$version" != null
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Avoid duplicate remote branch
+        id: branch
+        env:
+          BRANCH: go-version-bump
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "branch $BRANCH already exists; refusing duplicate"
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Update Go version and documentation
+        if: steps.branch.outputs.exists != 'true'
+        env:
+          VERSION: ${{ steps.latest.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod edit -go="$VERSION"
+          go mod tidy
+          python3 - "$VERSION" <<'PY'
+          import pathlib, re, sys
+          version = sys.argv[1]
+          for name in ("AGENTS.md", "README.md"):
+              path = pathlib.Path(name)
+              text = path.read_text()
+              updated, count = re.subn(r'go[0-9]+\.[0-9]+\.[0-9]+', 'go' + version, text)
+              if count == 0:
+                  raise SystemExit(f"no documented Go version in {name}")
+              path.write_text(updated)
+          PY
+          allowed='^(go\.mod|go\.sum|AGENTS\.md|README\.md)$'
+          while IFS= read -r changed; do
+            [[ "$changed" =~ $allowed ]] || { echo "unexpected changed file: $changed" >&2; exit 1; }
+          done < <(git diff --name-only)
+      - name: Create and publish update branch
+        if: steps.branch.outputs.exists != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.latest.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'Go is already current; nothing to publish.'
+            exit 0
+          fi
+          branch=go-version-bump
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$branch"
+          git add go.mod go.sum AGENTS.md README.md 2>/dev/null || git add go.mod AGENTS.md README.md
+          git commit -m "chore: bump Go to $VERSION"
+          git push --set-upstream origin "$branch"
+          GH_TOKEN="$GITHUB_TOKEN" gh pr create --base main --head "$branch" --title "chore: bump Go to $VERSION" --body "Update the authoritative go.mod Go directive and documented version copies." --label dependencies
+          GH_TOKEN="$GITHUB_TOKEN" gh pr merge "$branch" --auto --squash

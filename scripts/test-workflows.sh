@@ -146,4 +146,40 @@ cmp "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" "$archive_tmp/polytoke
 tar -tzf "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
 echo 'PASS: deterministic archive recipe is repeatable with sorted members, normalized ownership, modes, mtime, and gzip'
 
+dependabot="$repo_root/.github/dependabot.yml"
+[[ -f "$dependabot" ]] || { echo "error: required Dependabot config not found: $dependabot" >&2; exit 1; }
+assert_contains "$dependabot" 'package-ecosystem: gomod' 'Dependabot checks Go modules weekly'
+assert_contains "$dependabot" 'package-ecosystem: github-actions' 'Dependabot checks GitHub Actions weekly'
+assert_contains "$dependabot" 'interval: weekly' 'Dependabot updates are weekly'
+
+merge="$workflow_dir/dependabot-auto-merge.yml"
+[[ -f "$merge" ]] || { echo "error: required Dependabot auto-merge workflow not found: $merge" >&2; exit 1; }
+assert_exact_block "$merge" 'on:' $'  pull_request_target:\n    types: [opened, synchronize, reopened]' 'Dependabot auto-merge uses pull_request_target'
+assert_exact_block "$merge" 'permissions:' $'  contents: write\n  pull-requests: write' 'Dependabot auto-merge has explicit write permissions'
+assert_contains "$merge" "github.actor == 'dependabot\[bot\]'" 'Dependabot auto-merge gates actor'
+assert_contains "$merge" 'gh api' 'Dependabot auto-merge reads pull request metadata'
+assert_contains "$merge" 'semver-patch' 'Dependabot auto-merge allows patch updates'
+assert_contains "$merge" 'semver-minor' 'Dependabot auto-merge allows minor updates'
+assert_contains "$merge" 'gh pr merge .*--auto' 'Dependabot auto-merge enables auto-merge'
+if grep -Eq 'actions/checkout|git clone' "$merge"; then echo 'FAIL: Dependabot workflow checks out or clones code' >&2; exit 1; fi
+echo 'PASS: Dependabot workflow is metadata-only and has no checkout'
+
+bump="$workflow_dir/go-version-bump.yml"
+[[ -f "$bump" ]] || { echo "error: required Go version workflow not found: $bump" >&2; exit 1; }
+assert_exact_block "$bump" 'permissions:' $'  contents: write\n  pull-requests: write' 'Go bump has explicit write permissions'
+assert_contains "$bump" 'secrets.GITHUB_TOKEN' 'Go bump uses GITHUB_TOKEN'
+assert_contains "$bump" 'go.dev/dl/\?mode=json' 'Go bump discovers releases from Go downloads'
+assert_contains "$bump" 'stable == true' 'Go bump selects stable releases only'
+assert_contains "$bump" 'go mod edit -go=' 'Go bump updates the exact go.mod directive'
+assert_contains "$bump" 'go mod tidy' 'Go bump runs go mod tidy'
+assert_contains "$bump" 'go\.sum' 'Go bump handles go.sum changes'
+assert_contains "$bump" 'AGENTS\.md' 'Go bump updates AGENTS.md version copy'
+assert_contains "$bump" 'README\.md' 'Go bump updates README.md version copy'
+assert_contains "$bump" 'git ls-remote' 'Go bump checks remote branches'
+assert_contains "$bump" 'heads origin "\$BRANCH"' 'Go bump detects duplicate remote branch by exact name'
+assert_contains "$bump" 'git switch -c' 'Go bump creates a branch'
+assert_contains "$bump" 'gh pr create' 'Go bump creates a pull request'
+assert_contains "$bump" 'gh pr merge .*--auto' 'Go bump enables auto-merge'
+assert_contains "$bump" 'unexpected changed file' 'Go bump rejects unapproved changed files'
+
 echo "workflow contracts passed (${#workflows[@]} file(s))"

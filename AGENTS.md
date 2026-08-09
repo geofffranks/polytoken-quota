@@ -13,7 +13,7 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 
 ## Toolchain and platform matrix
 
-- **Go toolchain:** `go1.26.5` (exact). The gate verifies `go env GOVERSION` equals this.
+- **Go toolchain:** the `go` directive in `go.mod` is authoritative. CI verifies `go env GOVERSION` matches it; the documented copies in `README.md` and this file are maintained by the Go version workflow.
 - **Module path:** `github.com/geofffranks/polytoken-quota`
 - **Supported targets (GOOS/GOARCH):** `darwin/arm64`, `darwin/amd64`,
   `linux/amd64`, `linux/arm64`
@@ -25,10 +25,9 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 
 ## Install / release convention
 
-Local `go build` / `go install` first. CI and release packaging are **deferred** and
-not part of this repository yet. The release/install file set is `README.md` only
-(`INSTALL_CONVENTION_FILES=README.md`); it documents install and CodexBar setup and
-is produced in a later task.
+Local `go build` / `go install` first. CI and release packaging are maintained by
+`.github/workflows/ci.yml`, `.github/workflows/release.yml`, and the weekly release
+workflow. The release/install file set is `README.md` only (`INSTALL_CONVENTION_FILES=README.md`).
 
 ## Commands
 
