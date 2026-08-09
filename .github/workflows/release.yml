@@ -63,7 +63,7 @@ jobs:
             arch: amd64
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.preflight.outputs.tag }}
       - name: Set up Go

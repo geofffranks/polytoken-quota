@@ -71,6 +71,13 @@ assert_contains "$ci" 'go vet \./\.\.\.' 'CI runs go vet'
 assert_contains "$ci" 'go build \./\.\.\.' 'CI runs go build'
 
 # All action references must use approved major tags, keeping upgrades explicit.
+for changed_workflow in "$ci" "$workflow_dir/go-version-bump.yml" "$workflow_dir/release.yml" "$workflow_dir/weekly-patch-release.yml"; do
+  if grep -Eq 'actions/checkout@v(1|2|3|4|5)([^0-9]|$)' "$changed_workflow"; then
+    echo "FAIL: changed workflow uses an old checkout major ($changed_workflow)" >&2
+    exit 1
+  fi
+done
+echo "PASS: changed workflows use checkout v6"
 while IFS=: read -r file line text; do
   [[ "$text" =~ uses: ]] || continue
   if [[ ! "$text" =~ uses:[[:space:]]*[^@[:space:]]+@(v[0-9]+|[0-9]+)$ ]]; then
@@ -107,7 +114,7 @@ assert_exact_block "$weekly" 'on:' $'  schedule:
 assert_exact_block "$weekly" 'permissions:' $'  contents: write\n  actions: write' 'weekly release has contents and actions write permissions'
 assert_contains "$weekly" 'concurrency:' 'weekly release defines concurrency'
 assert_contains "$weekly" 'group: weekly-patch-release' 'weekly release concurrency prevents simultaneous creation'
-assert_contains "$weekly" 'actions/checkout@v4' 'weekly release checks out source'
+assert_contains "$weekly" 'actions/checkout@v6' 'weekly release checks out source'
 assert_contains "$weekly" 'fetch-depth: 0' 'weekly release checks out full history'
 assert_contains "$weekly" 'first release' 'weekly release clearly refuses the first release'
 assert_contains "$weekly" 'gh release list .*--json tagName' 'weekly release enumerates GitHub releases'
@@ -131,20 +138,53 @@ selected=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' "$weekly_tmp/tags" | sort -V | ta
 test "$selected" = v2.0.0 || { echo "FAIL: local tag fixture selected $selected" >&2; exit 1; }
 echo 'PASS: weekly tag selection contract is locally tested without remote calls'
 
-# Exercise the archive recipe locally without invoking GitHub or the Go toolchain.
+# Validate the real release shape locally: cross-build every supported target, package
+# the resulting binary and VERSION, inspect contents, verify SHA-256 checksums, and
+# repeat packaging. This deliberately makes no GitHub/network calls. YAML is checked
+# textually above; when PyYAML is available we additionally parse every workflow, and
+# otherwise this documented lightweight fallback avoids adding a parser dependency.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+  python3 - "$workflow_dir" <<'PY'
+import pathlib, sys, yaml
+for path in pathlib.Path(sys.argv[1]).glob("*.y*ml"):
+    with path.open() as stream:
+        yaml.safe_load(stream)
+PY
+  echo 'PASS: workflows parse with PyYAML'
+else
+  echo 'INFO: PyYAML unavailable; using lightweight textual YAML contract checks'
+fi
 archive_tmp=$(mktemp -d)
 trap 'rm -rf "$archive_tmp"' EXIT
-mkdir -p "$archive_tmp/bin"
-printf 'synthetic binary\\n' > "$archive_tmp/bin/polytoken-quota"
-printf 'v1.2.3\\n' > "$archive_tmp/bin/VERSION"
-chmod 0755 "$archive_tmp/bin/polytoken-quota"
-chmod 0644 "$archive_tmp/bin/VERSION"
-for pass in one two; do
-  (cd "$archive_tmp/bin" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "../polytoken-quota-linux-amd64-$pass.tar.gz")
+if command -v sha256sum >/dev/null 2>&1; then
+  hash_file() { sha256sum "$@"; }
+  verify_hashes() { sha256sum --check "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+  hash_file() { shasum -a 256 "$@"; }
+  verify_hashes() { shasum -a 256 -c "$@"; }
+else
+  echo 'FAIL: neither sha256sum nor shasum is available' >&2
+  exit 1
+fi
+for target in darwin-arm64 darwin-amd64 linux-arm64 linux-amd64; do
+  os=${target%-*}; arch=${target#*-}
+  mkdir -p "$archive_tmp/$target/root"
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o "$archive_tmp/$target/root/polytoken-quota" ./cmd/polytoken-quota
+  printf '%s\n' v1.2.3 > "$archive_tmp/$target/root/VERSION"
+  chmod 0755 "$archive_tmp/$target/root/polytoken-quota"
+  chmod 0644 "$archive_tmp/$target/root/VERSION"
+  for pass in one two; do
+    (cd "$archive_tmp/$target/root" && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz")
+    tar -tzf "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
+    tar -xOzf "$archive_tmp/$target/polytoken-quota-$target-$pass.tar.gz" VERSION > "$archive_tmp/$target/VERSION-$pass"
+    cmp "$archive_tmp/$target/VERSION-$pass" <(printf 'v1.2.3\n')
+  done
+  cmp "$archive_tmp/$target/polytoken-quota-$target-one.tar.gz" "$archive_tmp/$target/polytoken-quota-$target-two.tar.gz"
+  cp "$archive_tmp/$target/polytoken-quota-$target-one.tar.gz" "$archive_tmp/"
+  (cd "$archive_tmp" && hash_file "polytoken-quota-$target-one.tar.gz") >> "$archive_tmp/checksums.txt"
 done
-cmp "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" "$archive_tmp/polytoken-quota-linux-amd64-two.tar.gz"
-tar -tzf "$archive_tmp/polytoken-quota-linux-amd64-one.tar.gz" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
-echo 'PASS: deterministic archive recipe is repeatable with sorted members, normalized ownership, modes, mtime, and gzip'
+(cd "$archive_tmp" && verify_hashes checksums.txt >/dev/null)
+echo 'PASS: real four-target cross-builds, archive inspection, checksum verification, and deterministic repeat packaging'
 
 dependabot="$repo_root/.github/dependabot.yml"
 [[ -f "$dependabot" ]] || { echo "error: required Dependabot config not found: $dependabot" >&2; exit 1; }
@@ -172,6 +212,8 @@ assert_contains "$bump" 'go.dev/dl/\?mode=json' 'Go bump discovers releases from
 assert_contains "$bump" 'stable == true' 'Go bump selects stable releases only'
 assert_contains "$bump" 'go mod edit -go=' 'Go bump updates the exact go.mod directive'
 assert_contains "$bump" 'go mod tidy' 'Go bump runs go mod tidy'
+assert_contains "$bump" 'uses: actions/setup-go@v6' 'Go bump installs discovered Go version'
+assert_contains "$bump" 'go-version: \$\{\{ steps\.latest\.outputs\.version \}\}' 'Go bump setup uses discovered version output'
 assert_contains "$bump" 'go\.sum' 'Go bump handles go.sum changes'
 assert_contains "$bump" 'AGENTS\.md' 'Go bump updates AGENTS.md version copy'
 assert_contains "$bump" 'README\.md' 'Go bump updates README.md version copy'

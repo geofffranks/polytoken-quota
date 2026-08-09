@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Discover latest stable Go
@@ -29,6 +29,11 @@ jobs:
           version=$(curl --fail --silent --show-error https://go.dev/dl/?mode=json | jq -r '[.[] | select(.stable == true and (.version | test("^go[0-9]+\\.[0-9]+\\.[0-9]+$")))] | .[0].version | sub("^go"; "")')
           test -n "$version" && test "$version" != null
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Set up discovered Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ steps.latest.outputs.version }}
+          cache: true
       - name: Avoid duplicate remote branch
         id: branch
         env:
