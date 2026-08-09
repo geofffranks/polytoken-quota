@@ -52,11 +52,18 @@ const (
 // co-located neutral directory with no .polytoken (passed to --working-dir).
 // Root is the parent cleaned up alongside both. Cleanup removes Root and is
 // idempotent.
+//
+// PublishDir holds real-content copies of managed files (no secret redaction)
+// with the plan's edits applied. It is the source for publication so that the
+// inert placeholders used in ConfigDir for validation never reach live files.
+// When empty (no plan edits, or the builder was constructed without a plan),
+// callers fall back to ConfigDir.
 type Candidate struct {
 	Root          string
 	ConfigDir     string
 	WorkingDir    string
 	UserConfigDir string
+	PublishDir    string
 	TargetID      string
 	cleanup       func() error
 }
@@ -151,8 +158,12 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 	if err := os.MkdirAll(configDir, dirPerm); err != nil {
 		return Candidate{}, fmt.Errorf("staging: create config dir: %w", err)
 	}
+	publishDir := filepath.Join(root, publishSubdir)
+	if err := os.MkdirAll(publishDir, dirPerm); err != nil {
+		return Candidate{}, fmt.Errorf("staging: create publish dir: %w", err)
+	}
 	cleanup := newCleanup(root)
-	if err := b.stage(ctx, configDir, userConfigDir, workDir, res, plan); err != nil {
+	if err := b.stage(ctx, configDir, userConfigDir, publishDir, workDir, res, plan); err != nil {
 		_ = cleanup()
 		return Candidate{}, err
 	}
@@ -161,15 +172,18 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 		ConfigDir:     configDir,
 		WorkingDir:    workDir,
 		UserConfigDir: userConfigDir,
+		PublishDir:    publishDir,
 		TargetID:      res.ID,
 		cleanup:       cleanup,
 	}, nil
 }
 
 // stage fills configDir with the merged effective config and definitions,
-// applies the plan edits, and creates the neutral workDir. Any error leaves the
-// caller responsible for removing root.
-func (b Builder) stage(ctx context.Context, configDir, userConfigDir, workDir string, res target.Resolved, plan reconcile.Plan) error {
+// applies the plan edits, and creates the neutral workDir. publishDir receives
+// real-content copies of managed files (no secret redaction) with plan edits
+// applied, so publication never publishes the inert placeholders from configDir.
+// Any error leaves the caller responsible for removing root.
+func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir, workDir string, res target.Resolved, plan reconcile.Plan) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -217,6 +231,14 @@ func (b Builder) stage(ctx context.Context, configDir, userConfigDir, workDir st
 	if err := applyPlanEdits(filepath.Join(userConfigDir, "polytoken"), plan); err != nil {
 		return fmt.Errorf("apply user edits: %w", err)
 	}
+	// Build the publish dir: real-content config (no secret redaction) with
+	// plan edits applied. The validation configDir may carry inert placeholders
+	// under AuthInert; the publish dir never does. Only managed files are
+	// needed (the publisher only touches files in the plan), but we populate
+	// config.yaml unconditionally since enable-flag edits always target it.
+	if err := buildPublishDir(publishDir, global, project, plan); err != nil {
+		return fmt.Errorf("build publish dir: %w", err)
+	}
 	if err := os.MkdirAll(workDir, dirPerm); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
 	}
@@ -261,6 +283,67 @@ func applyPlanEdits(configDir string, plan reconcile.Plan) error {
 		}
 	}
 	return nil
+}
+
+// buildPublishDir writes real-content copies of every managed file referenced
+// by the plan into publishDir, with the plan's edits applied. Unlike the
+// validation configDir (which may redact secrets under AuthInert), the publish
+// dir uses AuthTransientSource semantics: real source values are retained so
+// publication never clobbers live auth blocks with inert placeholders. The
+// publish dir is created with restrictive permissions (0700) and is cleaned up
+// with the rest of the staging root.
+func buildPublishDir(publishDir string, global, project Layer, plan reconcile.Plan) error {
+	// Collect the unique set of managed files from the plan.
+	seen := map[string]bool{}
+	for _, fe := range plan.Edits {
+		seen[fe.File] = true
+	}
+	// Build the real (un-redacted) config once.
+	cfgBytes, err := buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
+	if err != nil {
+		return err
+	}
+	for file := range seen {
+		stagedPath := filepath.Join(publishDir, filepath.FromSlash(file))
+		var raw []byte
+		if file == stagedConfigFile {
+			raw = cfgBytes
+		} else {
+			// Definition files come from the merged source layers verbatim
+			// (no secret redaction is needed: they carry model names, not
+			// auth values).
+			merged := mergeFiles(global.Files, project.Files)
+			data, ok := merged[file]
+			if !ok {
+				return fmt.Errorf("managed file %q not found in source layers", file)
+			}
+			raw = data
+		}
+		var out []byte
+		if file == stagedConfigFile {
+			out, err = document.EditYAML(raw, editsForFile(plan, file))
+		} else {
+			out, err = document.EditFrontmatter(raw, editsForFile(plan, file))
+		}
+		if err != nil {
+			return fmt.Errorf("edit publish %s: %w", file, err)
+		}
+		if err := writeStaged(stagedPath, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// editsForFile collects the document.Edits for one file from the plan.
+func editsForFile(plan reconcile.Plan, file string) []document.Edit {
+	var out []document.Edit
+	for _, fe := range plan.Edits {
+		if fe.File == file {
+			out = append(out, fieldToEdit(fe))
+		}
+	}
+	return out
 }
 
 // fieldToEdit maps one reconcile.FieldEdit to one document.Edit. Exactly one
@@ -644,6 +727,7 @@ func sanitizeID(id string) string {
 const (
 	configSubdir     = "config"
 	userConfigSubdir = "user-config"
+	publishSubdir    = "publish"
 	workSubdir       = "work"
 	stagedConfigFile = "config.yaml"
 	dirPerm          = 0o700

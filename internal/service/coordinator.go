@@ -672,22 +672,32 @@ func sortedTargetIDs(m map[string]state.TargetState) []string {
 }
 
 // buildTransaction constructs a publish.Transaction from the plan's files mapped
-// to their live and staged paths. The publisher's applyOne re-reads the temp
-// file and asserts sha256(data) == NewHash before renaming, so NewHash MUST be
-// the SHA-256 of the staged temp content the staging.Builder wrote. OldHash is
-// the SHA-256 of the current live file (zero [32]byte on first publish when no
-// live file exists). Mode is the live file's permission bits (0600 default when
-// no live file exists) so the renamed file preserves it.
+// to their live and staged paths. Temp paths read from the candidate's
+// PublishDir — the real-content copies with plan edits applied — so the
+// inert placeholders used for validation in ConfigDir never reach live files.
+// The publisher's applyOne re-reads the temp file and asserts sha256(data) ==
+// NewHash before renaming, so NewHash MUST be the SHA-256 of the staged temp
+// content the staging.Builder wrote. OldHash is the SHA-256 of the current live
+// file (zero [32]byte on first publish when no live file exists). Mode is the
+// live file's permission bits (0600 default when no live file exists) so the
+// renamed file preserves it.
 func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate) (publish.Transaction, error) {
 	var replacements []publish.Replacement
 	seen := map[string]bool{}
+	// SourceDir is the real-content publish dir; fall back to ConfigDir when
+	// the publish dir is empty (e.g. a plan with no edits, or an older
+	// candidate constructed without PublishDir).
+	sourceDir := candidate.PublishDir
+	if sourceDir == "" {
+		sourceDir = candidate.ConfigDir
+	}
 	for _, fe := range plan.Edits {
 		if seen[fe.File] {
 			continue
 		}
 		seen[fe.File] = true
 		livePath := filepath.Join(rt.Resolved.CanonicalRoot, filepath.FromSlash(fe.File))
-		tempPath := filepath.Join(candidate.ConfigDir, filepath.FromSlash(fe.File))
+		tempPath := filepath.Join(sourceDir, filepath.FromSlash(fe.File))
 		r, err := buildReplacement(livePath, tempPath)
 		if err != nil {
 			return publish.Transaction{}, err
