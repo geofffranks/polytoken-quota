@@ -30,7 +30,7 @@ func formatRFC3339(t time.Time) string {
 
 // writeStatusText renders a status report as aligned tab-separated text. It
 // shows only provider quota/availability/mode/reason and quota windows — no
-// routing chains, target tables, doctor findings, or running-session advisory.
+// routing chains, target tables, or doctor findings.
 func writeStatusText(w io.Writer, r service.StatusReport, s styler) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if r.AsOf.IsZero() {

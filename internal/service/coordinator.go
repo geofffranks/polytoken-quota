@@ -2,7 +2,7 @@
 // wires hook decoding, policy/state, reconciliation, staging, validation,
 // publication, and recovery into one common locked transaction path.
 //
-// Every mutating operation (Init, HandleEvent, Reconcile, Sync, Set, Clear) goes
+// Every mutating operation (Init, HandleEvent, Reconcile, Set, Clear) goes
 // through Coordinator.transact with this exact order:
 //
 //  1. acquire the advisory lock
@@ -32,7 +32,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
@@ -57,20 +56,10 @@ type Coordinator struct {
 	Validate     Validator
 	Publish      Publisher
 	Clock        Clock
-	// Sources provides live Polytoken source layers for the Init proposal and
-	// the Sync import (both call policy.Init/policy.Import). It is nil-safe:
-	// Init reports an error and Sync refuses when it is unset.
+	// Sources provides live Polytoken source layers for the Init proposal
+	// (policy.Init) and the forced import (policy.Import). It is nil-safe:
+	// init reports an error when it is unset.
 	Sources policy.SourceReader
-	// DiagnosticState is the concrete state.Store used by the read-only Status
-	// and Doctor diagnostic methods. It is separate from State (the
-	// transactional StateStore interface) because doctor.Run needs the concrete
-	// store's Load/RecoveredRetention. It is nil-safe: diagnostics return an
-	// empty report when unset.
-	DiagnosticState state.Store
-	// DoctorInspectors carries the optional doctor inspectors (policy/target/
-	// live/publish). Each is nil-safe: an unset inspector contributes no
-	// findings, so Doctor never panics before full inspector wiring.
-	DoctorInspectors DoctorInspectors
 	// QuotaPoller polls provider quota adapters for the QuotaCheck transaction.
 	// It is nil-safe: QuotaCheck reports an error when it is unset. Production
 	// wires the real adapter-backed poller; tests inject a fake.
@@ -85,33 +74,6 @@ type Coordinator struct {
 	tracer Tracer
 }
 
-// DoctorInspectors holds the optional inspectors Doctor delegates to. Each field
-// is nil-safe.
-type DoctorInspectors struct {
-	Policy    doctorPolicyInspector
-	Targets   doctorTargetInspector
-	Validator doctorLiveValidator
-	Publisher doctorPublishInspector
-}
-
-// doctor inspector aliases (unexported) so the service package can reference the
-// doctor interfaces without exporting them. They mirror doctor's
-// PolicyInspector, TargetInspector, LiveValidator, and PublishInspector.
-type (
-	doctorPolicyInspector = interface {
-		Findings(context.Context) []doctor.Finding
-	}
-	doctorTargetInspector = interface {
-		Findings(context.Context) []doctor.Finding
-	}
-	doctorLiveValidator = interface {
-		Findings(context.Context) []doctor.Finding
-	}
-	doctorPublishInspector = interface {
-		Findings(context.Context) []doctor.Finding
-	}
-)
-
 // transactionKind identifies which public mutator invoked transact.
 type transactionKind uint8
 
@@ -119,7 +81,6 @@ const (
 	txInit transactionKind = iota
 	txEvent
 	txReconcile
-	txSync
 	txSet
 	txClear
 	txDisable
@@ -161,11 +122,6 @@ type InitOptions struct {
 	Force bool
 }
 
-// Init is the temporary plain-init compatibility wrapper.
-func (c *Coordinator) Init(ctx context.Context) Outcome {
-	return c.InitWithOptions(ctx, InitOptions{})
-}
-
 // InitWithOptions classifies desired.yaml under the lock before state loading or
 // journal recovery. Plain init creates only when absent; forced init replaces
 // only an existing valid policy.
@@ -187,15 +143,6 @@ func (c *Coordinator) HandleEvent(ctx context.Context, e hook.Event) Outcome {
 // With verbose it populates each target outcome with a decision trace.
 func (c *Coordinator) Reconcile(ctx context.Context, dryRun, keepStaging, verbose bool) Outcome {
 	return c.transact(ctx, txReconcile, transactionInput{DryRun: dryRun, KeepStaging: keepStaging, Verbose: verbose})
-}
-
-// Sync is the temporary old-CLI bridge. The legacy guard remains for an
-// unforced call; a forced call delegates to the unified forced init path.
-func (c *Coordinator) Sync(ctx context.Context, force bool) Outcome {
-	if !force {
-		return Outcome{Error: errors.New("service: sync import requires force")}
-	}
-	return c.InitWithOptions(ctx, InitOptions{Force: true})
 }
 
 // Set applies a typed provider override, reconciles all targets, and publishes.
@@ -291,8 +238,6 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		return c.transactEvent(ctx, recovered, in)
 	case txReconcile:
 		return c.transactReconcile(ctx, recovered, in)
-	case txSync:
-		return c.transactSync(ctx, recovered, in)
 	case txSet, txClear:
 		return c.transactSetClear(ctx, recovered, in, kind)
 	case txDisable, txEnable, txReset:
@@ -417,46 +362,6 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
-}
-
-// transactSync performs a guarded/forced import, atomically replaces the policy,
-// then reconciles all targets.
-func (c *Coordinator) transactSync(ctx context.Context, recovered state.State, in transactionInput) Outcome {
-	if c.Sources == nil {
-		return Outcome{Accepted: false, Error: errors.New("service: sync requires a source reader")}
-	}
-	c.step("load-policy")
-	if _, err := c.Policy.LoadPolicy(); err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	c.step("load-state")
-	observed := recovered
-	imported, _, err := policy.Import(ctx, c.Sources, observed, in.Force)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	desired := imported
-	c.step("load-sources")
-	targets, err := c.Targets.ResolveTargets(desired)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	published, err := c.PolicyWriter.ReplaceAtomic(ctx, imported)
-	if err != nil || !published.Committed {
-		if err == nil {
-			err = errors.New("service: policy publication did not commit")
-		}
-		return Outcome{Accepted: false, Error: err}
-	}
-	next := observed
-	next.Revision = observed.Revision + 1
-	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
-	next = c.recordTargetOutcomes(next, outcomes)
-	c.step("save-state")
-	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
-	}
-	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
 
 // transactManual resolves exact mapping IDs, applies their owned aliases as one

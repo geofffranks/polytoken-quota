@@ -132,17 +132,16 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 	}
 
 	coord := &Coordinator{
-		Lock:            publish.NewFileLock(lockPath),
-		Policy:          fixedPolicyLoader{desired: desired},
-		PolicyWriter:    nilPolicyWriter{},
-		State:           StoreState{Store: store},
-		Targets:         NewTargetRegistry(),
-		Builder:         NewReconciler(),
-		Stage:           StagingStager{Builder: builder},
-		Validate:        ValidateRunner{Runner: runner},
-		Publish:         PublisherAdapter{Publisher: pub},
-		Clock:           fixedClock{t: clock()},
-		DiagnosticState: store,
+		Lock:         publish.NewFileLock(lockPath),
+		Policy:       fixedPolicyLoader{desired: desired},
+		PolicyWriter: nilPolicyWriter{},
+		State:        StoreState{Store: store},
+		Targets:      NewTargetRegistry(),
+		Builder:      NewReconciler(),
+		Stage:        StagingStager{Builder: builder},
+		Validate:     ValidateRunner{Runner: runner},
+		Publish:      PublisherAdapter{Publisher: pub},
+		Clock:        fixedClock{t: clock()},
 	}
 
 	// Drive a valid hook event: codex quota_reached degrades codex, so the

@@ -31,11 +31,10 @@ type RankEntryReport struct {
 
 // RankingReport is the result of the routing explain command.
 type RankingReport struct {
-	Enabled  bool              `json:"enabled"`
-	Now      time.Time         `json:"now"`
-	Entries  []RankEntryReport `json:"entries"`
-	Error    string            `json:"error,omitempty"`
-	Advisory string            `json:"advisory,omitempty"`
+	Enabled bool              `json:"enabled"`
+	Now     time.Time         `json:"now"`
+	Entries []RankEntryReport `json:"entries"`
+	Error   string            `json:"error,omitempty"`
 }
 
 // RankingExplain computes the routing ranking from the loaded desired policy and
@@ -74,7 +73,6 @@ type QuotaStatusReport struct {
 	Providers []QuotaSnapshotReport `json:"providers,omitempty"`
 	Problem   bool                  `json:"problem"`
 	Error     string                `json:"error,omitempty"`
-	Advisory  string                `json:"advisory,omitempty"`
 }
 
 // QuotaStatus projects the observed state's per-provider quota snapshots,

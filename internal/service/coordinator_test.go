@@ -354,17 +354,17 @@ func TestInitTargetResolutionFailureDoesNotCreateDesired(t *testing.T) {
 	spy.Coordinator.Policy = missingPolicyLoader{}
 	spy.resolveErr = errors.New("resolve targets failed")
 	spy.Coordinator.Sources = testSourceReader{}
-	out := spy.Coordinator.Init(context.Background())
+	out := spy.Coordinator.InitWithOptions(context.Background(), InitOptions{})
 	if out.Accepted || out.Error == nil || spy.files["desired.yaml"] != "" {
 		t.Fatalf("out=%+v files=%v", out, spy.files)
 	}
 }
 
-func TestSyncTargetResolutionFailureDoesNotReplaceDesired(t *testing.T) {
+func TestForcedInitTargetResolutionFailureDoesNotReplaceDesired(t *testing.T) {
 	spy := newCoordinatorSpy()
 	spy.resolveErr = errors.New("resolve targets failed")
 	spy.Coordinator.Sources = testSourceReader{}
-	out := spy.Coordinator.Sync(context.Background(), true)
+	out := spy.Coordinator.InitWithOptions(context.Background(), InitOptions{Force: true})
 	if out.Accepted || out.Error == nil || spy.files["desired.yaml"] != "" {
 		t.Fatalf("out=%+v files=%v", out, spy.files)
 	}
@@ -373,7 +373,7 @@ func TestSyncTargetResolutionFailureDoesNotReplaceDesired(t *testing.T) {
 func TestInitExistingPolicyIsRejectedCreateOnly(t *testing.T) {
 	spy := newCoordinatorSpy("desired-exists")
 	before := spy.Snapshot()
-	out := spy.Coordinator.Init(context.Background())
+	out := spy.Coordinator.InitWithOptions(context.Background(), InitOptions{})
 	if out.Accepted || !errors.Is(out.Error, policy.ErrDesiredExists) {
 		t.Fatalf("out=%+v", out)
 	}
@@ -573,7 +573,7 @@ func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
 	}
 }
 
-// TestAllMutatorsUseSingleTransactSeam proves Init, HandleEvent, Reconcile, Sync,
+// TestAllMutatorsUseSingleTransactSeam proves Init, HandleEvent, Reconcile,
 // Set, and Clear each acquire exactly one lock and release it exactly once,
 // confirming they share the one Coordinator.transact path.
 func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
@@ -586,15 +586,14 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 		{"init", func(c *Coordinator) Outcome { return c.InitWithOptions(ctx, InitOptions{Force: true}) }},
 		{"event", func(c *Coordinator) Outcome { return c.HandleEvent(ctx, event(hook.QuotaLow, 3)) }},
 		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false, false) }},
-		{"sync", func(c *Coordinator) Outcome { return c.Sync(ctx, true) }},
 		{"set", func(c *Coordinator) Outcome { return c.Set(ctx, "codex", state.ProviderPatch{Quota: &low}) }},
 		{"clear", func(c *Coordinator) Outcome { return c.Clear(ctx, state.Selector{All: true}) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-			// init/sync need no source reader for the accepted path here because
-			// the spy's desired does not pre-exist and Sources is nil; both still
+			// init needs no source reader for the accepted path here because
+			// the spy's desired does not pre-exist and Sources is nil; it still
 			// must acquire and release exactly one lock before any early return.
 			tc.call(&spy.Coordinator)
 			if got := count(spy.Trace, "lock"); got != 1 {

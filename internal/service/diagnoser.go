@@ -80,8 +80,7 @@ type ChainOrderReport struct {
 // StatusReport is the result of the status command. It carries the provider
 // axes, effective modes, last events, current revision, per-target
 // attempted/applied revisions, concise pending/drift summary, routing ranking
-// and effective order (when routing is enabled), per-provider quota state, and
-// the unconditional running-session advisory.
+// and effective order (when routing is enabled), and per-provider quota state.
 type StatusReport struct {
 	JSON            bool                  `json:"-"`
 	AsOf            time.Time             `json:"as_of"`
@@ -98,8 +97,7 @@ type StatusReport struct {
 	// Error carries a sanitized diagnostic when the report could not be
 	// produced at all (state unreadable / no store). Callers must treat a
 	// non-empty Error as a failed diagnostic, never as a clean report.
-	Error                  string `json:"error,omitempty"`
-	RunningSessionAdvisory string `json:"running_session_advisory"`
+	Error string `json:"error,omitempty"`
 }
 
 // Compile-time assertions that *Coordinator implements both Mutator (via its
@@ -146,13 +144,10 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	}
 
 	// Configuration findings come from the preloaded snapshot's captured load
-	// errors — no duplicate LoadPolicy or ResolveTargets. Publication and live
-	// validators remain inspector-based (they touch files, not shared state).
+	// errors — no duplicate LoadPolicy or ResolveTargets. Publication uses the
+	// JournalPath directly.
 	deps.Policy = &preloadedPolicyInspector{snapshot: snapshot, loader: c.Policy}
 	deps.Targets = &preloadedTargetInspector{snapshot: snapshot}
-	if c.DoctorInspectors.Validator != nil {
-		deps.Validator = c.DoctorInspectors.Validator
-	}
 	deps.Publisher = PublishDoctorInspector{JournalPath: c.JournalPath}
 
 	// Build quota probes from the preloaded snapshot data + evidence gate.

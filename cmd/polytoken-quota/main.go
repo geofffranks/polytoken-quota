@@ -249,23 +249,18 @@ func newCoordinator(cfg config) *service.Coordinator {
 	loader := service.FilePolicyLoader{Path: cfg.DesiredPath}
 	registry := service.NewTargetRegistry()
 	return &service.Coordinator{
-		Lock:             publish.NewFileLock(cfg.LockPath),
-		Policy:           loader,
-		PolicyWriter:     policy.NewWriter(cfg.DesiredPath),
-		State:            service.StoreState{Store: store},
-		Targets:          registry,
-		Builder:          service.NewReconciler(),
-		Stage:            service.StagingStager{Builder: builder},
-		Validate:         service.ValidateRunner{Runner: runner},
-		Publish:          service.PublisherAdapter{Publisher: pub},
-		DoctorInspectors: service.DoctorInspectors{
-			// Policy and target findings now come from the preloaded diagnostic
-			// snapshot (no duplicate loads). Only the live validator remains
-			// inspector-based; publication uses the JournalPath directly.
-		},
-		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
-		QuotaPoller: service.NewQuotaPoller(),
-		JournalPath: cfg.JournalPath,
+		Lock:         publish.NewFileLock(cfg.LockPath),
+		Policy:       loader,
+		PolicyWriter: policy.NewWriter(cfg.DesiredPath),
+		State:        service.StoreState{Store: store},
+		Targets:      registry,
+		Builder:      service.NewReconciler(),
+		Stage:        service.StagingStager{Builder: builder},
+		Validate:     service.ValidateRunner{Runner: runner},
+		Publish:      service.PublisherAdapter{Publisher: pub},
+		Sources:      policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller:  service.NewQuotaPoller(),
+		JournalPath:  cfg.JournalPath,
 	}
 }
 
