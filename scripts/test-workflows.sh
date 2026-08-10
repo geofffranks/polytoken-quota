@@ -62,7 +62,7 @@ assert_exact_block() {
 
 assert_exact_block "$ci" 'on:' $'  push:\n    branches: [main]\n  pull_request:' 'CI workflow has exactly push-to-main and pull-request triggers'
 assert_exact_block "$ci" 'permissions:' '  contents: read' 'CI workflow has exactly read-only contents permission'
-assert_contains "$ci" 'actions/setup-go@v6' 'CI uses approved setup-go major tag'
+assert_contains "$ci" 'actions/setup-go@v7' 'CI uses approved setup-go major tag'
 assert_contains "$ci" 'go-version-file: go\.mod' 'CI setup-go reads repository Go directive'
 assert_contains "$ci" 'go env GOVERSION' 'CI checks the installed Go version'
 assert_contains "$ci" 'go test \./\.\.\.' 'CI runs standard Go tests'
@@ -72,12 +72,12 @@ assert_contains "$ci" 'go build \./\.\.\.' 'CI runs go build'
 
 # All action references must use approved major tags, keeping upgrades explicit.
 for changed_workflow in "$ci" "$workflow_dir/go-version-bump.yml" "$workflow_dir/release.yml" "$workflow_dir/weekly-patch-release.yml"; do
-  if grep -Eq 'actions/checkout@v(1|2|3|4|5)([^0-9]|$)' "$changed_workflow"; then
+  if grep -Eq 'actions/checkout@v(1|2|3|4|5|6)([^0-9]|$)' "$changed_workflow"; then
     echo "FAIL: changed workflow uses an old checkout major ($changed_workflow)" >&2
     exit 1
   fi
 done
-echo "PASS: changed workflows use checkout v6"
+echo "PASS: changed workflows use checkout v7"
 while IFS=: read -r file line text; do
   [[ "$text" =~ uses: ]] || continue
   if [[ ! "$text" =~ uses:[[:space:]]*[^@[:space:]]+@(v[0-9]+|[0-9]+)$ ]]; then
@@ -115,7 +115,7 @@ assert_exact_block "$weekly" 'on:' $'  schedule:
 assert_exact_block "$weekly" 'permissions:' $'  contents: write\n  actions: write' 'weekly release has contents and actions write permissions'
 assert_contains "$weekly" 'concurrency:' 'weekly release defines concurrency'
 assert_contains "$weekly" 'group: weekly-patch-release' 'weekly release concurrency prevents simultaneous creation'
-assert_contains "$weekly" 'actions/checkout@v6' 'weekly release checks out source'
+assert_contains "$weekly" 'actions/checkout@v7' 'weekly release checks out source'
 assert_contains "$weekly" 'fetch-depth: 0' 'weekly release checks out full history'
 assert_contains "$weekly" 'first release' 'weekly release clearly refuses the first release'
 assert_contains "$weekly" 'gh release list .*--exclude-drafts .*--exclude-pre-releases .*--json tagName' 'weekly release excludes draft and pre-releases when enumerating GitHub releases'
@@ -232,7 +232,7 @@ merge="$workflow_dir/dependabot-auto-merge.yml"
 assert_exact_block "$merge" 'on:' $'  pull_request_target:\n    types: [opened, synchronize, reopened]' 'Dependabot auto-merge uses pull_request_target'
 assert_exact_block "$merge" 'permissions:' $'  contents: write\n  pull-requests: write' 'Dependabot auto-merge has explicit write permissions'
 assert_contains "$merge" "github.actor == 'dependabot\[bot\]'" 'Dependabot auto-merge gates actor'
-assert_contains "$merge" 'dependabot/fetch-metadata@v2' 'Dependabot auto-merge uses the metadata action'
+assert_contains "$merge" 'dependabot/fetch-metadata@v3' 'Dependabot auto-merge uses the metadata action'
 assert_contains "$merge" 'outputs\.update-type.*version-update:semver-patch' 'Dependabot auto-merge allows patch updates'
 assert_contains "$merge" 'outputs\.update-type.*version-update:semver-minor' 'Dependabot auto-merge allows minor updates'
 assert_contains "$merge" 'gh pr merge .*--auto' 'Dependabot auto-merge enables auto-merge'
@@ -255,7 +255,7 @@ if expected not in workflow:
     raise SystemExit('FAIL: Go bump documentation replacement must accept go 1.2.3 and go1.2.3 forms')
 print('PASS: Go bump documentation replacement accepts spaced and unspaced Go versions')
 PY
-assert_contains "$bump" 'uses: actions/setup-go@v6' 'Go bump installs discovered Go version'
+assert_contains "$bump" 'uses: actions/setup-go@v7' 'Go bump installs discovered Go version'
 assert_contains "$bump" 'go-version: \$\{\{ steps\.latest\.outputs\.version \}\}' 'Go bump setup uses discovered version output'
 assert_contains "$bump" 'go\.sum' 'Go bump handles go.sum changes'
 assert_contains "$bump" 'AGENTS\.md' 'Go bump updates AGENTS.md version copy'
