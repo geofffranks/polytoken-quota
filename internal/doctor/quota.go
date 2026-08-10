@@ -2,24 +2,16 @@ package doctor
 
 // Quota/routing diagnostics for the doctor. QuotaFindings is a pure function
 // over sanitized per-provider probes plus a reconcile-pending flag; the
-// service-layer inspector builds those probes from observed state, desired
-// policy, and the evidence gate. Every message is sanitized — no credentials,
-// raw bodies, auth headers, or account IDs.
+// caller builds those probes from the preloaded diagnostic snapshot (observed
+// state, desired policy, and the evidence gate). Every message is sanitized —
+// no credentials, raw bodies, auth headers, or account IDs.
 
 import (
-	"context"
 	"fmt"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
-
-// QuotaInspector reports quota/routing health findings: stale snapshots, partial
-// data, unsupported adapters, failed attempts, and pending quota-check
-// reconcile. It is nil-safe: a nil inspector contributes no findings.
-type QuotaInspector interface {
-	Findings(ctx context.Context) []Finding
-}
 
 // QuotaProbe carries the sanitized per-provider quota state for diagnostic
 // evaluation. It is the pure-data input to QuotaFindings. Snapshot is the last

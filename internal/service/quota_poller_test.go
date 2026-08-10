@@ -227,6 +227,20 @@ func doctorStateStore(t *testing.T, st state.State) state.Store {
 	return state.Store{Path: path}
 }
 
+// doctorQuotaFindings builds quota probes from the preloaded observed state +
+// desired policy + evidence, then evaluates them through doctor.QuotaFindings.
+// It replaces the removed quotaDoctorInspector.Findings path.
+func doctorQuotaFindings(t *testing.T, observed state.State, desired policy.Desired, now time.Time, evidence *quota.EvidenceRegistry) []doctor.Finding {
+	t.Helper()
+	probes, _ := buildDoctorQuotaProbes(doctorQuotaInputs{
+		observed: observed,
+		desired:  desired,
+		now:      now,
+		evidence: evidence,
+	})
+	return doctor.QuotaFindings(probes, false, now)
+}
+
 func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	reg := quota.NewEvidenceRegistry()
@@ -234,8 +248,8 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
 	}}
-	q := quotaDoctorInspector{state: doctorStateStore(t, state.State{Providers: map[string]state.ProviderState{}}), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: poller.Evidence}
-	findings := q.Findings(context.Background())
+	q := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
+	findings := q
 	if len(findings) != 1 || findings[0].Code != "quota-adapter-unsupported" {
 		t.Fatalf("absent evidence findings = %+v", findings)
 	}
@@ -243,14 +257,14 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	expired := quota.CodexEvidence(now)
 	expired.ReviewBy = now.Add(-time.Hour)
 	reg.Register(expired)
-	findings = q.Findings(context.Background())
+	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
 	if len(findings) != 1 || !strings.Contains(findings[0].Message, "expired") {
 		t.Fatalf("expired evidence findings = %+v", findings)
 	}
 	incomplete := quota.CodexEvidence(now)
 	incomplete.Endpoint = ""
 	reg.Register(incomplete)
-	findings = q.Findings(context.Background())
+	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
 	if len(findings) != 1 || !strings.Contains(findings[0].Message, "incomplete") {
 		t.Fatalf("incomplete evidence findings = %+v", findings)
 	}
@@ -269,8 +283,7 @@ func TestQuotaDoctorAggregatesCodexBarProvidersUnderMappingID(t *testing.T) {
 	}}
 	reg := quota.NewEvidenceRegistry()
 	reg.Register(quota.CodexEvidence(now))
-	q := quotaDoctorInspector{state: doctorStateStore(t, observed), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: reg}
-	findings := q.Findings(context.Background())
+	findings := doctorQuotaFindings(t, observed, desired, now, reg)
 	if len(findings) != 2 {
 		t.Fatalf("findings=%+v, want mapping and residual failures only", findings)
 	}
@@ -320,8 +333,7 @@ func TestQuotaDoctorConfiguredAliasNilSnapshotFailsClosedDespiteLegacyMappingSta
 	}}
 	reg := quota.NewEvidenceRegistry()
 	reg.Register(quota.CodexEvidence(now))
-	q := quotaDoctorInspector{state: doctorStateStore(t, observed), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: reg}
-	findings := q.Findings(context.Background())
+	findings := doctorQuotaFindings(t, observed, desired, now, reg)
 	for _, finding := range findings {
 		if finding.TargetID == "openai" && finding.Severity == doctor.Warning {
 			return
@@ -348,8 +360,7 @@ func TestQuotaDoctorMixedMissingAndUnsafeAliasFailsClosed(t *testing.T) {
 			}}
 			reg := quota.NewEvidenceRegistry()
 			reg.Register(quota.CodexEvidence(now))
-			q := quotaDoctorInspector{state: doctorStateStore(t, observed), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: reg}
-			findings := q.Findings(context.Background())
+			findings := doctorQuotaFindings(t, observed, desired, now, reg)
 			for _, finding := range findings {
 				if finding.TargetID == "openai" && finding.Severity == doctor.Warning {
 					return
@@ -365,8 +376,7 @@ func TestQuotaDoctorIncludesQuotaMappingWithoutCodexBarProvider(t *testing.T) {
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
 		"empty": {Quota: &policy.QuotaConfig{Adapter: "unknown"}},
 	}}
-	q := quotaDoctorInspector{state: doctorStateStore(t, state.State{Providers: map[string]state.ProviderState{}}), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: quota.NewEvidenceRegistry()}
-	findings := q.Findings(context.Background())
+	findings := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, quota.NewEvidenceRegistry())
 	if len(findings) != 1 || findings[0].TargetID != "empty" {
 		t.Fatalf("empty-provider mapping findings = %+v", findings)
 	}
@@ -388,8 +398,7 @@ func TestQuotaDoctorUsesMappingIDWhenCodexBarProviderDiffers(t *testing.T) {
 	}}
 	reg := quota.NewEvidenceRegistry()
 	reg.Register(quota.CodexEvidence(now))
-	q := quotaDoctorInspector{state: doctorStateStore(t, observed), policy: fixedDoctorPolicy{desired}, now: func() time.Time { return now }, evidence: reg}
-	findings := q.Findings(context.Background())
+	findings := doctorQuotaFindings(t, observed, desired, now, reg)
 	if len(findings) != 1 {
 		t.Fatalf("mapping/provider mismatch findings = %+v, want one finding", findings)
 	}

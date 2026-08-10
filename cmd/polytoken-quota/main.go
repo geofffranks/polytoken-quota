@@ -256,13 +256,12 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Targets:         registry,
 		Builder:         service.NewReconciler(),
 		Stage:           service.StagingStager{Builder: builder},
-		Validate:        service.ValidateRunner{Runner: runner},
-		Publish:         service.PublisherAdapter{Publisher: pub},
-		DiagnosticState: store,
+		Validate: service.ValidateRunner{Runner: runner},
+		Publish:  service.PublisherAdapter{Publisher: pub},
 		DoctorInspectors: service.DoctorInspectors{
-			Policy:    service.PolicyDoctorInspector{Loader: loader},
-			Targets:   service.TargetDoctorInspector{Loader: loader, Targets: registry},
-			Publisher: service.PublishDoctorInspector{JournalPath: cfg.JournalPath},
+			// Policy and target findings now come from the preloaded diagnostic
+			// snapshot (no duplicate loads). Only the live validator remains
+			// inspector-based; publication uses the JournalPath directly.
 		},
 		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
 		QuotaPoller: service.NewQuotaPoller(),

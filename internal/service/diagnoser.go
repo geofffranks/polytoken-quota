@@ -8,10 +8,14 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 )
 
 // Diagnoser performs the read-only diagnostic operations surfaced by the CLI.
@@ -118,46 +122,98 @@ func (c *Coordinator) Status(ctx context.Context, _ bool) StatusReport {
 	return report
 }
 
-// Doctor collects health and drift diagnostics by delegating to doctor.Run with
-// the Coordinator's real dependencies. The state store is always wired; the
-// optional inspectors (policy/target/live/publish) are nil-safe — each
-// contributes no findings when unset, so Doctor never panics even before full
-// inspector wiring. It is read-only.
+// Doctor collects health and drift diagnostics by building the shared
+// DiagnosticSnapshot once and delegating to doctor.Run with preloaded data. It
+// never independently loads policy, state, or targets: the snapshot's single
+// read feeds every configuration, publication, and quota finding. Doctor is
+// problem-only — manual disables and healthy providers are not surfaced (they
+// remain visible through status mode/reason). It is read-only.
 func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
-	deps := doctor.Dependencies{}
-	// Only wire the state store when it has a real path; a zero-valued store
-	// (Path=="") would surface a spurious state-unreadable finding.
-	if c.DiagnosticState.Path != "" {
-		deps.State = c.DiagnosticState
+	snapshot := c.BuildDiagnosticSnapshot(ctx)
+	asOf := snapshot.AsOf()
+
+	deps := doctor.Dependencies{
+		Observed: snapshot.ObservedState(),
+		Now:      func() time.Time { return asOf },
 	}
-	if c.DoctorInspectors.Policy != nil {
-		deps.Policy = c.DoctorInspectors.Policy
-	}
-	if c.DoctorInspectors.Targets != nil {
-		deps.Targets = c.DoctorInspectors.Targets
-	}
+
+	// Configuration findings come from the preloaded snapshot's captured load
+	// errors — no duplicate LoadPolicy or ResolveTargets. Publication and live
+	// validators remain inspector-based (they touch files, not shared state).
+	deps.Policy = &preloadedPolicyInspector{snapshot: snapshot, loader: c.Policy}
+	deps.Targets = &preloadedTargetInspector{snapshot: snapshot}
 	if c.DoctorInspectors.Validator != nil {
 		deps.Validator = c.DoctorInspectors.Validator
 	}
-	if c.DoctorInspectors.Publisher != nil {
-		deps.Publisher = c.DoctorInspectors.Publisher
+	deps.Publisher = PublishDoctorInspector{JournalPath: c.JournalPath}
+
+	// Build quota probes from the preloaded snapshot data + evidence gate.
+	var evidence *quota.EvidenceRegistry
+	if provider, ok := c.QuotaPoller.(quotaEvidenceProvider); ok {
+		evidence = provider.EvidenceRegistry()
 	}
-	// Wire the quota/routing inspector when the diagnostic state store is
-	// available (it needs to load observed quota snapshots/attempts). The
-	// policy loader is shared with the transaction path; the journal path
-	// enables the interrupted-reconcile check.
-	if c.DiagnosticState.Path != "" {
-		var evidence *quota.EvidenceRegistry
-		if provider, ok := c.QuotaPoller.(quotaEvidenceProvider); ok {
-			evidence = provider.EvidenceRegistry()
-		}
-		deps.Quota = quotaDoctorInspector{
-			state:       c.DiagnosticState,
-			policy:      c.Policy,
-			journalPath: c.JournalPath,
-			now:         c.now,
-			evidence:    evidence,
-		}
-	}
+	probes, reconcilePending := buildDoctorQuotaProbes(doctorQuotaInputs{
+		observed:    snapshot.ObservedState(),
+		desired:     snapshot.DesiredPolicy(),
+		now:         asOf,
+		evidence:    evidence,
+		journalPath: c.JournalPath,
+	})
+	deps.QuotaProbes = probes
+	deps.ReconcilePending = reconcilePending
+
 	return doctor.Run(ctx, deps)
+}
+
+// preloadedPolicyInspector surfaces a policy-schema finding from the snapshot's
+// captured policy load error without re-loading policy. When policy loaded
+// cleanly it contributes no findings (the snapshot's LoadPolicy already
+// validated the schema).
+type preloadedPolicyInspector struct {
+	snapshot DiagnosticSnapshot
+	loader   PolicyLoader
+}
+
+func (p *preloadedPolicyInspector) Findings(context.Context) []doctor.Finding {
+	if p.snapshot.PolicyError() == nil {
+		return nil
+	}
+	if p.loader != nil && !p.loader.DesiredExists() {
+		return []doctor.Finding{{
+			Code:        "policy-schema",
+			Message:     "desired.yaml does not exist",
+			Remediation: "run `polytoken-quota init` to create the initial policy",
+			Severity:    doctor.Error,
+		}}
+	}
+	return []doctor.Finding{{
+		Code:        "policy-schema",
+		Message:     fmt.Sprintf("desired.yaml failed validation: %s", quota.SanitizeText(p.snapshot.PolicyError().Error())),
+		Remediation: "fix desired.yaml (or regenerate with `polytoken-quota sync --from-polytoken`)",
+		Severity:    doctor.Error,
+	}}
+}
+
+// preloadedTargetInspector surfaces a target-unresolvable finding from the
+// snapshot's captured resolution error without re-resolving targets. When
+// targets resolved cleanly it contributes no findings.
+type preloadedTargetInspector struct {
+	snapshot DiagnosticSnapshot
+}
+
+func (p *preloadedTargetInspector) Findings(context.Context) []doctor.Finding {
+	if p.snapshot.ResolveError() == nil {
+		return nil
+	}
+	err := p.snapshot.ResolveError()
+	code := "target-unresolvable"
+	if errors.Is(err, target.ErrSymlinkManagedFile) {
+		code = "definition-symlink"
+	}
+	return []doctor.Finding{{
+		Code:        code,
+		Message:     fmt.Sprintf("registered target resolution failed: %s", quota.SanitizeText(err.Error())),
+		Remediation: "fix the registered root/definition paths in desired.yaml (symlinked managed files are rejected)",
+		Severity:    doctor.Error,
+	}}
 }

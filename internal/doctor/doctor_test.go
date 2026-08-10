@@ -2,9 +2,6 @@ package doctor
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -129,7 +126,7 @@ func (noopInspector) Findings(context.Context) []Finding { return nil }
 // --- fixtures ---------------------------------------------------------------
 
 // doctorFixture builds Dependencies whose inspectors emit a finding for every
-// named condition. "pending" seeds persisted state with a target carrying a
+// named condition. "pending" seeds the observed state with a target carrying a
 // structured ApplyFailure.
 func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 	t.Helper()
@@ -138,15 +135,13 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 		conds[c] = true
 	}
 
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{
+	observed := state.State{
 		Schema:    1,
 		Providers: map[string]state.ProviderState{},
 		Targets:   map[string]state.TargetState{},
 	}
 	if conds["pending"] {
-		st.Targets["global"] = state.TargetState{
+		observed.Targets["global"] = state.TargetState{
 			Pending: &state.ApplyFailure{
 				TargetID:               "global",
 				Stage:                  "render",
@@ -163,13 +158,6 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 			},
 		}
 	}
-	data, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
 
 	now := func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }
 
@@ -178,12 +166,8 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 		Targets:   targetInspectorStub{conds},
 		Validator: liveValidatorStub{conds},
 		Publisher: publishInspectorStub{conds},
-		State: state.Store{
-			Path:               statePath,
-			Now:                now,
-			RecoveredRetention: 7 * 24 * time.Hour,
-		},
-		Now: now,
+		Observed:  observed,
+		Now:       now,
 	}
 }
 
@@ -191,9 +175,7 @@ func doctorFixture(t *testing.T, conditions ...string) Dependencies {
 // single recovered error resolved at resolvedAt.
 func recoveredOnlyFixture(t *testing.T, resolvedAt time.Time, retention time.Duration, now func() time.Time) Dependencies {
 	t.Helper()
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{
+	observed := state.State{
 		Schema:    1,
 		Providers: map[string]state.ProviderState{},
 		Targets:   map[string]state.TargetState{},
@@ -205,25 +187,15 @@ func recoveredOnlyFixture(t *testing.T, resolvedAt time.Time, retention time.Dur
 			LiveStatus: "last-known-good",
 		}},
 	}
-	data, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal state: %v", err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatalf("write state: %v", err)
-	}
 
 	return Dependencies{
-		Policy:    noopInspector{},
-		Targets:   noopInspector{},
-		Validator: noopInspector{},
-		Publisher: noopInspector{},
-		State: state.Store{
-			Path:               statePath,
-			Now:                now,
-			RecoveredRetention: retention,
-		},
-		Now: now,
+		Policy:             noopInspector{},
+		Targets:            noopInspector{},
+		Validator:          noopInspector{},
+		Publisher:          noopInspector{},
+		Observed:           observed,
+		RecoveredRetention: retention,
+		Now:                now,
 	}
 }
 
@@ -331,73 +303,31 @@ func TestPendingTargetIsActionable(t *testing.T) {
 	}
 }
 
-func TestManualDisabledProviderIsInformational(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
+func TestManualDisabledProviderNotSurfaced(t *testing.T) {
+	// Doctor is problem-only: a manual disable is NOT a configuration fault and
+	// must not appear as a finding.
+	observed := state.State{Schema: 1, Providers: map[string]state.ProviderState{
 		"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true},
 	}, Targets: map[string]state.TargetState{}}
-	data, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	r := Run(context.Background(), Dependencies{Observed: observed, Now: time.Now})
 	if r.Actionable() {
 		t.Fatal("manual disable should not be actionable")
 	}
-	if len(r.Findings) != 1 || r.Findings[0].Code != "manual-disabled" || r.Findings[0].Severity != Info {
-		t.Fatalf("findings=%+v", r.Findings)
-	}
-	if !strings.Contains(r.Findings[0].Message, "codex") || !strings.Contains(r.Findings[0].Remediation, "enable codex") {
-		t.Fatalf("finding=%+v", r.Findings[0])
-	}
-}
-
-func TestManualDisabledFindingsAreSortedAndSanitized(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
-		"zai path": {ManualDisabled: true}, "codex\nsecret": {ManualDisabled: true},
-	}, Targets: map[string]state.TargetState{}}
-	data, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
-	if len(r.Findings) != 2 {
-		t.Fatalf("findings=%+v", r.Findings)
-	}
-	if strings.Contains(r.Findings[0].Message, "\n") || strings.Contains(r.Findings[0].Message, "secret") {
-		t.Fatalf("provider text leaked: %+v", r.Findings[0])
-	}
-	if r.Findings[0].Message > r.Findings[1].Message {
-		t.Fatalf("findings not sorted: %+v", r.Findings)
+	for _, f := range r.Findings {
+		if f.Code == "manual-disabled" {
+			t.Fatalf("doctor must not report manual-disabled rows: %+v", f)
+		}
 	}
 }
 
 // TestNilInspectorsAreSafe proves Run does not panic when inspectors are nil.
 func TestDoctorSurfacesPersistedManualResolutionFailure(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{
+	observed := state.State{Schema: 1, Providers: map[string]state.ProviderState{
 		"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true},
 	}, Targets: map[string]state.TargetState{
 		"manual-resolution": {Pending: &state.ApplyFailure{TargetID: "manual-resolution", Stage: "resolve_targets", Summary: "target resolution failed", Remediation: "fix policy"}},
 	}}
-	data, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	r := Run(context.Background(), Dependencies{Observed: observed, Now: time.Now})
 	if !r.Actionable() || !slices.Contains(findingCodes(r), "target-pending") {
 		t.Fatalf("report did not surface persisted failure: %+v", r)
 	}
@@ -408,9 +338,7 @@ func TestDoctorSurfacesPersistedManualResolutionFailure(t *testing.T) {
 // path) is re-sanitized at the doctor output boundary in both message and
 // structured fields.
 func TestDoctorSanitizesTamperedPendingFailure(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	st := state.State{Schema: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{
+	observed := state.State{Schema: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{
 		"global": {Pending: &state.ApplyFailure{
 			TargetID:    "global\napi_key=CANARY-tampered",
 			Stage:       "publish",
@@ -420,14 +348,7 @@ func TestDoctorSanitizesTamperedPendingFailure(t *testing.T) {
 			LiveStatus:  "last-known-good",
 		}},
 	}}
-	data, err := json.Marshal(st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(statePath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := Run(context.Background(), Dependencies{State: state.Store{Path: statePath}, Now: time.Now})
+	r := Run(context.Background(), Dependencies{Observed: observed, Now: time.Now})
 	f := pendingFinding(t, r)
 	for _, field := range []string{f.Message, f.TargetID, f.File, f.Chain, f.Remediation} {
 		if strings.Contains(field, "CANARY-tampered") {
@@ -440,12 +361,10 @@ func TestDoctorSanitizesTamperedPendingFailure(t *testing.T) {
 }
 
 func TestNilInspectorsAreSafe(t *testing.T) {
-	dir := t.TempDir()
-	statePath := filepath.Join(dir, "state.json")
-	_ = os.WriteFile(statePath, []byte(`{"schema":1}`), 0o600)
 	r := Run(context.Background(), Dependencies{
-		State: state.Store{Path: statePath, RecoveredRetention: time.Hour},
-		Now:   func() time.Time { return time.Now() },
+		Observed:           state.State{Schema: 1},
+		RecoveredRetention: time.Hour,
+		Now:                func() time.Time { return time.Now() },
 	})
 	if r.Actionable() {
 		t.Fatal("empty report must not be actionable")
@@ -453,18 +372,6 @@ func TestNilInspectorsAreSafe(t *testing.T) {
 }
 
 // --- quota diagnostic tests (Task 9 Part A) ---------------------------------
-
-// quotaInspectorStub returns a fixed set of findings, recording that it was
-// called.
-type quotaInspectorStub struct {
-	called   bool
-	findings []Finding
-}
-
-func (s *quotaInspectorStub) Findings(context.Context) []Finding {
-	s.called = true
-	return s.findings
-}
 
 func ptrTime(t time.Time) *time.Time { return &t }
 
@@ -628,18 +535,21 @@ func TestQuotaFindingsHealthyProviderNoFinding(t *testing.T) {
 	}
 }
 
-// TestDoctorRunWiresQuotaInspector verifies Run consults the injected
-// QuotaInspector and folds its findings into the report.
-func TestDoctorRunWiresQuotaInspector(t *testing.T) {
-	qi := &quotaInspectorStub{findings: []Finding{{
-		Code: "quota-attempt-failed", Severity: Warning, Message: "provider codex quota attempt failed: HTTP 503",
-	}}}
+// TestDoctorRunEvaluatesQuotaProbes verifies Run evaluates the preloaded
+// QuotaProbes through the pure QuotaFindings classifier and folds the results
+// into the report.
+func TestDoctorRunEvaluatesQuotaProbes(t *testing.T) {
 	deps := doctorFixture(t)
-	deps.Quota = qi
+	deps.QuotaProbes = []QuotaProbe{{
+		Provider:       "codex",
+		HasQuotaConfig: true,
+		Supported:      true,
+		Attempt: &quota.QuotaSnapshot{
+			Status: quota.SourceFailed,
+			Error:  "codex: server error (HTTP 503)",
+		},
+	}}
 	r := Run(context.Background(), deps)
-	if !qi.called {
-		t.Fatal("quota inspector was not called")
-	}
 	if !slices.Contains(findingCodes(r), "quota-attempt-failed") {
 		t.Fatalf("quota finding missing from report: %v", findingCodes(r))
 	}
@@ -648,14 +558,14 @@ func TestDoctorRunWiresQuotaInspector(t *testing.T) {
 	}
 }
 
-// TestDoctorRunNilQuotaInspectorSafe verifies Run does not panic when the quota
-// inspector is nil.
-func TestDoctorRunNilQuotaInspectorSafe(t *testing.T) {
+// TestDoctorRunNilQuotaProbesSafe verifies Run does not panic and produces no
+// quota findings when QuotaProbes is empty.
+func TestDoctorRunNilQuotaProbesSafe(t *testing.T) {
 	r := Run(context.Background(), doctorFixture(t))
-	// No panic, and no quota findings (inspector is nil).
+	// No panic, and no quota findings (probes are empty).
 	for _, f := range r.Findings {
 		if strings.HasPrefix(f.Code, "quota-") {
-			t.Fatalf("unexpected quota finding with nil inspector: %+v", f)
+			t.Fatalf("unexpected quota finding with no probes: %+v", f)
 		}
 	}
 }

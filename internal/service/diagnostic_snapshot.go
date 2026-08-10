@@ -7,6 +7,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // ErrorScope classifies a non-fatal diagnostic projection error.
@@ -43,6 +44,19 @@ type DiagnosticSnapshot struct {
 	legacyQuota    []QuotaSnapshotReport
 	problem        bool
 	fatalError     string
+	// observed carries the raw observed state loaded exactly once, so downstream
+	// consumers (doctor) can read pending targets and recovered history without a
+	// duplicate load.
+	observed state.State
+	// desired carries the raw desired policy loaded exactly once, so downstream
+	// consumers can build quota probes without a duplicate load.
+	desired policy.Desired
+	// policyErr is the policy load error (nil on success). It lets the doctor
+	// surface a configuration finding without re-loading policy.
+	policyErr error
+	// resolveErr is the target resolution error (nil on success). It lets the
+	// doctor surface a configuration finding without re-resolving targets.
+	resolveErr error
 }
 
 // BuildDiagnosticSnapshot performs the only shared reads for a diagnostic
@@ -57,8 +71,10 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		snapshot.fatalError = "load policy failed"
+		snapshot.policyErr = err
 		return snapshot
 	}
+	snapshot.desired = desired
 	if c.State == nil {
 		snapshot.fatalError = "load state failed"
 		return snapshot
@@ -68,6 +84,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 		snapshot.fatalError = "load state failed"
 		return snapshot
 	}
+	snapshot.observed = observed
 	if c.Targets == nil {
 		snapshot.fatalError = "resolve targets failed"
 		return snapshot
@@ -75,6 +92,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	targets, err := c.Targets.ResolveTargets(desired)
 	if err != nil {
 		snapshot.fatalError = "resolve targets failed"
+		snapshot.resolveErr = err
 		return snapshot
 	}
 
@@ -153,4 +171,37 @@ func (s DiagnosticSnapshot) RoutingExplainView() RoutingExplainReport {
 
 func cloneDiagnosticErrors(in []DiagnosticError) []DiagnosticError {
 	return append([]DiagnosticError(nil), in...)
+}
+
+// ObservedState returns the raw observed state loaded exactly once during
+// snapshot construction. Downstream consumers (doctor) use it to surface
+// pending targets and recovered history without a duplicate state load.
+func (s DiagnosticSnapshot) ObservedState() state.State {
+	return s.observed
+}
+
+// DesiredPolicy returns the raw desired policy loaded exactly once during
+// snapshot construction. Downstream consumers (doctor) use it to build quota
+// probes without a duplicate policy load.
+func (s DiagnosticSnapshot) DesiredPolicy() policy.Desired {
+	return s.desired
+}
+
+// AsOf returns the single clock sample used by every time-sensitive projection.
+func (s DiagnosticSnapshot) AsOf() time.Time {
+	return s.asOf
+}
+
+// PolicyError returns the policy load error (nil on success) captured once
+// during snapshot construction, so the doctor can surface a configuration
+// finding without re-loading policy.
+func (s DiagnosticSnapshot) PolicyError() error {
+	return s.policyErr
+}
+
+// ResolveError returns the target resolution error (nil on success) captured
+// once during snapshot construction, so the doctor can surface a configuration
+// finding without re-resolving targets.
+func (s DiagnosticSnapshot) ResolveError() error {
+	return s.resolveErr
 }

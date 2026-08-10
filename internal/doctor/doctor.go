@@ -93,23 +93,38 @@ type PublishInspector interface {
 }
 
 // Dependencies are the injected collaborators Run consults. Every dependency is
-// nil-safe: a nil inspector contributes no findings. Now supplies the clock for
-// recovered-error aging; when nil Run uses time.Now.
+// nil-safe: a nil inspector contributes no findings. Observed carries the
+// preloaded observed state (pending targets and recovered history) loaded once
+// by the caller; RecoveredRetention ages recovered errors. QuotaProbes carries
+// the preloaded per-provider quota probes (the caller builds them from the
+// shared snapshot). Now supplies the clock for recovered-error aging; when nil
+// Run uses time.Now.
 type Dependencies struct {
 	Policy    PolicyInspector
-	State     state.Store
 	Targets   TargetInspector
 	Validator LiveValidator
 	Publisher PublishInspector
-	Quota     QuotaInspector
-	Now       func() time.Time
+	// Observed is the preloaded observed state. Pending targets are surfaced as
+	// actionable findings; recovered history is aged by RecoveredRetention.
+	Observed state.State
+	// RecoveredRetention ages recovered errors. When zero a 7-day default is
+	// used.
+	RecoveredRetention time.Duration
+	// QuotaProbes carries the preloaded per-provider quota probes. Run
+	// delegates them to the pure QuotaFindings classifier.
+	QuotaProbes []QuotaProbe
+	// ReconcilePending signals an interrupted quota-check reconcile (a leftover
+	// journal); when true Run emits a quota-reconcile-pending finding.
+	ReconcilePending bool
+	Now              func() time.Time
 }
 
 // Run collects findings from every dependency, surfaces pending target errors
-// from persisted state, and ages recovered history by the configured retention.
-// It is read-only: it never mutates inputs or persisted state. Recovered errors
-// older than the retention window are pruned and absent from the returned
-// report.
+// from the preloaded observed state, ages recovered history by the configured
+// retention, and evaluates preloaded quota probes. It is read-only: it never
+// mutates inputs or persisted state and never loads state, policy, or targets.
+// Recovered errors older than the retention window are pruned and absent from
+// the returned report.
 func Run(ctx context.Context, deps Dependencies) Report {
 	var findings []Finding
 
@@ -125,52 +140,32 @@ func Run(ctx context.Context, deps Dependencies) Report {
 	if deps.Publisher != nil {
 		findings = append(findings, deps.Publisher.Findings(ctx)...)
 	}
-	if deps.Quota != nil {
-		findings = append(findings, deps.Quota.Findings(ctx)...)
-	}
 
 	// Surface every persisted pending target error as an actionable finding.
-	st, loadErr := deps.State.Load()
-	if loadErr != nil {
-		findings = append(findings, Finding{
-			Code:        "state-unreadable",
-			Severity:    Error,
-			Message:     "could not read state.json: " + loadErr.Error(),
-			Remediation: "check state.json format and permissions",
-		})
+	ids := make([]string, 0, len(deps.Observed.Targets))
+	for id := range deps.Observed.Targets {
+		ids = append(ids, id)
 	}
-	for id, ts := range st.Targets {
-		if ts.Pending != nil {
+	sort.Strings(ids)
+	for _, id := range ids {
+		if ts := deps.Observed.Targets[id]; ts.Pending != nil {
 			findings = append(findings, pendingTargetFinding(id, ts))
 		}
 	}
-	providers := make([]string, 0, len(st.Providers))
-	for provider := range st.Providers {
-		providers = append(providers, provider)
-	}
-	sort.Strings(providers)
-	for _, provider := range providers {
-		if st.Providers[provider].ManualDisabled {
-			cleanProvider := safeIdentifier(provider)
-			findings = append(findings, Finding{
-				Code:        "manual-disabled",
-				Message:     fmt.Sprintf("provider %q is manually disabled", cleanProvider),
-				Remediation: fmt.Sprintf("run \\\"polytoken-quota enable %s\\\" to resume automatic state", cleanProvider),
-				Severity:    Info,
-			})
-		}
-	}
 
-	// Age recovered history by the configured retention window.
+	// Evaluate the preloaded quota probes through the pure classifier.
 	now := time.Now()
 	if deps.Now != nil {
 		now = deps.Now()
 	}
-	retention := deps.State.RecoveredRetention
+	findings = append(findings, QuotaFindings(deps.QuotaProbes, deps.ReconcilePending, now)...)
+
+	// Age recovered history by the configured retention window.
+	retention := deps.RecoveredRetention
 	if retention <= 0 {
 		retention = 7 * 24 * time.Hour
 	}
-	pruned := state.PruneRecovered(st, now, retention)
+	pruned := state.PruneRecovered(deps.Observed, now, retention)
 
 	return Report{Findings: findings, Recovered: pruned.Recovered}
 }
