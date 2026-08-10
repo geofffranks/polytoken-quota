@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling and runtime routing are opt-in. When enabled, the tool ranks configured providers by fresh quota headroom, availability, balance group, weight, and optional off-peak schedules, then applies the resulting order through the normal validated reconciliation flow. Existing sessions may need a user restart or reload before they see updated choices.
+Quota polling and runtime routing are opt-in. When enabled, the tool ranks configured providers by fresh quota headroom, availability, balance group, weight, and optional off-peak schedules, then applies the resulting order through the normal validated reconciliation flow.
 
 The tool never controls a running Polytoken process, stores provider credentials, or persists raw provider responses, auth headers, or account IDs.
 
@@ -29,10 +29,10 @@ Make sure the supported `polytoken` binary is installed and that your global Pol
 polytoken-quota init
 ```
 
-This creates `~/.polytoken-quota/desired.yaml`. `init` is create-only; to refresh an existing policy from live Polytoken fields, use:
+This creates `~/.polytoken-quota/desired.yaml`. `init` without `--force` refuses to overwrite a valid existing file. To replace a valid existing policy with one generated from the current managed state, use:
 
 ```sh
-polytoken-quota sync --from-polytoken
+polytoken-quota init --force
 ```
 
 Review the generated policy before enabling quota polling or routing. Use `polytoken-quota doctor` for actionable configuration, mapping, quota, drift, and validation diagnostics.
@@ -174,44 +174,38 @@ z.ai allowance. The window resets at the first of each month (UTC).
   in about a minute, so a scheduled snapshot of them carries no
   session-start routing signal.
 
-`routing.enabled` defaults to `false`. Enabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. `sync --from-polytoken` replaces the policy with current managed values, while `--force` overrides its degraded/ambiguous-drift guard.
+`routing.enabled` defaults to `false`. Enabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init` | Create the initial `desired.yaml` from the current managed state. |
-| `sync --from-polytoken [--force]` | Sync desired state from the live Polytoken config. |
+| `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
+| `status [--json]` | Show provider quota, availability, mode, reason, usage, reset timing, and freshness. |
+| `check [--provider <id>] [--reconcile] [--json]` | Poll quota once; optionally filter a mapping, reconcile after saving, or emit JSON. |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
-| `quota check [--provider ID] [--json] [--reconcile]` | Poll quota once; optionally filter a mapping, emit JSON, and reconcile after saving observations. |
-| `quota status [--json]` | Show quota snapshots, windows, attempts, and routing metadata. |
-| `routing explain [--json]` | Show provider ranking and explanations. |
-| `routing enable` | Set `routing.enabled: true` in `desired.yaml`. |
-| `routing disable` | Set `routing.enabled: false` in `desired.yaml`. |
-| `status [--json]` | Show current provider availability, drift, pending targets, and routing state. |
-| `doctor [--json]` | Run configuration (policy schema, target resolution), quota, pending-journal, and persisted apply-failure diagnostics. Candidate validation runs during `reconcile` (including `--dry-run`); its failures surface here as pending-target findings. |
-| `hook` | Read a legacy hook event from standard input and apply it. |
-| `state set <provider> [--quota X] [--availability Y]` | Set a provider's managed automatic state. |
-| `state clear <provider> \| --all` | Clear a provider's, or all providers', automatic state. |
-| `disable <provider>` | Manually disable a configured provider. |
-| `enable <provider>` | Clear a manual disable and resume automatic state. |
-| `reset` | Clear all manual disables while preserving automatic observations. |
+| `routing [--json]` | Show effective routing chains for all targets and routes. |
+| `routing explain [--json]` | Show complete routing explanation: ranks, reasons, desired and effective chains. |
+| `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
+| `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
+| `routing reset` | Clear all manual disables while preserving automatic observations. |
+| `doctor [--json]` | Run configuration, quota, journal, and persisted-error diagnostics. |
 
-Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `quota check --json` emits one sanitized structured envelope for accepted and rejected requests.
+Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
 
 ## Quota polling and routing
 
 Quota polling and routing are disabled by default. Run a one-shot check manually or schedule it with an external scheduler:
 
 ```sh
-polytoken-quota quota check --reconcile
-polytoken-quota quota status
+polytoken-quota check --reconcile
+polytoken-quota status
 polytoken-quota routing explain
 ```
 
-Use `quota check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `quota check` refreshes quota state only.
+Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only.
 
-When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status`, `quota status`, and `doctor`.
+When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status` and `doctor`.
 
 Routing uses a deterministic lexicographic ranking, not a blended score:
 
@@ -231,7 +225,7 @@ Example launchd user agent (adjust the binary and utility-home paths):
 <plist version="1.0"><dict>
   <key>Label</key><string>com.example.polytoken-quota</string>
   <key>ProgramArguments</key><array>
-    <string>/usr/local/bin/polytoken-quota</string><string>quota</string><string>check</string><string>--reconcile</string>
+    <string>/usr/local/bin/polytoken-quota</string><string>check</string><string>--reconcile</string>
   </array>
   <key>StartInterval</key><integer>1800</integer>
 </dict></plist>
@@ -243,7 +237,7 @@ Example systemd user timer:
 # ~/.config/systemd/user/polytoken-quota.service
 [Service]
 Type=oneshot
-ExecStart=%h/go/bin/polytoken-quota quota check --reconcile
+ExecStart=%h/go/bin/polytoken-quota check --reconcile
 
 # ~/.config/systemd/user/polytoken-quota.timer
 [Timer]
@@ -255,7 +249,7 @@ Persistent=true
 Example cron entry (run `crontab -e`):
 
 ```cron
-*/30 * * * * /usr/local/bin/polytoken-quota quota check --reconcile
+*/30 * * * * /usr/local/bin/polytoken-quota check --reconcile
 ```
 
-Changing quota policy or enabling routing may change the choices seen by existing Polytoken sessions. The utility never controls those sessions; a user restart or reload may be required. Quota polling never persists credentials, raw provider responses, auth headers, or account IDs. Only bounded, sanitized quota observations and error summaries are stored in the utility state.
+Changing quota policy or enabling routing may change the choices seen by existing Polytoken sessions. The utility never controls those sessions. Quota polling never persists credentials, raw provider responses, auth headers, or account IDs. Only bounded, sanitized quota observations and error summaries are stored in the utility state.
