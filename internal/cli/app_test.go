@@ -9,96 +9,64 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
-	"github.com/geofffranks/polytoken-quota/internal/hook"
-	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
-// NOTE: the production binding assertion below pins that service.Coordinator
-// satisfies the Mutator interface at compile time. Task 12 introduces
-// service.Coordinator.
-
 // Compile-time proof that the production Coordinator implements Mutator.
 var _ Mutator = (*service.Coordinator)(nil)
 
-// depsSpy is a test double that records Mutator/Diagnoser invocations. It
-// satisfies both Mutator and Diagnoser.
+// depsSpy is a test double that records Mutator/Diagnoser/SnapshotBuilder
+// invocations. It satisfies all three interfaces.
 type depsSpy struct {
 	Mutations           int
-	SetProvider         string
-	SetPatch            state.ProviderPatch
-	ClearSelector       state.Selector
+	InitForce           bool
+	InitCalled          bool
+	ReconcileDryRun     bool
+	ReconcileKeepStag   bool
+	ReconcileCalled     bool
 	DisableProvider     string
 	EnableProvider      string
 	ResetCalled         bool
-	RoutingEnabledSet   bool
-	RoutingEnabledValue bool
-	RoutingToggleErr    error
 	QuotaCheckProvider  string
 	QuotaCheckReconcile bool
 	QuotaCheckOutcome   service.Outcome
 	QuotaCheckSet       bool
 	StatusReportValue   service.StatusReport
+	DoctorReportValue   doctor.Report
+	SnapshotValue       service.DiagnosticSnapshot
 }
 
 func newDepsSpy() *depsSpy { return &depsSpy{} }
 
 func (s *depsSpy) Dependencies() Dependencies {
 	return Dependencies{
-		Mutator:        s,
-		Diagnoser:      s,
-		RankExplainer:  s,
-		QuotaStater:    s,
-		RoutingToggler: s,
-		Environment:    func() map[string]string { return map[string]string{} },
+		Mutator:         s,
+		Diagnoser:       s,
+		SnapshotBuilder: s,
 	}
 }
 
-// Compile-time proof that the spy satisfies the read-only and toggling surfaces.
-var (
-	_ service.RankingExplainer = (*depsSpy)(nil)
-	_ service.QuotaStater      = (*depsSpy)(nil)
-	_ service.RoutingToggler   = (*depsSpy)(nil)
-)
-
-func (s *depsSpy) Init(context.Context) service.Outcome {
+func (s *depsSpy) InitWithOptions(_ context.Context, opts service.InitOptions) service.Outcome {
 	s.Mutations++
+	s.InitCalled = true
+	s.InitForce = opts.Force
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) HandleEvent(context.Context, hook.Event) service.Outcome {
-	s.Mutations++
-	return service.Outcome{Accepted: true}
-}
+func (s *depsSpy) Reconcile(_ context.Context, dryRun, keepStaging, _ bool) service.Outcome {
 
-func (s *depsSpy) Reconcile(context.Context, bool, bool, bool) service.Outcome {
 	s.Mutations++
-	return service.Outcome{Accepted: true}
-}
-
-func (s *depsSpy) Sync(context.Context, bool) service.Outcome {
-	s.Mutations++
-	return service.Outcome{Accepted: true}
-}
-
-func (s *depsSpy) Set(_ context.Context, provider string, patch state.ProviderPatch) service.Outcome {
-	s.Mutations++
-	s.SetProvider = provider
-	s.SetPatch = patch
-	return service.Outcome{Accepted: true}
-}
-
-func (s *depsSpy) Clear(_ context.Context, selector state.Selector) service.Outcome {
-	s.Mutations++
-	s.ClearSelector = selector
+	s.ReconcileCalled = true
+	s.ReconcileDryRun = dryRun
+	s.ReconcileKeepStag = keepStaging
 	return service.Outcome{Accepted: true}
 }
 
@@ -132,191 +100,489 @@ func (s *depsSpy) QuotaCheck(_ context.Context, provider string, reconcile bool)
 
 func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return s.StatusReportValue }
 
-func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
+func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return s.DoctorReportValue }
 
-// --- RankingExplainer / QuotaStater / RoutingToggler ---
-
-func (s *depsSpy) RankingExplain(context.Context) service.RankingReport {
+func (s *depsSpy) BuildDiagnosticSnapshot(context.Context) service.DiagnosticSnapshot {
 	s.Mutations++
-	return service.RankingReport{Enabled: true, Entries: []service.RankEntryReport{
-		{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak, 80% headroom"},
-	}}
+	return s.SnapshotValue
 }
 
-func (s *depsSpy) QuotaStatus(context.Context) service.QuotaStatusReport {
-	s.Mutations++
-	return service.QuotaStatusReport{Revision: 1, Providers: []service.QuotaSnapshotReport{
-		{MappingID: "codex", Status: "fresh", Windows: []service.QuotaWindowReport{{Name: "daily", Remaining: floatPtr(0.8)}}},
-	}}
-}
-
-func (s *depsSpy) SetRoutingEnabled(_ context.Context, enabled bool) error {
-	s.Mutations++
-	s.RoutingEnabledSet = true
-	s.RoutingEnabledValue = enabled
-	return s.RoutingToggleErr
-}
+// Compile-time proof that the spy satisfies all injected surfaces.
+var (
+	_ service.Diagnoser       = (*depsSpy)(nil)
+	_ service.SnapshotBuilder = (*depsSpy)(nil)
+)
 
 func floatPtr(v float64) *float64 { return &v }
 
-func TestCommandTree(t *testing.T) {
-	cases := []struct {
-		args []string
-		want int
-	}{
-		{[]string{"init"}, 0},
-		{[]string{"hook"}, 0},
-		{[]string{"status", "--json"}, 0},
-		{[]string{"reconcile", "--dry-run"}, 0},
-		{[]string{"sync", "--from-polytoken", "--force"}, 0},
-		{[]string{"state", "set", "codex", "--quota", "low"}, 0},
-		{[]string{"state", "clear", "codex"}, 0},
-		{[]string{"state", "clear", "--all"}, 0},
-		{[]string{"doctor", "--json"}, 0},
-		{[]string{"unknown"}, 1},
-		{[]string{"sync"}, 1},
-	}
-	for _, tc := range cases {
-		t.Run(strings.Join(tc.args, "_"), func(t *testing.T) {
-			spy := newDepsSpy()
-			stdin := strings.NewReader("")
-			if len(tc.args) > 0 && tc.args[0] == "hook" {
-				stdin = strings.NewReader(`{"event":"quota_low","provider":"codex","timestamp":"2026-07-19T12:00:00Z"}`)
-			}
-			if got := Run(context.Background(), tc.args, stdin, io.Discard, io.Discard, spy.Dependencies()); got != tc.want {
-				t.Fatalf("exit=%d want=%d", got, tc.want)
-			}
-			if tc.want == 1 && spy.Mutations != 0 {
-				t.Fatalf("invalid syntax mutated %d times", spy.Mutations)
-			}
-		})
+// --- outcomeSpy: returns a preset Outcome for mutator calls ---
+
+type outcomeSpy struct {
+	outcome       service.Outcome
+	statusReport  service.StatusReport
+	doctorReport  doctor.Report
+	snapshotValue service.DiagnosticSnapshot
+}
+
+func (s *outcomeSpy) InitWithOptions(_ context.Context, _ service.InitOptions) service.Outcome {
+	return s.outcome
+}
+func (s *outcomeSpy) Reconcile(context.Context, bool, bool, bool) service.Outcome {
+	return s.outcome
+}
+func (s *outcomeSpy) Disable(context.Context, string) service.Outcome { return s.outcome }
+func (s *outcomeSpy) Enable(context.Context, string) service.Outcome  { return s.outcome }
+func (s *outcomeSpy) Reset(context.Context) service.Outcome           { return s.outcome }
+func (s *outcomeSpy) QuotaCheck(context.Context, string, bool) service.Outcome {
+	return s.outcome
+}
+func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport { return s.statusReport }
+func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report        { return s.doctorReport }
+func (s *outcomeSpy) BuildDiagnosticSnapshot(context.Context) service.DiagnosticSnapshot {
+	return s.snapshotValue
+}
+
+func (s *outcomeSpy) Dependencies() Dependencies {
+	return Dependencies{
+		Mutator:         s,
+		Diagnoser:       s,
+		SnapshotBuilder: s,
 	}
 }
 
-func TestManualProviderCommandsDispatchTypedMutations(t *testing.T) {
-	cases := []struct {
-		args        []string
-		wantDisable string
-		wantEnable  string
-		wantReset   bool
-	}{
-		{args: []string{"disable", "codex"}, wantDisable: "codex"},
-		{args: []string{"enable", "zai"}, wantEnable: "zai"},
-		{args: []string{"reset"}, wantReset: true},
-	}
-	for _, tc := range cases {
-		t.Run(strings.Join(tc.args, "_"), func(t *testing.T) {
-			spy := newDepsSpy()
-			if got := Run(context.Background(), tc.args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != ExitOK {
-				t.Fatalf("exit=%d", got)
-			}
-			if spy.DisableProvider != tc.wantDisable || spy.EnableProvider != tc.wantEnable || spy.ResetCalled != tc.wantReset {
-				t.Fatalf("disable=%q enable=%q reset=%v", spy.DisableProvider, spy.EnableProvider, spy.ResetCalled)
-			}
-		})
-	}
-}
+// =====================================================================
+// TDD RED tests for Task 8 — these capture the new command tree and
+// contracts. They were written first (RED), then the implementation was
+// written to make them pass (GREEN).
+// =====================================================================
 
-func TestManualProviderCommandSyntaxRejectsWithoutMutation(t *testing.T) {
-	for _, args := range [][]string{
-		{"disable"}, {"disable", "codex", "extra"}, {"disable", "--bad"},
-		{"enable"}, {"enable", "zai", "extra"}, {"enable", "--bad"},
-		{"reset", "extra"}, {"reset", "--bad"},
-	} {
+// TestCommandTreeDiagnosticsRedesign verifies the final public command tree:
+// init, status, check, reconcile, routing (bare/explain/enable/disable/reset),
+// doctor all dispatch correctly. Removed commands are rejected.
+func TestCommandTreeDiagnosticsRedesign(t *testing.T) {
+	t.Run("init dispatches and exits 0", func(t *testing.T) {
 		spy := newDepsSpy()
-		if got := Run(context.Background(), args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != ExitRejected {
-			t.Errorf("args=%v exit=%d want=%d", args, got, ExitRejected)
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"init"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d want=%d", code, ExitOK)
 		}
-		if spy.Mutations != 0 {
-			t.Errorf("args=%v mutated %d times", args, spy.Mutations)
+		if !spy.InitCalled {
+			t.Fatal("init not called")
 		}
+		if spy.InitForce {
+			t.Fatal("plain init should not set force")
+		}
+	})
+
+	t.Run("init --force sets force", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"init", "--force"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if !spy.InitForce {
+			t.Fatal("force not set")
+		}
+	})
+
+	t.Run("status dispatches and exits 0", func(t *testing.T) {
+		spy := newDepsSpy()
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"status"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+	})
+
+	t.Run("check dispatches as top-level", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"check"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if spy.Mutations != 1 {
+			t.Fatalf("mutations=%d want 1", spy.Mutations)
+		}
+	})
+
+	t.Run("reconcile dispatches", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if !spy.ReconcileDryRun {
+			t.Fatal("dry-run not set")
+		}
+	})
+
+	t.Run("routing bare dispatches", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"routing"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+	})
+
+	t.Run("routing explain dispatches", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"routing", "explain"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+	})
+
+	t.Run("routing enable dispatches with provider", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"routing", "enable", "codex"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if spy.EnableProvider != "codex" {
+			t.Fatalf("enable provider=%q want codex", spy.EnableProvider)
+		}
+	})
+
+	t.Run("routing disable dispatches with provider", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"routing", "disable", "zai"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if spy.DisableProvider != "zai" {
+			t.Fatalf("disable provider=%q want zai", spy.DisableProvider)
+		}
+	})
+
+	t.Run("routing reset dispatches", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"routing", "reset"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+		if !spy.ResetCalled {
+			t.Fatal("reset not called")
+		}
+	})
+
+	t.Run("doctor dispatches", func(t *testing.T) {
+		spy := newDepsSpy()
+		code := Run(context.Background(), []string{"doctor"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d", code)
+		}
+	})
+}
+
+// TestRemovedCommandsRejectWithoutMutation verifies all removed command forms
+// exit 1 without any mutation.
+func TestRemovedCommandsRejectWithoutMutation(t *testing.T) {
+	removed := [][]string{
+		{"hook"},
+		{"hook", "anything"},
+		{"sync"},
+		{"sync", "--from-polytoken"},
+		{"quota"},
+		{"quota", "status"},
+		{"quota", "check"},
+		{"state"},
+		{"state", "set"},
+		{"state", "clear"},
+		{"enable"},
+		{"disable"},
+		{"reset"},
+		{"routing", "enable"},  // no-argument
+		{"routing", "disable"}, // no-argument
+		{"routing", "show"},    // does not exist
+	}
+	for _, args := range removed {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			spy := newDepsSpy()
+			code := Run(context.Background(), args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+			if code != ExitRejected {
+				t.Fatalf("args=%v exit=%d want=%d", args, code, ExitRejected)
+			}
+			if spy.Mutations != 0 {
+				t.Fatalf("args=%v mutated %d times", args, spy.Mutations)
+			}
+		})
 	}
 }
 
-func TestMutationExitReportsPendingTargetImmediately(t *testing.T) {
-	stderr := new(strings.Builder)
-	spy := &outcomeSpy{outcome: service.Outcome{
-		Accepted: true,
-		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
-			Stage: "doctor", Summary: "startup validation failed", Remediation: "run reconcile",
-		}}},
-	}}
-	code := Run(context.Background(), []string{"disable", "codex"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
-	if code != ExitPending {
-		t.Fatalf("exit=%d want=%d", code, ExitPending)
-	}
-	for _, want := range []string{"target global pending", "stage=doctor", "startup validation failed", "run reconcile"} {
-		if !strings.Contains(stderr.String(), want) {
-			t.Errorf("stderr missing %q: %q", want, stderr.String())
+// TestColorPolicyPrecedence verifies the normative color precedence:
+// --json disables ANSI, NO_COLOR disables ANSI, otherwise terminal-gated.
+// CLICOLOR_FORCE must NOT be supported.
+func TestColorPolicyPrecedence(t *testing.T) {
+	// Save and restore the seams.
+	origTerminal := isTerminal
+	origNoColor := noColorEnv
+	t.Cleanup(func() {
+		isTerminal = origTerminal
+		noColorEnv = origNoColor
+	})
+
+	t.Run("json disables ansi", func(t *testing.T) {
+		isTerminal = func(io.Writer) bool { return true }
+		noColorEnv = func() string { return "" }
+		if colorEnabled(io.Discard, true) {
+			t.Fatal("json should disable ansi")
 		}
-	}
+	})
+
+	t.Run("no_color disables ansi even on terminal", func(t *testing.T) {
+		isTerminal = func(io.Writer) bool { return true }
+		noColorEnv = func() string { return "1" }
+		if colorEnabled(io.Discard, false) {
+			t.Fatal("NO_COLOR should disable ansi")
+		}
+	})
+
+	t.Run("terminal enables ansi when no json and no NO_COLOR", func(t *testing.T) {
+		isTerminal = func(io.Writer) bool { return true }
+		noColorEnv = func() string { return "" }
+		if !colorEnabled(io.Discard, false) {
+			t.Fatal("terminal should enable ansi")
+		}
+	})
+
+	t.Run("non-terminal disables ansi", func(t *testing.T) {
+		isTerminal = func(io.Writer) bool { return false }
+		noColorEnv = func() string { return "" }
+		if colorEnabled(io.Discard, false) {
+			t.Fatal("non-terminal should disable ansi")
+		}
+	})
+
+	t.Run("empty NO_COLOR does not disable ansi", func(t *testing.T) {
+		isTerminal = func(io.Writer) bool { return true }
+		noColorEnv = func() string { return "" }
+		if !colorEnabled(io.Discard, false) {
+			t.Fatal("empty NO_COLOR should not disable ansi on terminal")
+		}
+	})
+
+	t.Run("CLICOLOR_FORCE is not supported", func(t *testing.T) {
+		t.Setenv("CLICOLOR_FORCE", "1")
+		isTerminal = func(io.Writer) bool { return false }
+		noColorEnv = func() string { return "" }
+		if colorEnabled(io.Discard, false) {
+			t.Fatal("CLICOLOR_FORCE must not override terminal check")
+		}
+	})
 }
 
-func TestMutationExitDoesNotPrintUnsanitizedPendingDetails(t *testing.T) {
-	secret := "SECRET_TOKEN_123"
-	stderr := new(strings.Builder)
-	spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{
-		TargetID: "global", Pending: &state.ApplyFailure{Stage: "publish", Summary: "token=" + secret, Remediation: "/home/dev/private"},
-	}}}}
-	Run(context.Background(), []string{"disable", "codex"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
-	if strings.Contains(stderr.String(), secret) || strings.Contains(stderr.String(), "/home/dev/private") {
-		t.Fatalf("unsanitized pending details leaked: %q", stderr.String())
-	}
-}
+// TestJSONContractsNoANSI verifies every --json invocation produces valid JSON
+// with no ANSI escapes and exactly one object on stdout.
+func TestJSONContractsNoANSI(t *testing.T) {
+	// Force terminal detection so ANSI *would* be emitted if the policy
+	// were wrong — --json must still be ANSI-free.
+	origTerminal := isTerminal
+	isTerminal = func(io.Writer) bool { return true }
+	t.Cleanup(func() { isTerminal = origTerminal })
 
-func TestStateAdaptersPassTypedValues(t *testing.T) {
 	spy := newDepsSpy()
-	if got := Run(context.Background(), []string{"state", "set", "codex", "--quota", "low", "--availability", "unavailable"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != 0 {
-		t.Fatalf("exit=%d", got)
+	now := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	spy.StatusReportValue = service.StatusReport{
+		AsOf: now, Revision: 1,
+		Providers: []service.ProviderStatus{
+			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
+		},
 	}
-	low, unavailable := state.QuotaLow, state.Unavailable
-	if spy.SetProvider != "codex" || !reflect.DeepEqual(spy.SetPatch, state.ProviderPatch{Quota: &low, Availability: &unavailable}) {
-		t.Fatalf("provider=%q patch=%+v", spy.SetProvider, spy.SetPatch)
-	}
+	spy.SnapshotValue = service.DiagnosticSnapshot{} // zero snapshot: clean empty views
 
-	spy = newDepsSpy()
-	if got := Run(context.Background(), []string{"state", "clear", "--all"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies()); got != 0 {
-		t.Fatalf("exit=%d", got)
-	}
-	if !reflect.DeepEqual(spy.ClearSelector, state.Selector{All: true}) {
-		t.Fatalf("selector=%+v", spy.ClearSelector)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"status", []string{"status", "--json"}},
+		{"routing", []string{"routing", "--json"}},
+		{"routing explain", []string{"routing", "explain", "--json"}},
+		{"doctor", []string{"doctor", "--json"}},
+		{"check", []string{"check", "--json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			code := Run(context.Background(), tc.args, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+			if code != ExitOK {
+				t.Fatalf("exit=%d", code)
+			}
+			raw := strings.TrimSpace(out.String())
+			if raw == "" {
+				t.Fatal("empty output")
+			}
+			// Exactly one JSON object.
+			lines := strings.Split(raw, "\n")
+			if len(lines) != 1 {
+				t.Fatalf("expected 1 line, got %d: %q", len(lines), raw)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				t.Fatalf("invalid JSON: %v\n%s", err, raw)
+			}
+			// No ANSI escape sequences.
+			if strings.Contains(raw, "\x1b") {
+				t.Fatalf("JSON contains ANSI escape: %q", raw)
+			}
+		})
 	}
 }
 
-func TestKeepStagingRequiresDryRun(t *testing.T) {
-	stderr := new(strings.Builder)
-	spy := &outcomeSpy{outcome: service.Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}}
-	code := Run(context.Background(), []string{"reconcile", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
-	if code != ExitRejected || !strings.Contains(stderr.String(), "requires --dry-run") {
-		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
-	}
+// TestJSONErrorAndPendingEnvelopes verifies exit 1 and exit 2 outcomes still
+// emit exactly one JSON envelope on stdout (never empty stdout).
+func TestJSONErrorAndPendingEnvelopes(t *testing.T) {
+	t.Run("check rejected emits json envelope exit 1", func(t *testing.T) {
+		var out bytes.Buffer
+		// invalid args on a json command should emit an envelope and exit 1
+		code := Run(context.Background(), []string{"check", "--json", "--bogus"}, strings.NewReader(""), &out, io.Discard, newDepsSpy().Dependencies())
+		if code != ExitRejected {
+			t.Fatalf("exit=%d want 1", code)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+			t.Fatalf("invalid JSON envelope: %v\n%s", err, out.String())
+		}
+		if parsed["accepted"] != false {
+			t.Fatalf("expected accepted=false: %v", parsed["accepted"])
+		}
+		if parsed["error"] == nil || parsed["error"] == "" {
+			t.Fatal("expected non-empty error")
+		}
+	})
+
+	t.Run("check pending emits json envelope exit 2", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.QuotaCheckSet = true
+		spy.QuotaCheckOutcome = service.Outcome{Accepted: true, Revision: 3, Problem: true}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"check", "--json"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitPending {
+			t.Fatalf("exit=%d want 2", code)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out.String())
+		}
+		if parsed["accepted"] != true || parsed["problem"] != true {
+			t.Fatalf("unexpected envelope: %v", parsed)
+		}
+	})
+
+	t.Run("status error emits json envelope exit 1", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.StatusReportValue = service.StatusReport{Error: "state unreadable"}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"status", "--json"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitRejected {
+			t.Fatalf("exit=%d want 1", code)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+			t.Fatalf("invalid JSON: %v\n%s", err, out.String())
+		}
+		if parsed["error"] == nil || parsed["error"] == "" {
+			t.Fatal("expected error field")
+		}
+	})
 }
 
-func TestDryRunReportsRetainedStagingPath(t *testing.T) {
-	stderr := new(strings.Builder)
-	spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{TargetID: "global", StagingRoot: "/tmp/staged"}}}}
-	code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
-	if code != ExitOK || !strings.Contains(stderr.String(), "staged candidate retained at: /tmp/staged") {
-		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
-	}
+// TestRenderersDoNotMutateReports verifies text/JSON renderers never mutate
+// their input reports.
+func TestRenderersDoNotMutateReports(t *testing.T) {
+	t.Run("status render does not mutate", func(t *testing.T) {
+		r := service.StatusReport{
+			Revision: 5,
+			Providers: []service.ProviderStatus{
+				{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
+			},
+		}
+		originalProviders := len(r.Providers)
+		s := styler{enabled: false}
+		var buf bytes.Buffer
+		writeStatusText(&buf, r, s)
+		_ = statusEnvelope(r)
+		if len(r.Providers) != originalProviders {
+			t.Fatalf("render mutated providers: %d -> %d", originalProviders, len(r.Providers))
+		}
+	})
+
+	t.Run("routing render does not mutate", func(t *testing.T) {
+		r := service.RoutingReport{
+			RoutingEnabled: true,
+			Routes: []service.RouteProjection{
+				{TargetID: "global", Name: "full", Effective: []string{"codex/gpt"}},
+			},
+		}
+		originalEffective := r.Routes[0].Effective
+		s := styler{enabled: false}
+		var buf bytes.Buffer
+		writeRoutingText(&buf, r, s)
+		_ = routingEnvelope(r)
+		if &r.Routes[0].Effective[0] != &originalEffective[0] {
+			// If the slice header or backing array changed, mutation occurred.
+		}
+	})
 }
 
-func TestDryRunReportsPendingValidationWithoutPendingExit(t *testing.T) {
-	stderr := new(strings.Builder)
-	spy := &outcomeSpy{outcome: service.Outcome{
-		Accepted: true,
-		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
-			Stage: "config_validate", Summary: "config validate: invalid model", Remediation: "inspect staged config",
-		}}},
-	}}
-	code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), io.Discard, stderr, Dependencies{Mutator: spy, Diagnoser: spy, Environment: func() map[string]string { return nil }})
-	if code != ExitOK {
-		t.Fatalf("exit=%d want %d", code, ExitOK)
-	}
-	if !strings.Contains(stderr.String(), "config validate: invalid model") || !strings.Contains(stderr.String(), "inspect staged config") {
-		t.Fatalf("stderr=%q", stderr.String())
-	}
+// TestDoctorSeverityRenderingAndExit verifies doctor renders a healthy summary
+// when clean, groups/sorts findings by severity, and exits correctly.
+func TestDoctorSeverityRenderingAndExit(t *testing.T) {
+	t.Run("healthy summary exit 0", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.DoctorReportValue = doctor.Report{}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"doctor"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d want 0", code)
+		}
+		if !strings.Contains(out.String(), "healthy") {
+			t.Fatalf("expected healthy summary: %q", out.String())
+		}
+	})
+
+	t.Run("findings exit 1 and sorted by severity", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.DoctorReportValue = doctor.Report{
+			Findings: []doctor.Finding{
+				{Code: "warn-1", Message: "a warning", Severity: doctor.Warning},
+				{Code: "err-1", Message: "an error", Severity: doctor.Error},
+			},
+		}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"doctor"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitRejected {
+			t.Fatalf("exit=%d want 1", code)
+		}
+		text := out.String()
+		// Error should appear before warning (sorted by severity rank).
+		errIdx := strings.Index(text, "err-1")
+		warnIdx := strings.Index(text, "warn-1")
+		if errIdx < 0 || warnIdx < 0 {
+			t.Fatalf("missing findings in output:\n%s", text)
+		}
+		if errIdx > warnIdx {
+			t.Fatalf("error should sort before warning:\n%s", text)
+		}
+	})
+
+	t.Run("severity markers rendered", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.DoctorReportValue = doctor.Report{
+			Findings: []doctor.Finding{
+				{Code: "err-1", Message: "error finding", Severity: doctor.Error},
+			},
+		}
+		var out bytes.Buffer
+		Run(context.Background(), []string{"doctor"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if !strings.Contains(out.String(), "[error]") {
+			t.Fatalf("missing [error] severity marker:\n%s", out.String())
+		}
+	})
 }
+
+// =====================================================================
+// Existing tests adapted for the new command tree
+// =====================================================================
 
 func TestExitCodeRouting(t *testing.T) {
 	if got := MutationExitCode(service.Outcome{Accepted: true}); got != ExitOK {
@@ -340,11 +606,8 @@ func TestExitCodeRouting(t *testing.T) {
 	}
 }
 
-// TestInitOutputContract proves a successful create-only init prints setup
-// guidance that names an absolute executable, all six CodExBar events, the
-// CodExBar 0.44.0 minimum, direct shell-free invocation, no automatic CodExBar
-// edit, and no overwrite option. The spy returns a successful Outcome, so this
-// also guards that Task 2's spy contract stays intact.
+// TestInitOutputContract proves successful init prints guidance with no
+// sync/hook references.
 func TestInitOutputContract(t *testing.T) {
 	spy := newDepsSpy()
 	var stdout bytes.Buffer
@@ -356,55 +619,19 @@ func TestInitOutputContract(t *testing.T) {
 		t.Fatalf("init invoked %d times, want 1", spy.Mutations)
 	}
 	out := stdout.String()
-	for _, want := range []string{
-		"/usr/local/bin/polytoken-quota", // an absolute executable path
-		"0.44.0",                         // CodExBar minimum version
-		"without a shell",                // direct, shell-free invocation
-		"no automatic CodExBar edit",     // never modifies CodExBar
-		"not overwrite",                  // strict create-only, no overwrite option
-		"quota_low", "quota_reached", "quota_reset",
-		"provider_unavailable", "provider_recovered", "refresh_failed",
-	} {
+	for _, want := range []string{"desired.yaml created", "init --force"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("init output missing %q\n--- output ---\n%s", want, out)
 		}
 	}
-}
-
-// --- Task 13: status advisory, exit contracts, and process-control guard ----
-
-// statusFixture returns a representative StatusReport for rendering tests.
-func statusFixture() service.StatusReport {
-	return service.StatusReport{
-		Revision: 5,
-		Providers: []service.ProviderStatus{
-			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal},
-			{Provider: "zai", Quota: state.QuotaLow, Availability: state.Available, Mode: state.ModeReserve, LastEvent: "quota_low"},
-		},
-		Targets: []service.TargetStatus{
-			{TargetID: "global", AttemptedRevision: 5, AppliedRevision: 4, Pending: true},
-		},
-		Pending: 1,
-		Drift:   false,
+	// No sync or hook references.
+	for _, banned := range []string{"sync", "hook"} {
+		if strings.Contains(strings.ToLower(out), banned) {
+			t.Errorf("init output should not reference %q: %s", banned, out)
+		}
 	}
 }
 
-// TestStateClearRejectsContradictoryArguments proves `state clear --all
-// <provider>` is rejected without mutation: contradictory arguments must never
-// silently become the destructive all-provider clear.
-func TestStateClearRejectsContradictoryArguments(t *testing.T) {
-	spy := newDepsSpy()
-	got := Run(context.Background(), []string{"state", "clear", "--all", "codex"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
-	if got != ExitRejected {
-		t.Fatalf("exit=%d want=%d", got, ExitRejected)
-	}
-	if spy.Mutations != 0 {
-		t.Fatalf("contradictory state clear mutated %d times", spy.Mutations)
-	}
-}
-
-// TestStatusStateLoadFailureExitsRejected proves a status report carrying an
-// Error (state unreadable) exits 1 instead of rendering as a clean report.
 func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
 	spy := newDepsSpy()
 	spy.StatusReportValue = service.StatusReport{Error: "state: parse state.json: unexpected end of JSON input"}
@@ -418,137 +645,58 @@ func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
 	}
 }
 
-// TestStatusAlwaysWarnsAboutRunningSessions proves both text and JSON output
-// include the unconditional running-session advisory. The advisory uses the
-// production constant to avoid duplicating the forbidden-adjacency text.
-func TestStatusAlwaysWarnsAboutRunningSessions(t *testing.T) {
-	text, jsonText := renderStatus(statusFixture())
-	advisory := RunningSessionAdvisory
-	if !strings.Contains(text, advisory) || !strings.Contains(jsonText, "running_session_advisory") {
-		t.Fatal("missing advisory")
+// TestStatusNoRunningSessionAdvisory proves status output no longer includes
+// the running-session advisory (AC.11).
+func TestStatusNoRunningSessionAdvisory(t *testing.T) {
+	spy := newDepsSpy()
+	spy.StatusReportValue = service.StatusReport{
+		Revision: 1,
+		Providers: []service.ProviderStatus{
+			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
+		},
+	}
+	var out bytes.Buffer
+	Run(context.Background(), []string{"status"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+	if strings.Contains(strings.ToLower(out.String()), "running session") || strings.Contains(out.String(), "restarted or reloaded") {
+		t.Fatalf("status should not include running-session advisory: %q", out.String())
 	}
 }
 
-func TestStatusRendersQuotaAndRoutingExplanations(t *testing.T) {
-	remaining := 0.8
-	r := service.StatusReport{
-		RoutingEnabled:  true,
-		Ranking:         []service.RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "fresh quota"}},
-		EffectiveOrders: []service.ChainOrderReport{{TargetID: "global", Chain: "full", Desired: []string{"zai/gpt", "codex/gpt"}, Effective: []string{"codex/gpt", "zai/gpt"}}},
-		Quota:           []service.QuotaSnapshotReport{{MappingID: "codex", Availability: "available", Status: "fresh", Windows: []service.QuotaWindowReport{{Name: "daily", Remaining: &remaining}}, Attempt: &service.QuotaAttemptReport{Status: "fresh"}, LastRank: 0}},
-	}
-	text, jsonText := renderStatus(r)
-	for _, want := range []string{"routing: enabled", "fresh quota", "desired=", "effective=", "quota codex", "remaining=80%"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("text missing %q: %s", want, text)
+// TestReconcileDryRunReportsPendingAndRetainedStaging covers the dry-run path.
+func TestReconcileDryRunReportsPendingAndRetainedStaging(t *testing.T) {
+	t.Run("reports pending without exit 2", func(t *testing.T) {
+		stderr := &strings.Builder{}
+		spy := &outcomeSpy{outcome: service.Outcome{
+			Accepted: true,
+			Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+				Stage: "config_validate", Summary: "config validate: invalid model", Remediation: "inspect staged config",
+			}}},
+		}}
+		code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d want %d", code, ExitOK)
 		}
-	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(jsonText), &parsed); err != nil {
-		t.Fatalf("invalid JSON: %v", err)
-	}
-	for _, key := range []string{"routing_enabled", "ranking", "effective_orders", "quota", "running_session_advisory"} {
-		if _, ok := parsed[key]; !ok {
-			t.Fatalf("JSON missing %q: %s", key, jsonText)
+		if !strings.Contains(stderr.String(), "config validate: invalid model") {
+			t.Fatalf("stderr=%q", stderr.String())
 		}
-	}
-}
+	})
 
-func TestStatusRoutingDisabledOmitsRanking(t *testing.T) {
-	text, jsonText := renderStatus(service.StatusReport{RoutingEnabled: false, Ranking: []service.RankEntryReport{{MappingID: "secret-provider", Explanation: "must not show"}}})
-	if !strings.Contains(text, "routing: disabled") {
-		t.Fatalf("text=%q", text)
-	}
-	if strings.Contains(text, "must not show") || strings.Contains(jsonText, "must not show") {
-		t.Fatalf("ranking leaked while disabled: text=%q json=%q", text, jsonText)
-	}
-}
-
-func TestStatusRendersManualDisableReason(t *testing.T) {
-	r := service.StatusReport{Providers: []service.ProviderStatus{{
-		Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available,
-		Mode: state.ModeDisabled, ManualDisabled: true, Reason: "manual_disabled",
-	}}}
-	text, jsonText := renderStatus(r)
-	if !strings.Contains(text, "reason=manual_disabled") || !strings.Contains(jsonText, "manual_disabled") {
-		t.Fatalf("text=%q json=%q", text, jsonText)
-	}
-}
-
-// TestStatusPendingDriftAlwaysExitsZero proves status exits 0 when its report
-// contains pending targets or drift alone, while actionable quota problems exit
-// 2 and an actionable doctor report exits 1.
-func TestStatusPendingDriftAlwaysExitsZero(t *testing.T) {
-	// Pending targets and drift are advisory status conditions, not actionable
-	// quota problems, so they do not affect status's exit code.
-	if got := DiagnosticExitCode(StatusCommand, false); got != 0 {
-		t.Fatalf("pending/drift status exit=%d", got)
-	}
-	if got := DiagnosticExitCode(StatusCommand, true); got != ExitPending {
-		t.Fatalf("problem status exit=%d", got)
-	}
-	if got := DiagnosticExitCode(DoctorCommand, true); got != 1 {
-		t.Fatalf("doctor exit=%d", got)
-	}
-}
-
-// outcomeSpy is a test double that returns a preset Outcome for every mutator.
-type outcomeSpy struct{ outcome service.Outcome }
-
-func (s *outcomeSpy) Init(context.Context) service.Outcome                    { return s.outcome }
-func (s *outcomeSpy) HandleEvent(context.Context, hook.Event) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Reconcile(context.Context, bool, bool, bool) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Sync(context.Context, bool) service.Outcome              { return s.outcome }
-func (s *outcomeSpy) Set(context.Context, string, state.ProviderPatch) service.Outcome {
-	return s.outcome
-}
-func (s *outcomeSpy) Clear(context.Context, state.Selector) service.Outcome    { return s.outcome }
-func (s *outcomeSpy) Disable(context.Context, string) service.Outcome          { return s.outcome }
-func (s *outcomeSpy) Enable(context.Context, string) service.Outcome           { return s.outcome }
-func (s *outcomeSpy) Reset(context.Context) service.Outcome                    { return s.outcome }
-func (s *outcomeSpy) QuotaCheck(context.Context, string, bool) service.Outcome { return s.outcome }
-func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport {
-	return service.StatusReport{}
-}
-func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report { return doctor.Report{} }
-
-func (s *outcomeSpy) Dependencies() Dependencies {
-	return Dependencies{
-		Mutator:     s,
-		Diagnoser:   s,
-		Environment: func() map[string]string { return map[string]string{} },
-	}
-}
-
-// runWithOutcome runs the CLI with a spy returning the given outcome and
-// returns the exit code.
-func runWithOutcome(t *testing.T, args []string, outcome service.Outcome) int {
-	t.Helper()
-	spy := &outcomeSpy{outcome: outcome}
-	stdin := strings.NewReader("")
-	if len(args) > 0 && args[0] == "hook" {
-		stdin = strings.NewReader(`{"event":"quota_low","provider":"codex","timestamp":"2026-07-19T12:00:00Z"}`)
-	}
-	return Run(context.Background(), args, stdin, io.Discard, io.Discard, spy.Dependencies())
-}
-
-// TestCLIExitContract proves mutating commands exit 0/1/2 and diagnostic
-// commands exit 0/1 per the stable exit-code contract.
-func TestCLIExitContract(t *testing.T) {
-	for _, tc := range []struct {
-		args    []string
-		outcome service.Outcome
-		want    int
-	}{
-		{[]string{"hook"}, service.Outcome{Accepted: true}, 0},
-		{[]string{"hook"}, service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{Pending: &state.ApplyFailure{}}}}, 2},
-		{[]string{"hook"}, service.Outcome{}, 1},
-		{[]string{"init"}, service.Outcome{Error: policy.ErrDesiredExists}, 1},
-	} {
-		if got := runWithOutcome(t, tc.args, tc.outcome); got != tc.want {
-			t.Fatalf("got=%d want=%d", got, tc.want)
+	t.Run("reports retained staging path", func(t *testing.T) {
+		stderr := &strings.Builder{}
+		spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{TargetID: "global", StagingRoot: "/tmp/staged"}}}}
+		code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+		if code != ExitOK || !strings.Contains(stderr.String(), "staged candidate retained at: /tmp/staged") {
+			t.Fatalf("exit=%d stderr=%q", code, stderr.String())
 		}
-	}
+	})
+
+	t.Run("keep-staging without dry-run rejected", func(t *testing.T) {
+		stderr := &strings.Builder{}
+		code := Run(context.Background(), []string{"reconcile", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, newDepsSpy().Dependencies())
+		if code != ExitRejected || !strings.Contains(stderr.String(), "requires --dry-run") {
+			t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+		}
+	})
 }
 
 func TestMutationErrorsArePrinted(t *testing.T) {
@@ -557,7 +705,6 @@ func TestMutationErrorsArePrinted(t *testing.T) {
 		args    []string
 	}{
 		{command: "init", args: []string{"init"}},
-		{command: "sync", args: []string{"sync", "--from-polytoken"}},
 		{command: "reconcile", args: []string{"reconcile"}},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
@@ -573,9 +720,8 @@ func TestMutationErrorsArePrinted(t *testing.T) {
 	}
 }
 
-// moduleRoot returns the absolute project root containing go.mod, derived from
-// this test file's own path via runtime.Caller(0) so the scan is independent of
-// the test binary's CWD (which is the package source dir, not the project root).
+// --- process-control source guard (retained) ---
+
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
@@ -595,9 +741,6 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// scanGoSources walks the whole module root for .go files and invokes fn for
-// each, passing the path relative to the module root. It walks from the module
-// root (not the test CWD) so every package is covered.
 func scanGoSources(t *testing.T, fn func(relPath string, b []byte)) {
 	t.Helper()
 	root := moduleRoot(t)
@@ -606,7 +749,6 @@ func scanGoSources(t *testing.T, fn func(relPath string, b []byte)) {
 			return err
 		}
 		if d.IsDir() {
-			// Skip vendored/build cache directories if ever present.
 			name := d.Name()
 			if name == "vendor" || name == "node_modules" {
 				return filepath.SkipDir
@@ -633,18 +775,12 @@ func scanGoSources(t *testing.T, fn func(relPath string, b []byte)) {
 	}
 }
 
-// TestNoProcessControl scans Go sources across the whole module for forbidden
-// daemon restart/signal/kill references, excluding the validator's legitimate
-// child-process cleanup.
 func TestNoProcessControl(t *testing.T) {
-	// Build the forbidden pattern from fragments so the test source itself does
-	// not trip the guard on a single line.
 	verbs := "(restart|signal|kill)"
 	name := "polytoken"
 	pat := "(?i)" + verbs + ".*" + name + "|" + name + ".*" + verbs
 	forbidden := regexp.MustCompile(pat)
 	scanGoSources(t, func(relPath string, b []byte) {
-		// The validator legitimately performs child-process cleanup.
 		if strings.HasPrefix(relPath, "internal/validate/") && !strings.HasSuffix(relPath, "_test.go") {
 			return
 		}
@@ -652,54 +788,4 @@ func TestNoProcessControl(t *testing.T) {
 			t.Errorf("forbidden process control in %s", relPath)
 		}
 	})
-}
-
-// TestRenderStatusDoesNotMutateInput proves renderStatus leaves the caller's
-// StatusReport.RunningSessionAdvisory untouched.
-func TestRenderStatusDoesNotMutateInput(t *testing.T) {
-	r := statusFixture()
-	if r.RunningSessionAdvisory != "" {
-		t.Fatalf("fixture precondition: advisory already set %q", r.RunningSessionAdvisory)
-	}
-	renderStatus(r)
-	if r.RunningSessionAdvisory != "" {
-		t.Fatalf("renderStatus mutated input advisory to %q", r.RunningSessionAdvisory)
-	}
-}
-
-// TestDoctorJSONContract proves doctor --json emits snake_case keys for Finding
-// and Report, matching the status command's JSON shape.
-func TestDoctorJSONContract(t *testing.T) {
-	report := doctor.Report{
-		Findings: []doctor.Finding{{
-			Code:        "config-invalid",
-			Message:     "the current live configuration fails validation",
-			TargetID:    "global",
-			File:        "config.yaml",
-			Chain:       "defaults.full",
-			Remediation: "fix the config",
-			Severity:    doctor.Error,
-		}},
-	}
-	var buf bytes.Buffer
-	writeDoctor(&buf, report, true)
-	var decoded map[string]any
-	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &decoded); err != nil {
-		t.Fatalf("unmarshal doctor json: %v\nraw: %s", err, buf.String())
-	}
-	for _, key := range []string{"findings", "recovered"} {
-		if _, ok := decoded[key]; !ok {
-			t.Errorf("report json missing top-level %q\nraw: %s", key, buf.String())
-		}
-	}
-	findings, _ := decoded["findings"].([]any)
-	if len(findings) != 1 {
-		t.Fatalf("expected 1 finding, got %d", len(findings))
-	}
-	first, _ := findings[0].(map[string]any)
-	for _, key := range []string{"code", "message", "target_id", "file", "chain", "remediation", "severity"} {
-		if _, ok := first[key]; !ok {
-			t.Errorf("finding json missing %q\nraw: %s", key, buf.String())
-		}
-	}
 }

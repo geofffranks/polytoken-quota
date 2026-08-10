@@ -152,6 +152,7 @@ func (s DiagnosticSnapshot) RoutingView() RoutingReport {
 	if s.fatalError != "" {
 		return report
 	}
+	report.RoutingEnabled = s.routingEnabled
 	report.Routes = cloneRoutes(s.routes, false)
 	report.Errors = cloneDiagnosticErrors(s.routeErrors)
 	report.Partial = len(report.Errors) > 0

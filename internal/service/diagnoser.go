@@ -25,6 +25,13 @@ type Diagnoser interface {
 	Doctor(context.Context, bool) doctor.Report
 }
 
+// SnapshotBuilder builds the shared read-only diagnostic snapshot backing the
+// routing selectors. The production implementation is *Coordinator. The CLI's
+// bare `routing` and `routing explain` commands use the snapshot's view methods.
+type SnapshotBuilder interface {
+	BuildDiagnosticSnapshot(context.Context) DiagnosticSnapshot
+}
+
 // ProviderStatus is one provider's quota/availability/mode axis in a status
 // report.
 type ProviderStatus struct {
@@ -77,6 +84,7 @@ type ChainOrderReport struct {
 // the unconditional running-session advisory.
 type StatusReport struct {
 	JSON            bool                  `json:"-"`
+	AsOf            time.Time             `json:"as_of"`
 	Revision        uint64                `json:"revision"`
 	Providers       []ProviderStatus      `json:"providers,omitempty"`
 	Targets         []TargetStatus        `json:"targets,omitempty"`
@@ -108,7 +116,7 @@ func (c *Coordinator) Status(ctx context.Context, _ bool) StatusReport {
 	snapshot := c.BuildDiagnosticSnapshot(ctx)
 	view := snapshot.StatusView()
 	report := StatusReport{
-		Revision: snapshot.revision, Targets: append([]TargetStatus(nil), snapshot.targets...),
+		AsOf: snapshot.asOf, Revision: snapshot.revision, Targets: append([]TargetStatus(nil), snapshot.targets...),
 		Pending: snapshot.pending, Drift: snapshot.drift, Problem: snapshot.problem,
 		Quota: cloneLegacyQuota(snapshot.legacyQuota), Error: view.Error,
 	}

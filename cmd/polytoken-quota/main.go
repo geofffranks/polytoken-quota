@@ -249,15 +249,15 @@ func newCoordinator(cfg config) *service.Coordinator {
 	loader := service.FilePolicyLoader{Path: cfg.DesiredPath}
 	registry := service.NewTargetRegistry()
 	return &service.Coordinator{
-		Lock:            publish.NewFileLock(cfg.LockPath),
-		Policy:          loader,
-		PolicyWriter:    policy.NewWriter(cfg.DesiredPath),
-		State:           service.StoreState{Store: store},
-		Targets:         registry,
-		Builder:         service.NewReconciler(),
-		Stage:           service.StagingStager{Builder: builder},
-		Validate: service.ValidateRunner{Runner: runner},
-		Publish:  service.PublisherAdapter{Publisher: pub},
+		Lock:             publish.NewFileLock(cfg.LockPath),
+		Policy:           loader,
+		PolicyWriter:     policy.NewWriter(cfg.DesiredPath),
+		State:            service.StoreState{Store: store},
+		Targets:          registry,
+		Builder:          service.NewReconciler(),
+		Stage:            service.StagingStager{Builder: builder},
+		Validate:         service.ValidateRunner{Runner: runner},
+		Publish:          service.PublisherAdapter{Publisher: pub},
 		DoctorInspectors: service.DoctorInspectors{
 			// Policy and target findings now come from the preloaded diagnostic
 			// snapshot (no duplicate loads). Only the live validator remains
@@ -286,30 +286,9 @@ func main() {
 	coord := newCoordinator(cfg)
 
 	code := cli.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.Dependencies{
-		Mutator:        coord,
-		Diagnoser:      coord,
-		RankExplainer:  coord,
-		QuotaStater:    coord,
-		RoutingToggler: coord,
-		Environment:    envSnapshot,
+		Mutator:         coord,
+		Diagnoser:       coord,
+		SnapshotBuilder: coord,
 	})
 	os.Exit(code)
-}
-
-// envSnapshot returns the supported CODEXBAR_* environment variables as a map.
-// Only these are forwarded to hook.Decode; the rest of the process environment
-// is never inspected or leaked.
-func envSnapshot() map[string]string {
-	out := make(map[string]string)
-	for _, kv := range os.Environ() {
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
-			continue
-		}
-		key := kv[:eq]
-		if strings.HasPrefix(key, "CODEXBAR_") {
-			out[key] = kv[eq+1:]
-		}
-	}
-	return out
 }

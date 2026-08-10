@@ -23,11 +23,12 @@ type RouteProjection struct {
 
 // RoutingReport is the bare routing selector: effective routes plus local errors.
 type RoutingReport struct {
-	AsOf    time.Time         `json:"as_of"`
-	Routes  []RouteProjection `json:"routes,omitempty"`
-	Errors  []DiagnosticError `json:"errors,omitempty"`
-	Partial bool              `json:"partial"`
-	Error   string            `json:"error,omitempty"`
+	AsOf           time.Time         `json:"as_of"`
+	RoutingEnabled bool              `json:"routing_enabled"`
+	Routes         []RouteProjection `json:"routes,omitempty"`
+	Errors         []DiagnosticError `json:"errors,omitempty"`
+	Partial        bool              `json:"partial"`
+	Error          string            `json:"error,omitempty"`
 }
 
 // RoutingExplainReport adds enablement, full ranks, and desired chains.
