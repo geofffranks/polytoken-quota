@@ -57,9 +57,9 @@ func QuotaFindings(probes []QuotaProbe, reconcilePending bool, now time.Time) []
 				TargetID: clean,
 				Severity: Warning,
 				Message: fmt.Sprintf(
-					"provider %s quota snapshot is stale (last checked %s; freshness TTL %dm); run `quota check` to refresh.",
+					"provider %s quota snapshot is stale (last checked %s; freshness TTL %dm); run `check` to refresh.",
 					clean, p.Snapshot.CheckedAt.Format(time.RFC3339), int(p.FreshnessTTL.Minutes())),
-				Remediation: "run `quota check` to refresh the snapshot",
+				Remediation: "run `check` to refresh the snapshot",
 			})
 		}
 		if p.Snapshot != nil {
@@ -72,9 +72,9 @@ func QuotaFindings(probes []QuotaProbe, reconcilePending bool, now time.Time) []
 					code = "quota-partial-unusable"
 					message = fmt.Sprintf("provider %s quota snapshot is partial with no usable quota signal; routing remains disabled for it.", clean)
 				}
-				findings = append(findings, Finding{Code: code, TargetID: clean, Severity: severity, Message: message, Remediation: "run `quota check` to refresh the snapshot"})
+				findings = append(findings, Finding{Code: code, TargetID: clean, Severity: severity, Message: message, Remediation: "run `check` to refresh the snapshot"})
 			} else if p.Snapshot.EffectiveRemaining() == nil || p.Snapshot.Availability == quota.QuotaUnknown {
-				findings = append(findings, Finding{Code: "quota-unusable", TargetID: clean, Severity: Warning, Message: fmt.Sprintf("provider %s quota snapshot has no usable quota signal; routing remains disabled for it.", clean), Remediation: "run `quota check` to refresh the snapshot"})
+				findings = append(findings, Finding{Code: "quota-unusable", TargetID: clean, Severity: Warning, Message: fmt.Sprintf("provider %s quota snapshot has no usable quota signal; routing remains disabled for it.", clean), Remediation: "run `check` to refresh the snapshot"})
 			}
 		}
 		if p.Attempt != nil && p.Attempt.Status == quota.SourceFailed {
@@ -83,7 +83,7 @@ func QuotaFindings(probes []QuotaProbe, reconcilePending bool, now time.Time) []
 				TargetID:    clean,
 				Severity:    Warning,
 				Message:     fmt.Sprintf("provider %s quota attempt failed: %s", clean, quota.SanitizeText(p.Attempt.Error)),
-				Remediation: "run `quota check` to retry; verify credentials and adapter contract",
+				Remediation: "run `check` to retry; verify credentials and adapter contract",
 			})
 		}
 	}

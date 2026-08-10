@@ -101,7 +101,7 @@ type StatusReport struct {
 }
 
 // Compile-time assertions that *Coordinator implements both Mutator (via its
-// Init/HandleEvent/Reconcile/Sync/Set/Clear methods) and Diagnoser.
+// InitWithOptions/Reconcile/Disable/Enable/Reset/QuotaCheck methods) and Diagnoser.
 var (
 	_ Diagnoser = (*Coordinator)(nil)
 )
@@ -207,7 +207,7 @@ func (p *preloadedPolicyInspector) Findings(context.Context) []doctor.Finding {
 	return []doctor.Finding{{
 		Code:        "policy-schema",
 		Message:     fmt.Sprintf("desired.yaml failed validation: %s", quota.SanitizeText(p.snapshot.PolicyError().Error())),
-		Remediation: "fix desired.yaml (or regenerate with `polytoken-quota sync --from-polytoken`)",
+		Remediation: "fix desired.yaml (or regenerate with `polytoken-quota init --force`)",
 		Severity:    doctor.Error,
 	}}
 }

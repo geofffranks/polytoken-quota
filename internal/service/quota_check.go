@@ -32,7 +32,7 @@ import (
 // attempt failed (or, in reconcile mode, a target is pending).
 func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.State, in transactionInput) Outcome {
 	if c.QuotaPoller == nil {
-		return Outcome{Accepted: false, Error: errors.New("service: quota check requires a quota poller")}
+		return Outcome{Accepted: false, Error: errors.New("service: check requires a quota poller")}
 	}
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()

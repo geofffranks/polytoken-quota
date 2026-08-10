@@ -19,10 +19,9 @@ import (
 )
 
 // bannedAdvisoryFragments are the running-session advisory strings that must be
-// absent from all non-test source in the cli and service packages. Prose
-// fragments are matched on word boundaries so they do not match legitimate
-// substrings (e.g. "reload" inside "preloaded"); identifiers are matched
-// verbatim.
+// absent from all non-test source. Prose fragments are matched on word
+// boundaries so they do not match legitimate substrings (e.g. "reload" inside
+// "preloaded"); identifiers are matched verbatim.
 var bannedAdvisoryFragments = []string{
 	"running_session_advisory",
 	"RunningSessionAdvisory",
@@ -33,7 +32,8 @@ var bannedAdvisoryFragments = []string{
 }
 
 // removedCommandNames are the former top-level commands that must not appear as
-// real commands in the usage/help text.
+// real commands in the usage/help text, nor be suggested to users as runnable
+// commands anywhere in the source.
 var removedCommandNames = []string{
 	"hook",
 	"sync",
@@ -41,18 +41,38 @@ var removedCommandNames = []string{
 	"state",
 }
 
-func publicSurfaceSourceDirs(t *testing.T) []string {
+// removedCommandInvocations are the backticked removed-command spellings that
+// must never be presented to a user as a runnable command. Each is matched on
+// word boundaries; "polytoken-quota" (the binary name) is excluded separately.
+// This avoids false positives on the pervasive domain vocabulary (struct tags
+// like json:"quota", fsync error messages like "sync dir", UI column labels,
+// quota-class strings) by targeting the specific obsolete *invocation* forms
+// rather than bare words.
+var removedCommandInvocations = []string{
+	`\bquota check\b`,
+	`\bquota status\b`,
+	`\bsync --`,
+	`\bstate set\b`,
+	`\bstate clear\b`,
+	"`hook`",
+}
+
+// publicSurfaceExcludedDirs are the internal/ packages excluded from the
+// removed-command invocation scan: internal/hook/ is the retained hook decoder
+// package whose domain vocabulary legitimately uses "hook".
+var publicSurfaceExcludedDirs = map[string]bool{
+	"hook": true,
+}
+
+func publicSurfaceRoot(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
 	cliDir := filepath.Dir(thisFile)
-	root := filepath.Dir(cliDir)
-	return []string{
-		filepath.Join(root, "cli"),
-		filepath.Join(root, "service"),
-	}
+	internalDir := filepath.Dir(cliDir)
+	return internalDir
 }
 
 // walkGoSources walks dir and invokes fn for every non-test .go file.
@@ -80,22 +100,120 @@ func walkGoSources(t *testing.T, dir string, fn func(path string, b []byte)) {
 	}
 }
 
+// stripDecls removes package declarations and comments from source bytes so the
+// guard scans only string literals for removed-command invocations. Package
+// declarations and doc comments legitimately use quota/sync/hook as internal
+// operation names (e.g. transactQuotaCheck, QuotaStatus) and must not be flagged.
+func stripDecls(b []byte) []byte {
+	var kept []string
+	inBlockComment := false
+	for _, line := range strings.Split(string(b), "\n") {
+		// Track multi-line block comments (/* ... */).
+		if inBlockComment {
+			if idx := strings.Index(line, "*/"); idx >= 0 {
+				inBlockComment = false
+				line = line[idx+2:]
+			} else {
+				continue
+			}
+		}
+		// Strip a single-line block comment that opens without closing.
+		if sIdx := strings.Index(line, "/*"); sIdx >= 0 {
+			if eIdx := strings.Index(line[sIdx+2:], "*/"); eIdx >= 0 {
+				line = line[:sIdx] + line[sIdx+2+eIdx+2:]
+			} else {
+				line = line[:sIdx]
+				inBlockComment = true
+			}
+		}
+		trim := strings.TrimSpace(line)
+		// Drop package declarations and line comments so only code remains.
+		if strings.HasPrefix(trim, "package ") || strings.HasPrefix(trim, "//") {
+			continue
+		}
+		// Strip trailing line comments (after code) to avoid flagging
+		// references inside // annotations.
+		if idx := indexLineComment(line); idx >= 0 {
+			line = line[:idx]
+		}
+		kept = append(kept, line)
+	}
+	return []byte(strings.Join(kept, "\n"))
+}
+
+// indexLineComment returns the byte index of a "//" line comment start in line,
+// or -1 if none. It skips "//" inside string literals.
+func indexLineComment(line string) int {
+	inString := false
+	for i := 0; i < len(line)-1; i++ {
+		c := line[i]
+		if c == '"' {
+			inString = !inString
+		}
+		if !inString && c == '/' && line[i+1] == '/' {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory guards AC.11: no non-test
-// source in internal/cli or internal/service carries the running-session
-// restart/reload advisory, and the usage text lists only the current command
-// set (no obsolete hook/sync/quota/state commands).
+// source under internal/ carries the running-session restart/reload advisory or
+// removed-command invocations, and the usage text lists only the current command
+// set (no obsolete hook/sync/quota/state commands). The hook decoder package
+// (internal/hook/) is excluded because it retains legitimate hook-domain
+// coverage.
 func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
+	internalDir := publicSurfaceRoot(t)
+
 	t.Run("no advisory fragments in source", func(t *testing.T) {
 		// Compile each fragment once; identifiers compile as plain regex.
 		patterns := make([]*regexp.Regexp, 0, len(bannedAdvisoryFragments))
 		for _, frag := range bannedAdvisoryFragments {
 			patterns = append(patterns, regexp.MustCompile("(?i)"+frag))
 		}
-		for _, dir := range publicSurfaceSourceDirs(t) {
+		// Scan all internal/ non-test packages.
+		entries, err := os.ReadDir(internalDir)
+		if err != nil {
+			t.Fatalf("ReadDir %s: %v", internalDir, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dir := filepath.Join(internalDir, e.Name())
 			walkGoSources(t, dir, func(path string, b []byte) {
 				for _, pat := range patterns {
 					if pat.Match(b) {
 						t.Errorf("banned advisory fragment %q present in %s", pat.String(), path)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("no removed-command invocations in source", func(t *testing.T) {
+		// Scan all internal/ non-test packages except the excluded ones.
+		entries, err := os.ReadDir(internalDir)
+		if err != nil {
+			t.Fatalf("ReadDir %s: %v", internalDir, err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() || publicSurfaceExcludedDirs[e.Name()] {
+				continue
+			}
+			dir := filepath.Join(internalDir, e.Name())
+			walkGoSources(t, dir, func(path string, b []byte) {
+				stripped := stripDecls(b)
+				for _, invocation := range removedCommandInvocations {
+					re := regexp.MustCompile(invocation)
+					if loc := re.FindIndex(stripped); loc != nil {
+						// Exclude the polytoken-quota binary name prefix.
+						excerpt := string(stripped[loc[0]:])
+						if strings.HasPrefix(excerpt, "polytoken-quota ") {
+							continue
+						}
+						t.Errorf("removed-command invocation %q present in %s", invocation, path)
 					}
 				}
 			})

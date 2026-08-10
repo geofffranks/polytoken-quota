@@ -383,7 +383,7 @@ func TestInitExistingPolicyIsRejectedCreateOnly(t *testing.T) {
 	if !reflect.DeepEqual(spy.Trace, []string{"lock", "desired-exists", "unlock"}) {
 		t.Fatalf("trace=%v", spy.Trace)
 	}
-	if !strings.Contains(out.Error.Error(), "use sync --from-polytoken") {
+	if !strings.Contains(out.Error.Error(), "use polytoken-quota init --force") {
 		t.Fatalf("error=%v", out.Error)
 	}
 }

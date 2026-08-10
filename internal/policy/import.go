@@ -14,15 +14,15 @@ import (
 )
 
 // This file implements the durable desired-policy workflows: Init (a strict
-// create-only starter proposal), guarded Import (sync --from-polytoken), drift
-// detection, and the Writer that performs exclusive-create and atomic-replace
-// file operations. None of these perform CodExBar writes; init/import only
-// produce or adopt desired intent and report drift.
+// create-only starter proposal), guarded Import (polytoken-quota init --force),
+// drift detection, and the Writer that performs exclusive-create and
+// atomic-replace file operations. None of these perform CodExBar writes; init
+// only produces or adopts desired intent and reports drift.
 
 // ErrDesiredExists signals that desired.yaml already exists and a strict
 // create-only operation refused to overwrite it. The remediation is
-// `sync --from-polytoken`.
-var ErrDesiredExists = errors.New("desired.yaml already exists; use sync --from-polytoken")
+// `polytoken-quota init --force`.
+var ErrDesiredExists = errors.New("desired.yaml already exists; use polytoken-quota init --force")
 
 // SourceConfig is the parsed config.yaml layer of one target: the explicit
 // provider mappings (each enumerating its concrete managed models with their

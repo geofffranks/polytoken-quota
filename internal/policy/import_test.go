@@ -188,7 +188,7 @@ func TestInitReportsInvalidReferences(t *testing.T) {
 
 // TestWriterCreateAtomicRejectsExistingDesired proves exclusive create rejects an
 // existing desired.yaml with ErrDesiredExists, preserves its bytes, and points to
-// `sync --from-polytoken`.
+// `polytoken-quota init --force`.
 func TestFilesystemSourceReaderReadsManagedGlobalFields(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(`providers:
@@ -358,7 +358,7 @@ func TestWriterCreateAtomicRejectsExistingDesired(t *testing.T) {
 	if !bytes.Equal(before, after) {
 		t.Fatal("existing desired.yaml changed")
 	}
-	if !strings.Contains(err.Error(), "use sync --from-polytoken") {
+	if !strings.Contains(err.Error(), "use polytoken-quota init --force") {
 		t.Fatalf("error=%v", err)
 	}
 }
