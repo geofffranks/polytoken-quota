@@ -216,7 +216,7 @@ func runCheck(ctx context.Context, args []string, deps Dependencies, stdout, std
 	s := newStyler(stdout, jsonOut)
 	if jsonOut {
 		encodeJSON(stdout, mutationEnvelope(out))
-	} else {
+	} else if out.Error == nil {
 		writePendingTargets(out, stderr)
 		writeMutationText(stdout, out, "check", s)
 	}

@@ -516,6 +516,26 @@ func TestCheckPendingDiagnosticsToStderr(t *testing.T) {
 	}
 }
 
+// TestCheckRejectedNoErrorToStdout verifies that a rejected non-JSON check
+// outcome with an error prints the error to stderr only and never to stdout.
+func TestCheckRejectedNoErrorToStdout(t *testing.T) {
+	spy := newDepsSpy()
+	spy.QuotaCheckSet = true
+	spy.QuotaCheckOutcome = service.Outcome{Accepted: false, Error: errors.New("quota check: provider codex unreachable")}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"check"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitRejected {
+		t.Fatalf("exit=%d want %d", code, ExitRejected)
+	}
+	if !strings.Contains(stderr.String(), "quota check: provider codex unreachable") {
+		t.Fatalf("stderr missing error: %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout should be empty on rejected check, got: %q", stdout.String())
+	}
+}
+
 // TestRenderersDoNotMutateReports verifies text/JSON renderers never mutate
 // their input reports.
 func TestRenderersDoNotMutateReports(t *testing.T) {
