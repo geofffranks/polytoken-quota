@@ -217,6 +217,7 @@ func runCheck(ctx context.Context, args []string, deps Dependencies, stdout, std
 	if jsonOut {
 		encodeJSON(stdout, mutationEnvelope(out))
 	} else {
+		writePendingTargets(out, stderr)
 		writeMutationText(stdout, out, "check", s)
 	}
 	return MutationExitCode(out)
@@ -307,14 +308,8 @@ func parseReconcileFlags(args []string) (dryRun, keepStaging, verbose, ok bool) 
 }
 
 func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
+	writePendingTargets(o, stderr)
 	for _, target := range o.Targets {
-		if target.Pending != nil {
-			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
-				validate.DefaultSanitize([]byte(target.TargetID)),
-				validate.DefaultSanitize([]byte(target.Pending.Stage)),
-				validate.DefaultSanitize([]byte(target.Pending.Summary)),
-				validate.DefaultSanitize([]byte(target.Pending.Remediation)))
-		}
 		if target.StagingRoot != "" {
 			fmt.Fprintf(stderr, "staged candidate retained at: %s\n", target.StagingRoot)
 		}
@@ -326,6 +321,22 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 		return ExitRejected
 	}
 	return ExitOK
+}
+
+// writePendingTargets prints each pending target's stage/summary/remediation to
+// stderr, sanitized via validate.DefaultSanitize. Shared by runCheck and
+// runReconcile's dry-run path so both surfaces explain why an accepted outcome
+// is still pending.
+func writePendingTargets(o service.Outcome, stderr io.Writer) {
+	for _, target := range o.Targets {
+		if target.Pending != nil {
+			fmt.Fprintf(stderr, "target %s pending: stage=%s summary=%q remediation=%s\n",
+				validate.DefaultSanitize([]byte(target.TargetID)),
+				validate.DefaultSanitize([]byte(target.Pending.Stage)),
+				validate.DefaultSanitize([]byte(target.Pending.Summary)),
+				validate.DefaultSanitize([]byte(target.Pending.Remediation)))
+		}
+	}
 }
 
 // --- doctor (AC.8) ---

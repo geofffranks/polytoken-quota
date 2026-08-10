@@ -486,6 +486,36 @@ func TestJSONErrorAndPendingEnvelopes(t *testing.T) {
 	})
 }
 
+// TestCheckPendingDiagnosticsToStderr verifies check on an accepted-but-pending
+// outcome (exit 2) prints each pending target's stage/summary/remediation to
+// stderr, so the user knows why it is pending.
+func TestCheckPendingDiagnosticsToStderr(t *testing.T) {
+	spy := newDepsSpy()
+	spy.QuotaCheckSet = true
+	spy.QuotaCheckOutcome = service.Outcome{
+		Accepted: true,
+		Revision: 7,
+		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+			Stage: "config_validate", Summary: "config validate: invalid model", Remediation: "inspect staged config",
+		}}},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := Run(context.Background(), []string{"check"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitPending {
+		t.Fatalf("exit=%d want %d", code, ExitPending)
+	}
+	if !strings.Contains(stderr.String(), "target global pending: stage=config_validate") {
+		t.Fatalf("stderr missing pending diagnostic: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "config validate: invalid model") {
+		t.Fatalf("stderr missing summary: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "inspect staged config") {
+		t.Fatalf("stderr missing remediation: %q", stderr.String())
+	}
+}
+
 // TestRenderersDoNotMutateReports verifies text/JSON renderers never mutate
 // their input reports.
 func TestRenderersDoNotMutateReports(t *testing.T) {
@@ -518,8 +548,17 @@ func TestRenderersDoNotMutateReports(t *testing.T) {
 		var buf bytes.Buffer
 		writeRoutingText(&buf, r, s)
 		_ = routingEnvelope(r)
-		if &r.Routes[0].Effective[0] != &originalEffective[0] {
-			// If the slice header or backing array changed, mutation occurred.
+		got := r.Routes[0].Effective
+		if len(got) != len(originalEffective) {
+			t.Fatalf("routing render mutated Effective length: %d -> %d", len(originalEffective), len(got))
+		}
+		if len(got) > 0 && &got[0] != &originalEffective[0] {
+			t.Fatalf("routing render mutated Effective slice")
+		}
+		for i := range originalEffective {
+			if got[i] != originalEffective[i] {
+				t.Fatalf("routing render mutated Effective[%d]: %q -> %q", i, originalEffective[i], got[i])
+			}
 		}
 	})
 }
