@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -144,5 +145,40 @@ func TestDoctorRetainsCompleteLastError(t *testing.T) {
 	}
 	if f.Remediation == "" {
 		t.Errorf("pending finding lost remediation")
+	}
+}
+
+// TestDoctorReportsStateLoadFailure proves the refactored Doctor surfaces a
+// state-unreadable Error finding when the shared snapshot's state load failed.
+// This is a regression guard: the old doctor.Run() emitted this finding and the
+// preloaded refactor must preserve it.
+func TestDoctorReportsStateLoadFailure(t *testing.T) {
+	d, c := doctorSnapshotFixture(t)
+	// Make the shared state load fail with a secret-bearing error to prove the
+	// finding uses a fixed literal message, not the raw error.
+	d.stateErr = errors.New("Bearer CANARY-STATE-SECRET")
+
+	report := c.Doctor(context.Background(), false)
+
+	var f doctor.Finding
+	for _, finding := range report.Findings {
+		if finding.Code == "state-unreadable" {
+			f = finding
+		}
+	}
+	if f.Code == "" {
+		t.Fatalf("doctor did not surface a state-unreadable finding: %+v", report.Findings)
+	}
+	if f.Severity != doctor.Error {
+		t.Errorf("state-unreadable severity=%q, want error", f.Severity)
+	}
+	if strings.Contains(f.Message, "CANARY") {
+		t.Errorf("state-unreadable message leaked the raw error: %q", f.Message)
+	}
+	if !strings.Contains(f.Message, "could not read state file") {
+		t.Errorf("state-unreadable message lacks fixed literal: %q", f.Message)
+	}
+	if !strings.Contains(f.Remediation, "check state.json format and permissions") {
+		t.Errorf("state-unreadable remediation=%q, want state.json guidance", f.Remediation)
 	}
 }

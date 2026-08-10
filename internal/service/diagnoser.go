@@ -162,7 +162,22 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	deps.QuotaProbes = probes
 	deps.ReconcilePending = reconcilePending
 
-	return doctor.Run(ctx, deps)
+	report := doctor.Run(ctx, deps)
+
+	// Surface a state-unreadable finding from the snapshot's captured state load
+	// error — doctor must report this even though the preloaded observed state is
+	// a zero value on failure. The message is a fixed literal (never the raw
+	// error) to avoid leaking secret-bearing detail from a hand-edited state file.
+	if snapshot.StateError() != nil {
+		report.Findings = append([]doctor.Finding{{
+			Code:        "state-unreadable",
+			Message:     "could not read state file",
+			Remediation: "check state.json format and permissions",
+			Severity:    doctor.Error,
+		}}, report.Findings...)
+	}
+
+	return report
 }
 
 // preloadedPolicyInspector surfaces a policy-schema finding from the snapshot's

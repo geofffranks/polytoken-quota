@@ -57,6 +57,9 @@ type DiagnosticSnapshot struct {
 	// resolveErr is the target resolution error (nil on success). It lets the
 	// doctor surface a configuration finding without re-resolving targets.
 	resolveErr error
+	// stateErr is the state load error (nil on success). It lets the doctor
+	// surface a state-unreadable finding without re-loading state.
+	stateErr error
 }
 
 // BuildDiagnosticSnapshot performs the only shared reads for a diagnostic
@@ -82,6 +85,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	observed, err := c.State.LoadState()
 	if err != nil {
 		snapshot.fatalError = "load state failed"
+		snapshot.stateErr = err
 		return snapshot
 	}
 	snapshot.observed = observed
@@ -204,4 +208,11 @@ func (s DiagnosticSnapshot) PolicyError() error {
 // finding without re-resolving targets.
 func (s DiagnosticSnapshot) ResolveError() error {
 	return s.resolveErr
+}
+
+// StateError returns the state load error (nil on success) captured once
+// during snapshot construction, so the doctor can surface a state-unreadable
+// finding without re-loading state.
+func (s DiagnosticSnapshot) StateError() error {
+	return s.stateErr
 }
