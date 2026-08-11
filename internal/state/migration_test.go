@@ -119,7 +119,7 @@ func TestLoadMissingReturnsFreshV2(t *testing.T) {
 func TestLoadRejectsFutureSchema(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "state.json")
-	for _, schema := range []int{4, 99} {
+	for _, schema := range []int{5, 99} {
 		writeFile(t, p, `{"Schema": `+strconv.Itoa(schema)+`, "Providers": {}, "Targets": {}}`)
 		st := Store{Path: p, Now: time.Now, RecoveredRetention: 24 * time.Hour}
 		if _, err := st.Load(); err == nil {
@@ -137,7 +137,7 @@ func TestStateV2ToV3CreditsMigrationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if migrated.Schema != 3 || migrated.Providers["codex"].ResetCredits.LastSuccess != nil || migrated.Providers["codex"].ResetCredits.LatestAttempt != nil || migrated.Providers["codex"].ResetCredits.UsageSummary != nil {
+	if migrated.Schema != CurrentSchema || migrated.Providers["codex"].ResetCredits.LastSuccess != nil || migrated.Providers["codex"].ResetCredits.LatestAttempt != nil || migrated.Providers["codex"].ResetCredits.UsageSummary != nil {
 		t.Fatalf("v2 migration mismatch: %+v", migrated.Providers["codex"])
 	}
 	future := now.Add(24 * time.Hour)
@@ -157,10 +157,10 @@ func TestStateV2ToV3CreditsMigrationRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := loaded.Providers["codex"].ResetCredits
-	if loaded.Schema != 3 || got.LastSuccess == nil || got.LastSuccess.ServerAvailableCount != 2 || len(got.LastSuccess.AvailableExpiries) != 2 || got.LastSuccess.AvailableExpiries[1] != nil || got.UsageSummary == nil || *got.UsageSummary.Credits.Balance != balance {
+	if loaded.Schema != CurrentSchema || got.LastSuccess == nil || got.LastSuccess.ServerAvailableCount != 2 || len(got.LastSuccess.AvailableExpiries) != 2 || got.LastSuccess.AvailableExpiries[1] != nil || got.UsageSummary == nil || *got.UsageSummary.Credits.Balance != balance {
 		t.Fatalf("v3 round trip lost credit state: schema=%d credits=%+v", loaded.Schema, got)
 	}
-	writeFile(t, p, `{"Schema":4,"Providers":{},"Targets":{}}`)
+	writeFile(t, p, `{"Schema":5,"Providers":{},"Targets":{}}`)
 	if _, err := st.Load(); err == nil {
 		t.Fatal("newer schema must be rejected; downgrade is unsupported")
 	}

@@ -48,6 +48,7 @@ type Dependencies struct {
 	Mutator         Mutator
 	Diagnoser       service.Diagnoser
 	SnapshotBuilder service.SnapshotBuilder
+	HistoryQuerier  service.HistoryQuerier
 	Environment     func() map[string]string
 }
 
@@ -121,6 +122,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runRouting(ctx, args[1:], deps, stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, args[1:], deps, stdout, stderr)
+	case "history":
+		return runHistory(args[1:], deps, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		usage(stderr)
@@ -391,5 +394,5 @@ func parseBoolFlags(args []string, allowed ...string) (present, ok bool) {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
-	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor")
+	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history")
 }

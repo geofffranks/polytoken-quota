@@ -190,8 +190,30 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
 | `doctor [--json]` | Run configuration, quota, journal, and persisted-error diagnostics. |
+| `history [--limit N] [--revision N] [--json]` | Show recent reconcile change history. `--limit` (1–100, default 20) lists newest summaries; `--revision` shows full detail for one revision; `--json` emits deterministic JSON. |
 
 Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
+
+## Reconcile history
+
+`polytoken-quota` retains up to the newest 100 reconcile transactions that proved at least one managed-field byte change, subject to a 4 MiB aggregate history ceiling. History is persisted inside `state.json` and committed atomically with the accepted revision and target outcomes.
+
+**Qualification:** Only reconciles where at least one target has a proven old/new managed-file byte difference consume retention. Dry runs, rejected/stale events, converged equal-byte plans, and failures before revision acceptance are excluded.
+
+**Triggers:** Each history record captures the typed trigger that initiated the reconcile — `init`, `hook`, `reconcile`, `routing-disable`, `routing-enable`, `routing-reset`, `quota-check`, `set`, or `clear` — with kind-relevant sanitized evidence (event type, provider alias, mapping ID, patch values).
+
+**Tiers:** Full-tier records retain shared provider modes/reasons, ranking, desired/effective chains, and changed managed-field edits per target. Aggregate-tier records (used when targets exceed 64 or the record exceeds 256 KiB) retain authoritative counts and compact target entries (ID, outcome, bounded pending detail) with explicit truncation indicators.
+
+**Privacy:** History never stores credentials, account names, auth values, raw errors, complete files, staging roots, absolute paths, or process information. All identifiers and free text are sanitized and bounded.
+
+```sh
+polytoken-quota history                    # newest 20 summaries
+polytoken-quota history --limit 50         # newest 50 summaries
+polytoken-quota history --revision 42      # full detail for revision 42
+polytoken-quota history --json             # deterministic JSON summary
+```
+
+An empty history succeeds with `No reconcile changes recorded.` A revision absent from retained history exits `1`.
 
 ## Quota polling and routing
 

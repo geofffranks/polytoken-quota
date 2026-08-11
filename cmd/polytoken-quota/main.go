@@ -280,10 +280,15 @@ func main() {
 
 	coord := newCoordinator(cfg)
 
+	// History reader uses a separate read-only store instance with the same
+	// state path. It loads state exactly once per invocation.
+	historyReader := service.NewHistoryReader(service.StoreState{Store: state.Store{Path: cfg.StatePath}}, nil)
+
 	code := cli.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.Dependencies{
 		Mutator:         coord,
 		Diagnoser:       coord,
 		SnapshotBuilder: coord,
+		HistoryQuerier:  historyReader,
 	})
 	os.Exit(code)
 }

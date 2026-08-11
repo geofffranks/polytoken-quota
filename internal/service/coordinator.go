@@ -265,7 +265,8 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 		return Outcome{Accepted: false, Error: err}
 	}
 	c.step("load-sources")
-	if _, err := c.Targets.ResolveTargets(desired); err != nil {
+	initTargets, err := c.Targets.ResolveTargets(desired)
+	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
 	var published policy.PublicationResult
@@ -287,6 +288,7 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	}
 	outcomes := c.reconcileAll(ctx, desired, observed, next, true)
 	next = c.recordTargetOutcomes(next, outcomes)
+	c.recordHistoryIfQualified(&next, txInit, in, outcomes, initTargets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
@@ -324,6 +326,7 @@ func (c *Coordinator) transactEvent(ctx context.Context, recovered state.State, 
 	next.Revision = observed.Revision + 1
 	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
 	next = c.recordTargetOutcomes(next, outcomes)
+	c.recordHistoryIfQualified(&next, txEvent, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
@@ -357,6 +360,7 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	next.Revision = observed.Revision + 1
 	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
 	next = c.recordTargetOutcomes(next, outcomes)
+	c.recordHistoryIfQualified(&next, txReconcile, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
@@ -421,6 +425,7 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
+	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
@@ -466,6 +471,7 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
+	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
@@ -532,6 +538,16 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		}
 		return out
 	}
+	// Compute hash-based change qualification from the staged candidate before
+	// validation/publish. This is the preparation data used by history recording.
+	stagedDir := candidate.PublishDir
+	if stagedDir == "" {
+		stagedDir = candidate.ConfigDir
+	}
+	var prep *PrepareResult
+	if p, err := BuildPrepareResult(id, plan, rt.Resolved.CanonicalRoot, stagedDir); err == nil {
+		prep = &p
+	}
 	// The Validator adapter runs validation against a no-cleanup copy of the
 	// candidate so the staged files survive into publish (applyOne renames the
 	// temp files to their live paths). The Coordinator owns the candidate's
@@ -554,6 +570,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		if verbose {
 			outcome.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 		}
+		outcome.Prepare = prep
 		return outcome
 	}
 	if publish {
@@ -565,6 +582,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 			if verbose {
 				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 			}
+			out.Prepare = prep
 			return out
 		}
 		// ApplyUnderLock: the Coordinator already holds the transaction lock;
@@ -575,6 +593,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 			if verbose {
 				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 			}
+			out.Prepare = prep
 			return out
 		}
 	}
@@ -582,6 +601,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	if verbose {
 		out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 	}
+	out.Prepare = prep
 	return out
 }
 

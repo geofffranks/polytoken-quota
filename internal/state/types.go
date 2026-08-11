@@ -15,10 +15,10 @@ import (
 )
 
 // CurrentSchema is the on-disk state schema version this build reads and writes.
-// Load accepts older known schemas (0/1/2) by migrating them in memory to
+// Load accepts older known schemas (0 through 3) by migrating them in memory to
 // CurrentSchema and rejects any newer, unknown schema by failing closed. Save
 // always persists CurrentSchema.
-const CurrentSchema = 3
+const CurrentSchema = 4
 
 // Mode is the reconciler-internal effective operating mode derived from a
 // provider's independent quota and availability axes. It is never persisted to
@@ -168,6 +168,10 @@ type State struct {
 	// computation/observation.
 	RoutingHistory *RoutingHistory
 	UsageHistory   *UsageHistory
+
+	// ReconcileHistory is the additive schema-v4 bounded record of qualifying
+	// reconciles, newest revision first.
+	ReconcileHistory ReconcileHistory
 }
 
 // RoutingHistory records the last good global provider ranking computed by the
