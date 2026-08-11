@@ -69,6 +69,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 			outcomes = []TargetOutcome{pending}
 		} else {
 			outcomes = c.processTargets(ctx, desired, observed, next, targets, true)
+			c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
 		}
 		next = c.recordTargetOutcomes(next, outcomes)
 	}

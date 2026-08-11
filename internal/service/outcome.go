@@ -19,6 +19,10 @@ type TargetOutcome struct {
 	// Trace carries the verbose decision data (provider modes, ranking, chain
 	// survivors, edits). It is populated only when the caller requests --verbose.
 	Trace *ReconcileTrace
+	// Prepare carries the hash-based preparation result when staging succeeded.
+	// It is the change-qualification data used by history recording. It is nil
+	// when staging was not reached or the candidate was cleaned up.
+	Prepare *PrepareResult
 }
 
 // Outcome is the result of a mutation operation. Accepted is false when the
