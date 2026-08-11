@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/geofffranks/polytoken-quota/internal/service"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // TestRoutingBareDispatch verifies routing (effective chains) dispatches and
@@ -338,6 +339,51 @@ func TestCheckJSON(t *testing.T) {
 	}
 	if !parsed.Accepted || parsed.Revision != 5 || !parsed.Problem {
 		t.Fatalf("unexpected JSON: %+v", parsed)
+	}
+}
+
+func TestCheckPrintsProviderAttemptStatuses(t *testing.T) {
+	spy := newDepsSpy()
+	spy.QuotaCheckSet = true
+	spy.QuotaCheckOutcome = service.Outcome{
+		Accepted: true,
+		Revision: 5,
+		ProviderAttempts: []service.QuotaAttemptDiagnostic{
+			{MappingID: "codex", Status: "fresh"},
+			{MappingID: "zai", Status: "failed", Error: "request timed out"},
+		},
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"check"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitOK {
+		t.Fatalf("exit=%d want %d", code, ExitOK)
+	}
+	for _, want := range []string{"codex", "fresh", "zai", "failed", "request timed out"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout.String())
+		}
+	}
+}
+
+func TestCheckQuietSuppressesAllOutput(t *testing.T) {
+	spy := newDepsSpy()
+	spy.QuotaCheckSet = true
+	spy.QuotaCheckOutcome = service.Outcome{
+		Accepted: true,
+		Revision: 5,
+		Problem:  true,
+		Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+			Stage: "config_validate", Summary: "invalid model", Remediation: "inspect config",
+		}}},
+		ProviderAttempts: []service.QuotaAttemptDiagnostic{{MappingID: "zai", Status: "failed", Error: "request timed out"}},
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"check", "--quiet"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitPending {
+		t.Fatalf("exit=%d want %d", code, ExitPending)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("quiet check wrote output: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

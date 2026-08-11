@@ -275,6 +275,27 @@ func writeMutationText(w io.Writer, o service.Outcome, label string, s styler) {
 		return
 	}
 	fmt.Fprintf(w, "%s: %s revision=%d\n", label, s.green("accepted"), o.Revision)
+	if label != "check" || len(o.ProviderAttempts) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	rows := [][]tableCell{{
+		{text: "mapping", style: s.dim},
+		{text: "status", style: s.dim},
+		{text: "error", style: s.dim},
+	}}
+	for _, attempt := range o.ProviderAttempts {
+		statusStyle := s.green
+		if attempt.Status != "fresh" && attempt.Status != "partial" {
+			statusStyle = s.red
+		}
+		rows = append(rows, []tableCell{
+			{text: attempt.MappingID},
+			{text: attempt.Status, style: statusStyle},
+			{text: attempt.Error},
+		})
+	}
+	writeTable(w, rows)
 }
 
 // formatWindow renders a sanitized window summary (shared with old code).
