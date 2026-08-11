@@ -177,10 +177,10 @@ func (e strErr) Error() string { return string(e) }
 // Load reads and decodes the state file. A missing file returns a fresh, empty
 // state (Schema CurrentSchema) with initialized maps and no error.
 //
-// Schema handling is additive and backward-compatible: schemas 0, 1, and 2 are
+// Schema handling is additive and backward-compatible: schemas 0 through 3 are
 // legacy documents and are migrated in memory to CurrentSchema (new additive
-// fields default to nil/zero); schema CurrentSchema is
-// loaded as-is. Any newer, unknown schema fails closed — Load returns an error
+// fields default to nil/zero); schema CurrentSchema is loaded as-is. Any newer,
+// unknown schema fails closed — Load returns an error
 // rather than silently accepting a format it does not know. Nil maps from a
 // sparse file are normalized to empty maps so callers can assign without
 // panicking. Migration is in memory only; the file is rewritten to CurrentSchema
@@ -197,12 +197,15 @@ func (st Store) Load() (State, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return State{}, fmt.Errorf("state: parse %s: %w", st.Path, err)
 	}
-	if s.Schema > CurrentSchema {
+	if s.Schema < 0 || s.Schema > CurrentSchema {
 		return State{}, fmt.Errorf("state: unsupported schema %d in %s (current %d)", s.Schema, st.Path, CurrentSchema)
 	}
-	// Legacy schemas 0/1/2 or current: normalize to the current schema. The
-	// additive credit fields are absent in older documents and decode nil/zero.
+	// Legacy schemas 0 through 3 or current: normalize to the current schema. The
+	// additive history fields are absent in older documents and decode empty.
 	s.Schema = CurrentSchema
+	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
+		return State{}, fmt.Errorf("state: validate history in %s: %w", st.Path, err)
+	}
 	if s.Providers == nil {
 		s.Providers = map[string]ProviderState{}
 	}
@@ -226,6 +229,11 @@ func (st Store) Save(s State) error {
 	s = PruneUsageHistory(s, st.now())
 	s = sanitizeSnapshots(s)
 	s = sanitizeDiagnostics(s)
+	s.ReconcileHistory = sanitizeHistory(s.ReconcileHistory)
+	s.ReconcileHistory = boundHistory(s.ReconcileHistory)
+	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
+		return fmt.Errorf("state: validate history: %w", err)
+	}
 	s.Schema = CurrentSchema
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
