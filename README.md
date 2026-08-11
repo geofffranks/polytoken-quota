@@ -79,7 +79,7 @@ The file is versioned YAML and is created by `polytoken-quota init`. It has four
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
 - `operational` controls validation timeout, lock wait, recovered-error retention, and backup count. If omitted, defaults are 30s, 10s, 168h, and 5 backups.
 
-Quota polling and routing use the same `desired.yaml` file. Add a `quota` block under each participating `providers.<id>` mapping, then enable routing with the top-level `routing.enabled` flag. A mapping without `quota` remains outside quota polling and routing.
+Quota polling and managed routing use the same `desired.yaml` file. Add a `quota` block under each quota-participating `providers.<id>` mapping, then enable quota-based reordering with the top-level `routing.enabled` flag. The `status` command shows only mappings with a `quota` block. Mappings without a `quota` block remain managed routing participants: they keep their configured chain positions, are not quota-ranked, and still honor explicit disable or unavailable state.
 
 A complete minimal shape is:
 
@@ -181,11 +181,11 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | Command | Description |
 |---------|-------------|
 | `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
-| `status [--json]` | Show provider quota, availability, mode, reason, usage, reset timing, and freshness. |
+| `status [--json]` | Show quota, availability, mode, reason, usage, reset timing, and freshness for mappings with a `quota` block. |
 | `check [--provider <id>] [--reconcile] [--json]` | Poll quota once; optionally filter a mapping, reconcile after saving, or emit JSON. |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
-| `routing [--json]` | Show effective routing chains for all targets and routes. |
-| `routing explain [--json]` | Show complete routing explanation: ranks, reasons, desired and effective chains. |
+| `routing [--json]` | Show effective routing chains for every managed route, with its registered target and concrete source. |
+| `routing explain [--json]` | Show complete routing explanation: ranks, reasons, target, source, and desired and effective chains. |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |

@@ -117,7 +117,10 @@ type StatusViewReport struct {
 
 func projectProviders(desired policy.Desired, observed state.State, asOf time.Time) ([]ProviderProjection, []DiagnosticError) {
 	ids := make([]string, 0, len(desired.Providers))
-	for id := range desired.Providers {
+	for id, mapping := range desired.Providers {
+		if mapping.Quota == nil {
+			continue
+		}
 		ids = append(ids, string(id))
 	}
 	sort.Strings(ids)

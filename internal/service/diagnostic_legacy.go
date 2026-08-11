@@ -41,7 +41,10 @@ func projectLegacyQuota(desired policy.Desired, observed state.State, asOf time.
 		configured[string(id)] = append([]string(nil), mapping.CodexBarProviders...)
 		freshness[string(id)] = mapping.Quota.FreshnessTTL
 	}
-	names := aggregateProviderNames(configured, observed.Providers)
+	names := make([]string, 0, len(configured))
+	for name := range configured {
+		names = append(names, name)
+	}
 	sort.Strings(names)
 	out := make([]QuotaSnapshotReport, 0, len(names))
 	problem := false
