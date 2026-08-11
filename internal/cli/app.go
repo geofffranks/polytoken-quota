@@ -197,18 +197,28 @@ func runStatus(ctx context.Context, args []string, deps Dependencies, stdout, st
 
 // --- check (promoted from quota check) ---
 
-// runCheck handles check [--provider <id>] [--reconcile] [--json].
+// runCheck handles check [--provider <id>] [--reconcile] [--json] [--quiet].
 func runCheck(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
-	provider, jsonOut, reconcile, ok := parseCheckFlags(args)
+	provider, jsonOut, reconcile, quiet, ok := parseCheckFlags(args)
 	if !ok {
+		if quiet {
+			return ExitRejected
+		}
 		emitMutationError(stdout, stderr, "check: invalid arguments", jsonOut)
 		return ExitRejected
 	}
 	if deps.Mutator == nil {
+		if quiet {
+			return ExitRejected
+		}
 		emitMutationError(stdout, stderr, "check: mutator unavailable", jsonOut)
 		return ExitRejected
 	}
 	out := deps.Mutator.QuotaCheck(ctx, provider, reconcile)
+	code := MutationExitCode(out)
+	if quiet {
+		return code
+	}
 	if out.Error != nil && !jsonOut {
 		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
 	}
@@ -219,25 +229,25 @@ func runCheck(ctx context.Context, args []string, deps Dependencies, stdout, std
 		writePendingTargets(out, stderr)
 		writeMutationText(stdout, out, "check", s)
 	}
-	return MutationExitCode(out)
+	return code
 }
 
 // parseCheckFlags parses check arguments. On a parse error ok is false, but the
-// jsonOut/reconcile flags seen so far are preserved so the caller can still
+// jsonOut/reconcile/quiet flags seen so far are preserved so the caller can still
 // decide whether to emit a JSON error envelope (AC.9: every --json invocation
 // writes exactly one JSON object, including rejected outcomes).
-func parseCheckFlags(args []string) (provider string, jsonOut, reconcile, ok bool) {
+func parseCheckFlags(args []string) (provider string, jsonOut, reconcile, quiet, ok bool) {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--provider":
 			if i+1 >= len(args) {
-				return provider, jsonOut, reconcile, false
+				return provider, jsonOut, reconcile, quiet, false
 			}
 			if strings.HasPrefix(args[i+1], "--") {
-				return provider, jsonOut, reconcile, false
+				return provider, jsonOut, reconcile, quiet, false
 			}
 			if strings.TrimSpace(args[i+1]) == "" {
-				return provider, jsonOut, reconcile, false
+				return provider, jsonOut, reconcile, quiet, false
 			}
 			provider = args[i+1]
 			i++
@@ -245,11 +255,13 @@ func parseCheckFlags(args []string) (provider string, jsonOut, reconcile, ok boo
 			jsonOut = true
 		case "--reconcile":
 			reconcile = true
+		case "--quiet":
+			quiet = true
 		default:
-			return provider, jsonOut, reconcile, false
+			return provider, jsonOut, reconcile, quiet, false
 		}
 	}
-	return provider, jsonOut, reconcile, true
+	return provider, jsonOut, reconcile, quiet, true
 }
 
 func emitMutationError(stdout, stderr io.Writer, msg string, jsonOut bool) {

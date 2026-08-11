@@ -182,7 +182,7 @@ z.ai allowance. The window resets at the first of each month (UTC).
 |---------|-------------|
 | `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
 | `status [--json]` | Show quota, availability, mode, reason, usage, reset timing, and freshness for mappings with a `quota` block. |
-| `check [--provider <id>] [--reconcile] [--json]` | Poll quota once; optionally filter a mapping, reconcile after saving, or emit JSON. |
+| `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
 | `routing [--json]` | Show effective routing chains for every managed route, with its registered target and concrete source. |
 | `routing explain [--json]` | Show complete routing explanation: ranks, reasons, target, source, and desired and effective chains. |
@@ -203,7 +203,7 @@ polytoken-quota status
 polytoken-quota routing explain
 ```
 
-Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only.
+Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only. In interactive use `check` prints each provider's polling status; pass `--quiet` in cron, launchd, or systemd timers to suppress all output (exit codes still reflect success or failure).
 
 When routing is enabled, a successful fresh snapshot can make a provider eligible; stale, unavailable, unknown, partial-without-usable-data, and missing alias observations fail closed. Peak windows are expressed once, for example Monday–Friday 14:00–18:00 in `Asia/Singapore`; all other times are off-peak for ranking. Provider failures preserve the last good snapshot and are reported by `status` and `doctor`.
 
@@ -225,7 +225,7 @@ Example launchd user agent (adjust the binary and utility-home paths):
 <plist version="1.0"><dict>
   <key>Label</key><string>com.example.polytoken-quota</string>
   <key>ProgramArguments</key><array>
-    <string>/usr/local/bin/polytoken-quota</string><string>check</string><string>--reconcile</string>
+    <string>/usr/local/bin/polytoken-quota</string><string>check</string><string>--reconcile</string><string>--quiet</string>
   </array>
   <key>StartInterval</key><integer>1800</integer>
 </dict></plist>
@@ -237,7 +237,7 @@ Example systemd user timer:
 # ~/.config/systemd/user/polytoken-quota.service
 [Service]
 Type=oneshot
-ExecStart=%h/go/bin/polytoken-quota check --reconcile
+ExecStart=%h/go/bin/polytoken-quota check --reconcile --quiet
 
 # ~/.config/systemd/user/polytoken-quota.timer
 [Timer]
@@ -249,7 +249,7 @@ Persistent=true
 Example cron entry (run `crontab -e`):
 
 ```cron
-*/30 * * * * /usr/local/bin/polytoken-quota check --reconcile
+*/30 * * * * /usr/local/bin/polytoken-quota check --reconcile --quiet
 ```
 
 Changing quota policy or enabling routing may change the choices seen by existing Polytoken sessions. The utility never controls those sessions. Quota polling never persists credentials, raw provider responses, auth headers, or account IDs. Only bounded, sanitized quota observations and error summaries are stored in the utility state.
