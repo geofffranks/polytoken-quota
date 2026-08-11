@@ -41,18 +41,15 @@ func runRouting(ctx context.Context, args []string, deps Dependencies, stdout, s
 func runRoutingBare(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
-		fmt.Fprintln(stderr, "routing: invalid arguments")
-		return ExitRejected
+		return routingFailure(hasRoutingJSONFlag(args), false, "routing: invalid arguments", stdout, stderr)
 	}
 	if deps.SnapshotBuilder == nil {
-		fmt.Fprintln(stderr, "routing: snapshot builder unavailable")
-		return ExitRejected
+		return routingFailure(jsonOut, false, "routing: snapshot builder unavailable", stdout, stderr)
 	}
 	snapshot := deps.SnapshotBuilder.BuildDiagnosticSnapshot(ctx)
 	report := snapshot.RoutingView()
 	if report.Error != "" {
-		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(report.Error)))
-		return ExitRejected
+		return routingFailure(jsonOut, false, report.Error, stdout, stderr)
 	}
 	s := newStyler(stdout, jsonOut)
 	if jsonOut {
@@ -67,18 +64,15 @@ func runRoutingBare(ctx context.Context, args []string, deps Dependencies, stdou
 func runRoutingExplain(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
-		fmt.Fprintln(stderr, "routing explain: invalid arguments")
-		return ExitRejected
+		return routingFailure(hasRoutingJSONFlag(args), true, "routing explain: invalid arguments", stdout, stderr)
 	}
 	if deps.SnapshotBuilder == nil {
-		fmt.Fprintln(stderr, "routing explain: snapshot builder unavailable")
-		return ExitRejected
+		return routingFailure(jsonOut, true, "routing explain: snapshot builder unavailable", stdout, stderr)
 	}
 	snapshot := deps.SnapshotBuilder.BuildDiagnosticSnapshot(ctx)
 	report := snapshot.RoutingExplainView()
 	if report.Error != "" {
-		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(report.Error)))
-		return ExitRejected
+		return routingFailure(jsonOut, true, report.Error, stdout, stderr)
 	}
 	s := newStyler(stdout, jsonOut)
 	if jsonOut {
@@ -151,6 +145,29 @@ func runRoutingReset(ctx context.Context, args []string, deps Dependencies, stdo
 
 // parseRoutingToggleFlags parses a single positional provider argument. No
 // flags are accepted; exactly one non-empty, non-flag-like provider is required.
+func hasRoutingJSONFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
+}
+
+func routingFailure(jsonOut, explain bool, message string, stdout, stderr io.Writer) int {
+	safe := validate.DefaultSanitize([]byte(message))
+	if jsonOut {
+		if explain {
+			encodeJSON(stdout, routingExplainEnvelope(service.RoutingExplainReport{Error: safe}))
+		} else {
+			encodeJSON(stdout, routingEnvelope(service.RoutingReport{Error: safe}))
+		}
+	} else {
+		fmt.Fprintln(stderr, safe)
+	}
+	return ExitRejected
+}
+
 func parseRoutingToggleFlags(args []string) (string, bool) {
 	if len(args) != 1 {
 		return "", false

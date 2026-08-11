@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -172,6 +173,21 @@ const codexPrecedenceBody = `{
   "individual_limit": { "limit": 222, "used": 22, "remaining_percent": 80, "resets_at": 1800000000 }
 }`
 
+type trackingReadCloser struct {
+	io.Reader
+	closes int
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closes++
+	return nil
+}
+
+func trackingResponse(status int, body string) (*http.Response, *trackingReadCloser) {
+	tracked := &trackingReadCloser{Reader: strings.NewReader(body)}
+	return &http.Response{StatusCode: status, Body: tracked, Header: make(http.Header)}, tracked
+}
+
 type sequenceDoer struct {
 	responses []*http.Response
 	calls     []*http.Request
@@ -203,6 +219,57 @@ func codexSourceWithEvidence(t *testing.T, doer HTTPDoer, usage, reset Evidence)
 		Evidence:    reg,
 		Now:         func() time.Time { return codexTestNow },
 	}
+}
+
+func TestCodexResponseBodiesClosedExactlyOnce(t *testing.T) {
+	t.Run("usage", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{name: "success", status: http.StatusOK, body: codexMinimalBody},
+			{name: "error status", status: http.StatusServiceUnavailable, body: "private status body"},
+			{name: "decode failure", status: http.StatusOK, body: `{not-json`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				response, body := trackingResponse(tc.status, tc.body)
+				src := freshCodex(t, &sequenceDoer{responses: []*http.Response{response}})
+				_, _ = src.Fetch(context.Background())
+				if body.closes != 1 {
+					t.Fatalf("usage body closes=%d want 1", body.closes)
+				}
+			})
+		}
+	})
+
+	t.Run("reset credit", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			status int
+			body   string
+		}{
+			{name: "success", status: http.StatusOK, body: `{"available_count":0,"credits":[]}`},
+			{name: "error status", status: http.StatusServiceUnavailable, body: "private reset status body"},
+			{name: "decode failure", status: http.StatusOK, body: `{not-json`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				usageResponse, usageBody := trackingResponse(http.StatusOK, codexMinimalBody)
+				resetResponse, resetBody := trackingResponse(tc.status, tc.body)
+				doer := &sequenceDoer{responses: []*http.Response{usageResponse, resetResponse}}
+				src := codexSourceWithEvidence(t, doer, CodexUsageEvidence(codexTestNow), CodexResetCreditsEvidence(codexTestNow))
+				_, err := src.Fetch(context.Background())
+				if err != nil {
+					t.Fatalf("usage failed during reset lifecycle test: %v", err)
+				}
+				if usageBody.closes != 1 || resetBody.closes != 1 {
+					t.Fatalf("usage/reset body closes=%d/%d want 1/1", usageBody.closes, resetBody.closes)
+				}
+			})
+		}
+	})
 }
 
 func TestResetCreditEvidenceFailureDoesNotBlockUsage(t *testing.T) {

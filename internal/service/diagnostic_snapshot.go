@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"sort"
 	"time"
 
@@ -51,9 +53,10 @@ type DiagnosticSnapshot struct {
 	// desired carries the raw desired policy loaded exactly once, so downstream
 	// consumers can build quota probes without a duplicate load.
 	desired policy.Desired
-	// policyErr is the policy load error (nil on success). It lets the doctor
-	// surface a configuration finding without re-loading policy.
-	policyErr error
+	// policyErr and policyMissing classify the single policy load so doctor can
+	// surface a configuration finding without another filesystem probe.
+	policyErr     error
+	policyMissing bool
 	// resolveErr is the target resolution error (nil on success). It lets the
 	// doctor surface a configuration finding without re-resolving targets.
 	resolveErr error
@@ -75,6 +78,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	if err != nil {
 		snapshot.fatalError = "load policy failed"
 		snapshot.policyErr = err
+		snapshot.policyMissing = errors.Is(err, fs.ErrNotExist)
 		return snapshot
 	}
 	snapshot.desired = desired

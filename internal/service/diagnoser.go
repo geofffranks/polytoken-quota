@@ -146,7 +146,7 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	// Configuration findings come from the preloaded snapshot's captured load
 	// errors — no duplicate LoadPolicy or ResolveTargets. Publication uses the
 	// JournalPath directly.
-	deps.Policy = &preloadedPolicyInspector{snapshot: snapshot, loader: c.Policy}
+	deps.Policy = &preloadedPolicyInspector{snapshot: snapshot}
 	deps.Targets = &preloadedTargetInspector{snapshot: snapshot}
 	deps.Publisher = PublishDoctorInspector{JournalPath: c.JournalPath}
 
@@ -166,6 +166,7 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	deps.ReconcilePending = reconcilePending
 
 	report := doctor.Run(ctx, deps)
+	report.AsOf = asOf
 
 	// Surface a state-unreadable finding from the snapshot's captured state load
 	// error — doctor must report this even though the preloaded observed state is
@@ -189,14 +190,13 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 // validated the schema).
 type preloadedPolicyInspector struct {
 	snapshot DiagnosticSnapshot
-	loader   PolicyLoader
 }
 
 func (p *preloadedPolicyInspector) Findings(context.Context) []doctor.Finding {
 	if p.snapshot.PolicyError() == nil {
 		return nil
 	}
-	if p.loader != nil && !p.loader.DesiredExists() {
+	if p.snapshot.policyMissing {
 		return []doctor.Finding{{
 			Code:        "policy-schema",
 			Message:     "desired.yaml does not exist",

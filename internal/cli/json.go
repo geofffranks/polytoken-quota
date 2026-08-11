@@ -83,10 +83,11 @@ type routingJSON struct {
 	RoutingEnabled bool            `json:"routing_enabled"`
 	Routes         []routeJSON     `json:"routes"`
 	Errors         []diagErrorJSON `json:"errors"`
+	Error          string          `json:"error,omitempty"`
 }
 
 func routingEnvelope(r service.RoutingReport) routingJSON {
-	out := routingJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled}
+	out := routingJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled, Error: r.Error}
 	for _, route := range r.Routes {
 		rj := routeJSON{TargetID: route.TargetID, Name: route.Name, Source: route.SourcePath, Effective: route.Effective}
 		if rj.Effective == nil {
@@ -125,10 +126,11 @@ type routingExplainJSON struct {
 	Ranks          []rankJSON      `json:"ranks"`
 	Routes         []routeJSON     `json:"routes"`
 	Errors         []diagErrorJSON `json:"errors"`
+	Error          string          `json:"error,omitempty"`
 }
 
 func routingExplainEnvelope(r service.RoutingExplainReport) routingExplainJSON {
-	out := routingExplainJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled}
+	out := routingExplainJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled, Error: r.Error}
 	for _, rank := range r.Ranks {
 		out.Ranks = append(out.Ranks, rankJSON{
 			MappingID: rank.MappingID, Rank: rank.Rank, OffPeak: rank.OffPeak,
@@ -188,8 +190,8 @@ type recoveredJSON struct {
 	Summary  string `json:"summary"`
 }
 
-func doctorEnvelope(r doctor.Report, asOf time.Time) doctorJSON {
-	out := doctorJSON{AsOf: asOf, Actionable: r.Actionable()}
+func doctorEnvelope(r doctor.Report) doctorJSON {
+	out := doctorJSON{AsOf: r.AsOf, Actionable: r.Actionable()}
 	for _, f := range r.Findings {
 		out.Findings = append(out.Findings, findingJSON{
 			Code: f.Code, Message: f.Message, TargetID: f.TargetID,

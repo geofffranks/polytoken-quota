@@ -20,23 +20,28 @@ import (
 var diagnosticAsOf = time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
 
 type diagnosticDeps struct {
-	desired     policy.Desired
-	observed    state.State
-	targets     []RegisteredTarget
-	policyErr   error
-	stateErr    error
-	targetErr   error
-	policyLoads int
-	stateLoads  int
-	targetLoads int
-	clockReads  int
+	desired           policy.Desired
+	observed          state.State
+	targets           []RegisteredTarget
+	policyErr         error
+	stateErr          error
+	targetErr         error
+	policyExists      bool
+	policyLoads       int
+	desiredExistCalls int
+	stateLoads        int
+	targetLoads       int
+	clockReads        int
 }
 
 func (d *diagnosticDeps) LoadPolicy() (policy.Desired, error) {
 	d.policyLoads++
 	return d.desired, d.policyErr
 }
-func (*diagnosticDeps) DesiredExists() bool { return true }
+func (d *diagnosticDeps) DesiredExists() bool {
+	d.desiredExistCalls++
+	return d.policyExists
+}
 func (d *diagnosticDeps) LoadState() (state.State, error) {
 	d.stateLoads++
 	return d.observed, d.stateErr
@@ -151,7 +156,7 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &diagnosticDeps{desired: desired, observed: observed, targets: resolved}, root
+	return &diagnosticDeps{desired: desired, observed: observed, targets: resolved, policyExists: true}, root
 }
 
 func TestDiagnosticSnapshotSingleReadSingleClock(t *testing.T) {

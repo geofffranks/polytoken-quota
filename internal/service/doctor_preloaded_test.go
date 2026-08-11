@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -22,15 +23,55 @@ func doctorSnapshotFixture(t *testing.T) (*diagnosticDeps, *Coordinator) {
 	return d, diagnosticCoordinator(d)
 }
 
-// TestDoctorLoadsPolicyStateAndTargetsAtMostOnce proves the Coordinator's Doctor
-// method consumes the preloaded DiagnosticSnapshot rather than independently
-// loading policy/state/targets. It uses the same count-double pattern as
-// TestDiagnosticSnapshotSingleReadSingleClock.
-func TestDoctorLoadsPolicyStateAndTargetsAtMostOnce(t *testing.T) {
-	d, c := doctorSnapshotFixture(t)
-	_ = c.Doctor(context.Background(), false)
-	if d.policyLoads != 1 || d.stateLoads != 1 || d.targetLoads != 1 {
-		t.Fatalf("doctor loads policy/state/targets = %d/%d/%d, want 1/1/1", d.policyLoads, d.stateLoads, d.targetLoads)
+// TestDoctorReadsPolicyExactlyOnce proves Doctor classifies every policy load
+// outcome from the shared snapshot without a follow-up DesiredExists probe.
+func TestDoctorReadsPolicyExactlyOnce(t *testing.T) {
+	cases := []struct {
+		name           string
+		policyErr      error
+		policyExists   bool
+		wantMessage    string
+		forbidMessage  string
+		wantStateLoads int
+		wantTargets    int
+	}{
+		{name: "success", policyExists: true, wantStateLoads: 1, wantTargets: 1},
+		{name: "missing", policyErr: fs.ErrNotExist, wantMessage: "desired.yaml does not exist"},
+		{name: "read error", policyErr: errors.New("permission denied: Bearer CANARY-POLICY-SECRET"), policyExists: true, wantMessage: "desired.yaml failed validation", forbidMessage: "CANARY"},
+		{name: "parse error", policyErr: errors.New("yaml: line 7: invalid schema Bearer CANARY-PARSE-SECRET"), policyExists: true, wantMessage: "desired.yaml failed validation", forbidMessage: "CANARY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, c := doctorSnapshotFixture(t)
+			d.policyErr = tc.policyErr
+			d.policyExists = tc.policyExists
+
+			report := c.Doctor(context.Background(), false)
+
+			if d.policyLoads != 1 || d.desiredExistCalls != 0 {
+				t.Fatalf("policy reads LoadPolicy/DesiredExists = %d/%d, want 1/0", d.policyLoads, d.desiredExistCalls)
+			}
+			if d.stateLoads != tc.wantStateLoads || d.targetLoads != tc.wantTargets {
+				t.Fatalf("state/target loads = %d/%d, want %d/%d", d.stateLoads, d.targetLoads, tc.wantStateLoads, tc.wantTargets)
+			}
+			if !report.AsOf.Equal(diagnosticAsOf) {
+				t.Fatalf("report AsOf=%v want snapshot AsOf=%v", report.AsOf, diagnosticAsOf)
+			}
+			if d.clockReads != 1 {
+				t.Fatalf("clock reads=%d want 1", d.clockReads)
+			}
+			messages := make([]string, 0, len(report.Findings))
+			for _, finding := range report.Findings {
+				messages = append(messages, finding.Message)
+			}
+			joined := strings.Join(messages, "\n")
+			if tc.wantMessage != "" && !strings.Contains(joined, tc.wantMessage) {
+				t.Fatalf("findings missing %q: %+v", tc.wantMessage, report.Findings)
+			}
+			if tc.forbidMessage != "" && strings.Contains(joined, tc.forbidMessage) {
+				t.Fatalf("findings leaked %q: %+v", tc.forbidMessage, report.Findings)
+			}
+		})
 	}
 }
 

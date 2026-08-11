@@ -55,6 +55,67 @@ func TestRoutingBareDispatch(t *testing.T) {
 
 // TestRoutingExplainDispatch verifies routing explain parses, prints, and
 // exits 0; --json emits valid JSON.
+func TestRoutingJSONFailuresEmitOneEnvelope(t *testing.T) {
+	commands := []struct {
+		name      string
+		baseArgs  []string
+		arrayKeys []string
+	}{
+		{name: "bare", baseArgs: []string{"routing"}, arrayKeys: []string{"routes", "errors"}},
+		{name: "explain", baseArgs: []string{"routing", "explain"}, arrayKeys: []string{"ranks", "routes", "errors"}},
+	}
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			cases := []struct {
+				name string
+				args []string
+				deps Dependencies
+			}{
+				{name: "invalid arguments", args: append(append([]string{}, command.baseArgs...), "--json", "--bogus"), deps: newDepsSpy().Dependencies()},
+				{name: "snapshot builder unavailable", args: append(append([]string{}, command.baseArgs...), "--json"), deps: Dependencies{}},
+				{name: "fatal snapshot", args: append(append([]string{}, command.baseArgs...), "--json"), deps: Dependencies{SnapshotBuilder: &service.Coordinator{}}},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					var stdout, stderr bytes.Buffer
+					code := Run(context.Background(), tc.args, strings.NewReader(""), &stdout, &stderr, tc.deps)
+					if code != ExitRejected {
+						t.Fatalf("exit=%d want 1", code)
+					}
+					if stderr.Len() != 0 {
+						t.Fatalf("stderr=%q want empty", stderr.String())
+					}
+					if strings.Contains(stdout.String(), "\x1b[") {
+						t.Fatalf("stdout contains ANSI: %q", stdout.String())
+					}
+					decoder := json.NewDecoder(&stdout)
+					var envelope map[string]any
+					if err := decoder.Decode(&envelope); err != nil {
+						t.Fatalf("invalid JSON object: %v\n%s", err, stdout.String())
+					}
+					var extra any
+					if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+						t.Fatalf("stdout contains more than one JSON object: err=%v extra=%v", err, extra)
+					}
+					errorText, ok := envelope["error"].(string)
+					if !ok || strings.TrimSpace(errorText) == "" {
+						t.Fatalf("missing non-empty error: %v", envelope)
+					}
+					if strings.Contains(errorText, "\x1b[") || strings.Contains(errorText, "CANARY") {
+						t.Fatalf("error not sanitized: %q", errorText)
+					}
+					for _, key := range command.arrayKeys {
+						value, ok := envelope[key].([]any)
+						if !ok || len(value) != 0 {
+							t.Fatalf("%s=%T(%v), want []", key, envelope[key], envelope[key])
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestRoutingExplainDispatch(t *testing.T) {
 	t.Run("text exit 0", func(t *testing.T) {
 		spy := newDepsSpy()

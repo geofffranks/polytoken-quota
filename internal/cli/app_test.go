@@ -583,6 +583,29 @@ func TestRenderersDoNotMutateReports(t *testing.T) {
 	})
 }
 
+func TestDoctorJSONUsesReportAsOf(t *testing.T) {
+	asOf := time.Date(2026, 9, 4, 5, 6, 7, 890123000, time.UTC)
+	spy := newDepsSpy()
+	spy.DoctorReportValue = doctor.Report{AsOf: asOf}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"doctor", "--json"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitOK {
+		t.Fatalf("exit=%d want 0", code)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr=%q want empty", stderr.String())
+	}
+	var envelope struct {
+		AsOf time.Time `json:"as_of"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, stdout.String())
+	}
+	if !envelope.AsOf.Equal(asOf) {
+		t.Fatalf("as_of=%v want report AsOf=%v", envelope.AsOf, asOf)
+	}
+}
+
 // TestDoctorSeverityRenderingAndExit verifies doctor renders a healthy summary
 // when clean, groups/sorts findings by severity, and exits correctly.
 func TestDoctorSeverityRenderingAndExit(t *testing.T) {

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
@@ -355,7 +354,7 @@ func runDoctor(ctx context.Context, args []string, deps Dependencies, stdout, st
 	report := deps.Diagnoser.Doctor(ctx, jsonOut)
 	s := newStyler(stdout, jsonOut)
 	if jsonOut {
-		encodeJSON(stdout, doctorEnvelope(report, time.Now().UTC()))
+		encodeJSON(stdout, doctorEnvelope(report))
 	} else {
 		writeDoctorText(stdout, report, s)
 	}
