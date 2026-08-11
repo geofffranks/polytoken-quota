@@ -75,8 +75,9 @@ Contract tests invoke the real Polytoken binary against complete private staging
   diagnostics and command output. Transient staging is the sole narrowly scoped
   exception and must be private and always deleted.
 - **No daemon / process control.** Never inspect, restart, signal, or otherwise
-  control a live Polytoken daemon/session. `status` must always advise that existing
-  sessions may need a user restart/reload.
+  control a live Polytoken daemon/session. Diagnostics must not imply that this
+  utility inspects or controls live sessions; no unconditional restart/reload
+  advisory is required.
 - **Scoped ownership.** Modify only exact managed fields in explicitly registered
   definition files. Never scan arbitrary workspace roots or adopt new files implicitly.
 - **Validation isolation.** Validate against a complete standalone staging root with
@@ -85,5 +86,5 @@ Contract tests invoke the real Polytoken binary against complete private staging
 ## Commits
 
 Commit after each green task with the plan's imperative message. Never commit red
-tests, the design, or the plan. Work happens on `feat/polytoken-quota-reconciler` in
-its isolated worktree, never on `main`.
+tests, the design, or the plan. Feature and bug work happens on the ticket-linked
+branch in its isolated worktree, never directly on `main`.
