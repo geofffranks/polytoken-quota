@@ -25,7 +25,7 @@ func doctorSnapshotFixture(t *testing.T) (*diagnosticDeps, *Coordinator) {
 
 // TestDoctorReadsPolicyExactlyOnce proves Doctor classifies every policy load
 // outcome from the shared snapshot without a follow-up DesiredExists probe.
-func TestDoctorReadsPolicyExactlyOnce(t *testing.T) {
+func TestDoctorLoadsPolicyStateAndTargetsAtMostOnce(t *testing.T) {
 	cases := []struct {
 		name           string
 		policyErr      error

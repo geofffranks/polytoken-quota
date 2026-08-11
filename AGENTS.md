@@ -18,7 +18,7 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 - **Supported targets (GOOS/GOARCH):** `darwin/arm64`, `darwin/amd64`,
   `linux/amd64`, `linux/arm64`
 - **Polytoken contract binary:** resolved from `PATH` (currently
-  `0.6.1`), overridable via `POLYTOKEN_BINARY`.
+  `0.6.6`), overridable via `POLYTOKEN_BINARY`.
   Publication is gated on passing its complete-root contract tests. Version policy:
   minimum-current — keep the supported binary at the latest stable release.
 - **CodexBar minimum:** `0.44.0` (hook contract).

@@ -40,7 +40,7 @@ import (
 // supportedPolytokenVersion is the version-policy floor (minimum-current: the
 // latest stable release). The version contract is enforced against this value
 // by default; POLYTOKEN_VERSION overrides it for development only.
-const supportedPolytokenVersion = "0.6.1"
+const supportedPolytokenVersion = "0.6.6"
 
 // polytokenBin resolves the contract binary path. POLYTOKEN_CONTRACT_BIN is the
 // explicit opt-in; it defaults to the operator-approved POLYTOKEN_BIN.
