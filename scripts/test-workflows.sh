@@ -297,6 +297,12 @@ assert_contains "$readme" 'Download all five release assets' 'README instructs d
 assert_contains "$readme" 'VERSION' 'README documents the VERSION file'
 assert_contains "$readme" -- '--version' 'README documents --version behavior'
 assert_contains "$readme" 'No release is assumed to exist yet' 'README does not claim a release already exists'
+# test_readme_routing_status_contract: quota-exempt mappings stay managed routing
+# participants but are intentionally absent from quota status; routing text names
+# both ownership target and concrete source.
+assert_contains "$readme" 'status.*only mappings with a `quota` block' 'README documents quota-configured status participation'
+assert_contains "$readme" 'without a `quota` block.*remain.*managed routing' 'README documents quota-exempt managed routing participation'
+assert_contains "$readme" 'routing.*target.*source' 'README documents routing target and source columns'
 assert_contains "$agents" 'go.mod.*sole authority' 'AGENTS documents go.mod as exact Go authority'
 assert_contains "$agents" 'go[[:space:]]+1\.26\.5' 'AGENTS documents the exact Go requirement'
 assert_contains "$agents" 'manually create the first stable' 'AGENTS documents manual first-release bootstrap'

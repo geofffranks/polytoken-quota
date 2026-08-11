@@ -53,6 +53,45 @@ func TestRoutingBareDispatch(t *testing.T) {
 	})
 }
 
+func TestRoutingTextShowsTargetAndSource(t *testing.T) {
+	routes := []service.RouteProjection{
+		{TargetID: "global", Name: "classifier", SourcePath: "config.yaml", Effective: []string{"minime/qwen"}},
+		{TargetID: "global", Name: "Researcher", SourcePath: "subagents/researcher.md", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}},
+	}
+	for name, render := range map[string]func(io.Writer){
+		"bare":    func(w io.Writer) { writeRoutingText(w, service.RoutingReport{Routes: routes}, styler{}) },
+		"explain": func(w io.Writer) { writeRoutingExplainText(w, service.RoutingExplainReport{Routes: routes}, styler{}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var out bytes.Buffer
+			render(&out)
+			text := out.String()
+			if !strings.Contains(text, "target  source") || !strings.Contains(text, "global  config.yaml") || !strings.Contains(text, "global  subagents/researcher.md") {
+				t.Fatalf("routing text does not expose target and source:\n%s", text)
+			}
+		})
+	}
+}
+
+func TestRoutingJSONPreservesPublicSourceContract(t *testing.T) {
+	route := service.RouteProjection{TargetID: "global", Name: "classifier", SourcePath: "config.yaml", Effective: []string{"minime/qwen"}}
+	for name, envelope := range map[string]any{
+		"bare":    routingEnvelope(service.RoutingReport{Routes: []service.RouteProjection{route}}),
+		"explain": routingExplainEnvelope(service.RoutingExplainReport{Routes: []service.RouteProjection{route}}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(raw)
+			if !strings.Contains(text, `"target_id":"global"`) || !strings.Contains(text, `"source":"config.yaml"`) || strings.Contains(text, `"source_path"`) {
+				t.Fatalf("public routing JSON contract changed: %s", text)
+			}
+		})
+	}
+}
+
 // TestRoutingExplainDispatch verifies routing explain parses, prints, and
 // exits 0; --json emits valid JSON.
 func TestRoutingJSONFailuresEmitOneEnvelope(t *testing.T) {

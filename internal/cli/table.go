@@ -1,7 +1,7 @@
 package cli
 
-// Tabwriter text renderers (AC.5–AC.8): aligned, colored output using
-// text/tabwriter with no external table dependency.
+// Text renderers (AC.5–AC.8): aligned, colored output using a small
+// display-width-aware table helper with no external table dependency.
 //
 // Renderers never mutate their input reports: they read and format only. Each
 // renderer takes a styler (from color.go) so the text is colored when the color
@@ -11,14 +11,85 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
+	"github.com/mattn/go-runewidth"
 )
+
+type tableCell struct {
+	text  string
+	style func(string) string
+}
+
+func displayWidth(text string) int {
+	return runewidth.StringWidth(text)
+}
+
+func terminalSafe(text string) string {
+	var safe strings.Builder
+	for _, r := range text {
+		switch r {
+		case '\n':
+			safe.WriteString(`\n`)
+		case '\r':
+			safe.WriteString(`\r`)
+		case '\t':
+			safe.WriteString(`\t`)
+		default:
+			switch {
+			case r < 0x20 || r >= 0x7f && r <= 0x9f:
+				fmt.Fprintf(&safe, `\x%02x`, r)
+			case unicode.Is(unicode.Cf, r) && r != '\u200c' && r != '\u200d':
+				quoted := strconv.QuoteRuneToASCII(r)
+				safe.WriteString(quoted[1 : len(quoted)-1])
+			default:
+				safe.WriteRune(r)
+			}
+		}
+	}
+	return safe.String()
+}
+
+func writeTable(w io.Writer, rows [][]tableCell) {
+	if len(rows) == 0 {
+		return
+	}
+	safeRows := make([][]tableCell, len(rows))
+	for row := range rows {
+		safeRows[row] = append([]tableCell(nil), rows[row]...)
+		for column := range safeRows[row] {
+			safeRows[row][column].text = terminalSafe(safeRows[row][column].text)
+		}
+	}
+	rows = safeRows
+	widths := make([]int, len(rows[0]))
+	for _, row := range rows {
+		for column, cell := range row {
+			if width := displayWidth(cell.text); column < len(widths) && width > widths[column] {
+				widths[column] = width
+			}
+		}
+	}
+	for _, row := range rows {
+		for column, cell := range row {
+			text := cell.text
+			if column < len(row)-1 {
+				text += strings.Repeat(" ", widths[column]-displayWidth(cell.text)+2)
+			}
+			if cell.style != nil {
+				text = cell.style(text)
+			}
+			fmt.Fprint(w, text)
+		}
+		fmt.Fprintln(w)
+	}
+}
 
 // formatRFC3339 renders a time as RFC3339 in UTC, or empty when zero.
 func formatRFC3339(t time.Time) string {
@@ -28,38 +99,37 @@ func formatRFC3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// writeStatusText renders a status report as aligned tab-separated text. It
+// writeStatusText renders a status report as aligned columnar text. It
 // shows only provider quota/availability/mode/reason and quota windows — no
 // routing chains, target tables, or doctor findings.
 func writeStatusText(w io.Writer, r service.StatusReport, s styler) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if r.AsOf.IsZero() {
-		fmt.Fprintf(tw, "%s\n", s.dim("status"))
+		fmt.Fprintln(w, s.dim("status"))
 	} else {
-		fmt.Fprintf(tw, "%s\t%s\n", s.dim("as of"), formatRFC3339(r.AsOf))
+		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
 	}
 	if r.Revision > 0 {
-		fmt.Fprintf(tw, "%s\t%d\n", s.dim("revision"), r.Revision)
+		writeTable(w, [][]tableCell{{{text: "revision", style: s.dim}, {text: fmt.Sprint(r.Revision)}}})
 	}
 	if len(r.Providers) > 0 {
-		fmt.Fprintln(tw)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			s.dim("provider"), s.dim("quota"), s.dim("availability"), s.dim("mode"), s.dim("reason"))
+		fmt.Fprintln(w)
+		rows := [][]tableCell{{
+			{text: "provider", style: s.dim}, {text: "quota", style: s.dim}, {text: "availability", style: s.dim},
+			{text: "mode", style: s.dim}, {text: "reason", style: s.dim},
+		}}
 		for _, p := range r.Providers {
 			reason := p.Reason
 			if reason == "" {
 				reason = "normal"
 			}
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-				p.Provider,
-				s.styleQuota(p.Quota),
-				s.styleAvailability(p.Availability),
-				s.styleMode(p.Mode),
-				reason,
-			)
+			rows = append(rows, []tableCell{
+				{text: p.Provider}, {text: string(p.Quota), style: func(string) string { return s.styleQuota(p.Quota) }},
+				{text: string(p.Availability), style: func(string) string { return s.styleAvailability(p.Availability) }},
+				{text: string(p.Mode), style: func(string) string { return s.styleMode(p.Mode) }}, {text: reason},
+			})
 		}
+		writeTable(w, rows)
 	}
-	_ = tw.Flush()
 
 	for _, q := range r.Quota {
 		fmt.Fprintln(w)
@@ -82,23 +152,22 @@ func writeStatusText(w io.Writer, r service.StatusReport, s styler) {
 
 // writeRoutingText renders bare routing (effective chains only) as aligned text.
 func writeRoutingText(w io.Writer, r service.RoutingReport, s styler) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	enabled := s.green("enabled")
+	enabledText, enabledStyle := "enabled", s.green
 	if !r.RoutingEnabled {
-		enabled = s.red("disabled")
+		enabledText, enabledStyle = "disabled", s.red
 	}
-	fmt.Fprintf(tw, "%s\t%s\n", s.dim("routing"), enabled)
+	writeTable(w, [][]tableCell{{{text: "routing", style: s.dim}, {text: enabledText, style: enabledStyle}}})
 	if !r.AsOf.IsZero() {
-		fmt.Fprintf(tw, "%s\t%s\n", s.dim("as of"), formatRFC3339(r.AsOf))
+		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
 	}
-	fmt.Fprintln(tw)
+	fmt.Fprintln(w)
 	if len(r.Routes) > 0 {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", s.dim("target"), s.dim("route"), s.dim("effective"))
+		rows := [][]tableCell{{{text: "target", style: s.dim}, {text: "source", style: s.dim}, {text: "route", style: s.dim}, {text: "effective", style: s.dim}}}
 		for _, route := range r.Routes {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", route.TargetID, route.Name, strings.Join(route.Effective, ", "))
+			rows = append(rows, []tableCell{{text: route.TargetID}, {text: route.SourcePath}, {text: route.Name}, {text: strings.Join(route.Effective, ", ")}})
 		}
+		writeTable(w, rows)
 	}
-	_ = tw.Flush()
 
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  %s %s\n", s.red("error:"), e.Summary)
@@ -107,34 +176,36 @@ func writeRoutingText(w io.Writer, r service.RoutingReport, s styler) {
 
 // writeRoutingExplainText renders the full ranking + desired/effective chains.
 func writeRoutingExplainText(w io.Writer, r service.RoutingExplainReport, s styler) {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	enabled := s.green("enabled")
+	enabledText, enabledStyle := "enabled", s.green
 	if !r.RoutingEnabled {
-		enabled = s.red("disabled")
+		enabledText, enabledStyle = "disabled", s.red
 	}
-	fmt.Fprintf(tw, "%s\t%s\n", s.dim("routing"), enabled)
+	writeTable(w, [][]tableCell{{{text: "routing", style: s.dim}, {text: enabledText, style: enabledStyle}}})
 	if !r.AsOf.IsZero() {
-		fmt.Fprintf(tw, "%s\t%s\n", s.dim("as of"), formatRFC3339(r.AsOf))
+		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
 	}
-	fmt.Fprintln(tw)
+	fmt.Fprintln(w)
 	if len(r.Ranks) > 0 {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			s.dim("provider"), s.dim("rank"), s.dim("off_peak"), s.dim("eligible"), s.dim("reason"))
+		rows := [][]tableCell{{
+			{text: "provider", style: s.dim}, {text: "rank", style: s.dim}, {text: "off_peak", style: s.dim},
+			{text: "eligible", style: s.dim}, {text: "reason", style: s.dim},
+		}}
 		for _, rank := range r.Ranks {
-			fmt.Fprintf(tw, "%s\t%d\t%t\t%t\t%s\n",
-				rank.MappingID, rank.Rank, rank.OffPeak, rank.Eligible, rank.Explanation)
+			rows = append(rows, []tableCell{{text: rank.MappingID}, {text: fmt.Sprint(rank.Rank)}, {text: fmt.Sprint(rank.OffPeak)}, {text: fmt.Sprint(rank.Eligible)}, {text: rank.Explanation}})
 		}
-		fmt.Fprintln(tw)
+		writeTable(w, rows)
+		fmt.Fprintln(w)
 	}
 	if len(r.Routes) > 0 {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			s.dim("target"), s.dim("route"), s.dim("desired"), s.dim("effective"))
+		rows := [][]tableCell{{
+			{text: "target", style: s.dim}, {text: "source", style: s.dim}, {text: "route", style: s.dim},
+			{text: "desired", style: s.dim}, {text: "effective", style: s.dim},
+		}}
 		for _, route := range r.Routes {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-				route.TargetID, route.Name, strings.Join(route.Desired, ", "), strings.Join(route.Effective, ", "))
+			rows = append(rows, []tableCell{{text: route.TargetID}, {text: route.SourcePath}, {text: route.Name}, {text: strings.Join(route.Desired, ", ")}, {text: strings.Join(route.Effective, ", ")}})
 		}
+		writeTable(w, rows)
 	}
-	_ = tw.Flush()
 
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  %s %s\n", s.red("error:"), e.Summary)

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +127,7 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 		Global: policy.Target{
 			ID: "global", Root: root, Global: true,
 			Full: policy.Chain{"beta/full", "alpha/full"}, Mini: policy.Chain{"alpha/full"}, Nano: policy.Chain{"beta/full"},
+			Classifier: policy.Chain{"alpha/full", "beta/full"},
 			Definitions: []policy.Definition{
 				{Path: "subagents/zeta.md", Chain: policy.Chain{"beta/full", "alpha/full"}},
 				{Path: "subagents/alpha.md", Chain: policy.Chain{"alpha/full", "beta/full"}},
@@ -246,6 +249,53 @@ func TestStatusProviderProjection(t *testing.T) {
 	}
 }
 
+func TestQuotaExemptMappingStatusAndRouteSafety(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.desired.Providers["minime"] = policy.Mapping{
+		CodexBarProviders: []string{"minime"}, PolytokenProviders: []string{"minime"},
+		Models: map[string]policy.ModelBaseline{"minime/qwen": {Enabled: true}},
+	}
+	d.desired.Global.Classifier = policy.Chain{"alpha/full", "minime/qwen", "beta/full"}
+	d.desired.Global.Definitions[0].Chain = policy.Chain{"beta/full", "minime/qwen", "alpha/full"}
+	d.observed.Providers["minime"] = state.ProviderState{
+		QuotaAttempt: &quota.QuotaSnapshot{MappingID: "minime", CheckedAt: diagnosticAsOf.Add(-time.Hour), Status: quota.SourceFailed, Error: "stale local history"},
+	}
+	resolved, err := NewTargetRegistry().ResolveTargets(d.desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.targets = resolved
+
+	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())
+	status := snapshot.StatusView()
+	for _, provider := range status.Providers {
+		if provider.MappingID == "minime" {
+			t.Fatalf("quota-exempt mapping leaked into status: %+v", provider)
+		}
+	}
+	legacy := diagnosticCoordinator(d).Status(context.Background(), false)
+	baseline := *d
+	baseline.observed = d.observed
+	baseline.observed.Providers = maps.Clone(d.observed.Providers)
+	delete(baseline.observed.Providers, "minime")
+	withoutLocalHistory := diagnosticCoordinator(&baseline).Status(context.Background(), false)
+	if legacy.Problem != withoutLocalHistory.Problem {
+		t.Fatalf("quota-exempt durable history changed status problem: with=%t without=%t", legacy.Problem, withoutLocalHistory.Problem)
+	}
+	for _, quotaReport := range legacy.Quota {
+		if quotaReport.MappingID == "minime" {
+			t.Fatalf("quota-exempt durable history leaked into legacy quota status: %+v", quotaReport)
+		}
+	}
+	for _, route := range snapshot.RoutingView().Routes {
+		if route.Name == "classifier" || route.Name == "Shared (subagents/zeta.md)" {
+			if !slices.Contains(route.Effective, "minime/qwen") {
+				t.Fatalf("quota-exempt model missing from %s route: %+v", route.Name, route)
+			}
+		}
+	}
+}
+
 func TestStatusResetAfterAsOfOnly(t *testing.T) {
 	d, _ := diagnosticFixture(t, true)
 	report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).StatusView()
@@ -332,18 +382,20 @@ func TestStatusPreservesManualDisabled(t *testing.T) {
 	}
 }
 
-func TestRoutingViewSelectors(t *testing.T) {
+func TestRoutingViewIncludesClassifierAndConcreteSources(t *testing.T) {
 	d, canonicalRoot := diagnosticFixture(t, true)
 	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())
 	bare := snapshot.RoutingView()
 	explain := snapshot.RoutingExplainView()
-	if bare.Error != "" || bare.Partial || len(bare.Errors) != 0 || len(bare.Routes) != 6 {
+	if bare.Error != "" || bare.Partial || len(bare.Errors) != 0 || len(bare.Routes) != 7 {
 		t.Fatalf("bare routing=%+v", bare)
 	}
-	wantNames := []string{"full", "mini", "nano", "Shared (subagents/alpha.md)", "Shared (subagents/zeta.md)", "full"}
+	wantNames := []string{"full", "mini", "nano", "classifier", "Shared (subagents/alpha.md)", "Shared (subagents/zeta.md)", "full"}
+	wantTargets := []string{"global", "global", "global", "global", "global", "global", "project-b"}
+	wantSources := []string{"config.yaml", "config.yaml", "config.yaml", "config.yaml", "subagents/alpha.md", "subagents/zeta.md", "config.yaml"}
 	for i, want := range wantNames {
-		if bare.Routes[i].Name != want {
-			t.Fatalf("route order[%d]=%q want %q; routes=%+v", i, bare.Routes[i].Name, want, bare.Routes)
+		if bare.Routes[i].Name != want || bare.Routes[i].TargetID != wantTargets[i] || bare.Routes[i].SourcePath != wantSources[i] {
+			t.Fatalf("route[%d]=%+v want name=%q target=%q source=%q; routes=%+v", i, bare.Routes[i], want, wantTargets[i], wantSources[i], bare.Routes)
 		}
 		if bare.Routes[i].Desired != nil {
 			t.Fatalf("bare routing leaked desired chain: %+v", bare.Routes[i])
@@ -408,7 +460,7 @@ func TestRoutingPartialDefinitionError(t *testing.T) {
 	if routingView.Error != "" || !routingView.Partial || len(routingView.Errors) != 1 {
 		t.Fatalf("partial routing classification=%+v", routingView)
 	}
-	if len(routingView.Routes) != 6 {
+	if len(routingView.Routes) != 7 {
 		t.Fatalf("trustworthy routes were not preserved: %+v", routingView.Routes)
 	}
 	err := routingView.Errors[0]

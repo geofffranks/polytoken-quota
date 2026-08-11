@@ -125,6 +125,38 @@ func TestRoutingOverlaySameMappingPreservation(t *testing.T) {
 
 // TestRoutingOverlayMissingRankPreservation proves a mapping absent from the rank
 // lookup keeps its position; it is never reordered relative to others.
+func TestRoutingOverlayQuotaExemptFixedSlotAndExplicitDisable(t *testing.T) {
+	entries := []string{"a/x", "local/x", "b/x", "c/x"}
+	d, s, target := routingFixture(true, entries, map[string]string{"a": "g1", "b": "g1", "c": "g1"})
+	ranks := RankLookup{"a": 2, "b": 0, "c": 1}
+
+	plan, err := Build(d, s, target, ranks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := chainEdit(t, plan, "agent.md"), []string{"b/x", "local/x", "c/x", "a/x"}; !slices.Equal(got, want) {
+		t.Fatalf("quota-exempt fixed slot changed: got=%v want=%v", got, want)
+	}
+
+	for name, providerState := range map[string]state.ProviderState{
+		"manual disable": {ManualDisabled: true},
+		"unavailable":    {Availability: state.Unavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			disabled := s
+			disabled.Providers = map[string]state.ProviderState{"local": providerState}
+			plan, err := Build(d, disabled, target, ranks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := chainEdit(t, plan, "agent.md")
+			if slices.Contains(got, "local/x") {
+				t.Fatalf("routing resurrected explicitly disabled quota-exempt model: %v", got)
+			}
+		})
+	}
+}
+
 func TestRoutingOverlayMissingRankPreservation(t *testing.T) {
 	entries := []string{"a/x", "b/x", "c/x"}
 	d, s, target := routingFixture(true, entries, map[string]string{"a": "g1", "b": "g1", "c": "g1"})

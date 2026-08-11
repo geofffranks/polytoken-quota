@@ -458,7 +458,7 @@ func TestComputeRankingLookupReordersBuild(t *testing.T) {
 // canonical core order and deterministically sorts named definitions while
 // retaining exact target/path/chain identity. Duplicate names are disambiguated
 // with policy-relative path context and missing names use a stable path fallback.
-func TestRoutingDefinitionNamesAndOrdering(t *testing.T) {
+func TestRoutingDefinitionMetadataIncludesAllCoreRoutes(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "home", "alice", ".config", "CANARY-routing")
 	writeDefinition := func(rel, frontmatter string) {
 		t.Helper()
@@ -476,7 +476,7 @@ func TestRoutingDefinitionNamesAndOrdering(t *testing.T) {
 
 	desired := policy.Desired{
 		Global: policy.Target{ID: "global", Root: root,
-			Full: policy.Chain{"full/a"}, Mini: policy.Chain{"mini/a"}, Nano: policy.Chain{"nano/a"},
+			Full: policy.Chain{"full/a"}, Mini: policy.Chain{"mini/a"}, Nano: policy.Chain{"nano/a"}, Classifier: policy.Chain{"classifier/a"},
 			Definitions: []policy.Definition{
 				{Path: "subagents/zeta.md", Chain: policy.Chain{"desired/zeta"}},
 				{Path: "facets/no-name.md", Chain: policy.Chain{"desired/fallback"}},
@@ -492,9 +492,9 @@ func TestRoutingDefinitionNamesAndOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantNames := []string{"full", "mini", "nano", "no-name", "Shared (subagents/alpha.md)", "Shared (subagents/zeta.md)"}
-	wantPaths := []string{"", "", "", "facets/no-name.md", "subagents/alpha.md", "subagents/zeta.md"}
-	wantHeads := []string{"full/a", "mini/a", "nano/a", "desired/fallback", "desired/alpha", "desired/zeta"}
+	wantNames := []string{"full", "mini", "nano", "classifier", "no-name", "Shared (subagents/alpha.md)", "Shared (subagents/zeta.md)"}
+	wantPaths := []string{"config.yaml", "config.yaml", "config.yaml", "config.yaml", "facets/no-name.md", "subagents/alpha.md", "subagents/zeta.md"}
+	wantHeads := []string{"full/a", "mini/a", "nano/a", "classifier/a", "desired/fallback", "desired/alpha", "desired/zeta"}
 	if len(got) != len(wantNames) {
 		t.Fatalf("metadata=%+v", got)
 	}

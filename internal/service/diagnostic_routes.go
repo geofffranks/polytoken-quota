@@ -53,14 +53,11 @@ func projectRoutes(desired policy.Desired, observed state.State, targets []Regis
 	var routes []RouteProjection
 	var routeErrors []DiagnosticError
 	for _, registered := range orderedTargets {
-		for _, core := range []struct {
-			name  string
-			chain policy.Chain
-		}{{"full", registered.Policy.Full}, {"mini", registered.Policy.Mini}, {"nano", registered.Policy.Nano}} {
+		for _, core := range coreRoutes(registered.Policy) {
 			if len(core.chain) == 0 {
 				continue
 			}
-			route, projectionError := projectRoute(desired, observed, ranks, registered.Policy.ID, core.name, "", core.chain)
+			route, projectionError := projectRoute(desired, observed, ranks, registered.Policy.ID, core.name, coreRoutingSource, core.chain)
 			routes = append(routes, route)
 			if projectionError != nil {
 				routeErrors = append(routeErrors, *projectionError)

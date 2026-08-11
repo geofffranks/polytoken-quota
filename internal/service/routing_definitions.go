@@ -18,6 +18,22 @@ type RoutingDefinition struct {
 	Desired    policy.Chain `json:"desired"`
 }
 
+const coreRoutingSource = "config.yaml"
+
+type coreRoute struct {
+	name  string
+	chain policy.Chain
+}
+
+func coreRoutes(target policy.Target) []coreRoute {
+	return []coreRoute{
+		{name: "full", chain: target.Full},
+		{name: "mini", chain: target.Mini},
+		{name: "nano", chain: target.Nano},
+		{name: "classifier", chain: target.Classifier},
+	}
+}
+
 // RoutingDefinitionMetadata returns core and explicitly registered named route
 // metadata without computing effective order or rendering a diagnostic view.
 // Those projections belong to the diagnostic snapshot task.
@@ -32,17 +48,15 @@ func RoutingDefinitionMetadata(targets []RegisteredTarget) ([]RoutingDefinition,
 
 	var routes []RoutingDefinition
 	for _, registered := range orderedTargets {
-		for _, core := range []struct {
-			name  string
-			chain policy.Chain
-		}{{"full", registered.Policy.Full}, {"mini", registered.Policy.Mini}, {"nano", registered.Policy.Nano}} {
+		for _, core := range coreRoutes(registered.Policy) {
 			if len(core.chain) == 0 {
 				continue
 			}
 			routes = append(routes, RoutingDefinition{
-				TargetID: registered.Policy.ID,
-				Name:     core.name,
-				Desired:  append(policy.Chain(nil), core.chain...),
+				TargetID:   registered.Policy.ID,
+				Name:       core.name,
+				SourcePath: coreRoutingSource,
+				Desired:    append(policy.Chain(nil), core.chain...),
 			})
 		}
 		named, err := namedRoutingDefinitions(registered.Resolved.Definitions)
