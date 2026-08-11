@@ -26,6 +26,18 @@ func TestLoadMigratesLegacySchemasToV4EmptyHistory(t *testing.T) {
 	}
 }
 
+func TestLoadLegacySchemaDiscardsEmbeddedHistoryBeforeValidation(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, p, `{"Schema":3,"Providers":{},"Targets":{},"ReconcileHistory":{"Records":[{"Revision":1,"Tier":"future"}]}}`)
+	s, err := (Store{Path: p}).Load()
+	if err != nil {
+		t.Fatalf("legacy history must be discarded before validation: %v", err)
+	}
+	if s.Schema != CurrentSchema || len(s.ReconcileHistory.Records) != 0 {
+		t.Fatalf("state=%+v", s)
+	}
+}
+
 func TestHistoryRoundTripAndRetentionAt100WhenWithinBudget(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "state.json")
 	st := Store{Path: p, Now: func() time.Time { return historyTestTime }, RecoveredRetention: 24 * time.Hour}
@@ -37,7 +49,10 @@ func TestHistoryRoundTripAndRetentionAt100WhenWithinBudget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.ReconcileHistory = AppendHistory(s.ReconcileHistory, r)
+		s.ReconcileHistory, err = AppendHistory(s.ReconcileHistory, r)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := st.Save(s); err != nil {
 		t.Fatal(err)
@@ -58,10 +73,16 @@ func TestHistoryRoundTripAndRetentionAt100WhenWithinBudget(t *testing.T) {
 
 func TestHistoryAppendDeduplicatesRevision(t *testing.T) {
 	r := validHistoryRecord(t)
-	h := AppendHistory(ReconcileHistory{}, r)
+	h, err := AppendHistory(ReconcileHistory{}, r)
+	if err != nil {
+		t.Fatal(err)
+	}
 	replacement := r
 	replacement.CompletedAt = replacement.CompletedAt.Add(time.Hour)
-	h = AppendHistory(h, replacement)
+	h, err = AppendHistory(h, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(h.Records) != 1 || !h.Records[0].CompletedAt.Equal(replacement.CompletedAt) {
 		t.Fatalf("history=%+v", h)
 	}
@@ -88,7 +109,10 @@ func TestSaveSanitizesHistoryCanaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newState()
-	s.ReconcileHistory = AppendHistory(s.ReconcileHistory, r)
+	s.ReconcileHistory, err = AppendHistory(s.ReconcileHistory, r)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Simulate a long-lived in-memory caller reintroducing raw text after construction.
 	s.ReconcileHistory.Records[0].Providers[0].Reason = "Bearer SAVESECRET account=save-account"
 	if err := st.Save(s); err != nil {

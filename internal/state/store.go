@@ -200,8 +200,11 @@ func (st Store) Load() (State, error) {
 	if s.Schema < 0 || s.Schema > CurrentSchema {
 		return State{}, fmt.Errorf("state: unsupported schema %d in %s (current %d)", s.Schema, st.Path, CurrentSchema)
 	}
-	// Legacy schemas 0 through 3 or current: normalize to the current schema. The
-	// additive history fields are absent in older documents and decode empty.
+	// Legacy schemas 0 through 3 migrate additively, but schema-v4 history is
+	// ignored even if a legacy document happens to contain a same-named field.
+	if s.Schema < CurrentSchema {
+		s.ReconcileHistory = ReconcileHistory{}
+	}
 	s.Schema = CurrentSchema
 	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
 		return State{}, fmt.Errorf("state: validate history in %s: %w", st.Path, err)
@@ -230,7 +233,11 @@ func (st Store) Save(s State) error {
 	s = sanitizeSnapshots(s)
 	s = sanitizeDiagnostics(s)
 	s.ReconcileHistory = sanitizeHistory(s.ReconcileHistory)
-	s.ReconcileHistory = boundHistory(s.ReconcileHistory)
+	var err error
+	s.ReconcileHistory, err = boundHistory(s.ReconcileHistory)
+	if err != nil {
+		return fmt.Errorf("state: bound history: %w", err)
+	}
 	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
 		return fmt.Errorf("state: validate history: %w", err)
 	}

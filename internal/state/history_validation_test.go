@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +17,7 @@ func validHistoryTemplate() RecordTemplate {
 		Trigger:   Trigger{Kind: TriggerReconcile},
 		Providers: []ProviderDetail{{MappingID: "codex", Mode: ModeNormal, Reason: "healthy"}},
 		Ranks:     []RankDetail{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "healthy"}},
-		Targets: []TargetDetail{{
+		Targets: []TemplateTarget{{
 			ID: "global", Outcome: OutcomeApplied,
 			Chains: []ChainDetail{{Name: "full", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}}},
 			Edits:  []EditDetail{{File: "config.yaml", Path: []string{"defaults", "full"}, Action: EditSetScalar, Detail: "codex/gpt"}},
@@ -34,12 +35,13 @@ func validHistoryRecord(t *testing.T) ReconcileRecord {
 }
 
 func TestRecordTemplateHasNoCompletionOrRuntimeOutcome(t *testing.T) {
-	tpl := RecordTemplate{Revision: 9, Trigger: Trigger{Kind: TriggerReconcile}, Targets: []TemplateTarget{{ID: "global", PlanComputed: true}}}
+	pending := &PendingDetail{Stage: PendingPublish, Summary: "pending", Remediation: "retry"}
+	tpl := RecordTemplate{Revision: 9, Trigger: Trigger{Kind: TriggerReconcile}, Targets: []TemplateTarget{{ID: "global", PlanComputed: true, Outcome: OutcomePending, Pending: pending}}}
 	b, err := json.Marshal(tpl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"CompletedAt", "Outcome", "outcome", "Applied"} {
+	for _, forbidden := range []string{"CompletedAt", "Outcome", "outcome", "Applied", "pending", "retry"} {
 		if strings.Contains(string(b), forbidden) {
 			t.Fatalf("template contains runtime field %q: %s", forbidden, b)
 		}
@@ -50,6 +52,39 @@ func TestRecordTemplateHasNoCompletionOrRuntimeOutcome(t *testing.T) {
 	}
 	if r.Counts.Applied != 1 || r.Targets[0].Outcome != OutcomeApplied {
 		t.Fatalf("record=%+v", r)
+	}
+}
+
+func TestValidateFullHistoryEnforcesSharedAndOutcomeCounts(t *testing.T) {
+	base := validHistoryRecord(t)
+	cases := []struct {
+		name   string
+		mutate func(*ReconcileRecord)
+	}{
+		{"providers_over_limit", func(r *ReconcileRecord) { r.Providers = make([]ProviderDetail, HistoryProvidersPerRecord+1) }},
+		{"ranks_over_limit", func(r *ReconcileRecord) { r.Ranks = make([]RankDetail, HistoryRanksPerRecord+1) }},
+		{"applied_count_mismatch", func(r *ReconcileRecord) { r.Counts.Applied = 0; r.Counts.Pending = 1 }},
+		{"pending_count_mismatch", func(r *ReconcileRecord) { r.Counts.Applied = 2; r.Counts.Pending = 0 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := DeepCopyHistoryRecord(base)
+			tc.mutate(&r)
+			if err := ValidateHistoryRecord(r); err == nil {
+				t.Fatal("expected persisted full record rejection")
+			}
+		})
+	}
+}
+
+func TestHistorySizingMarshalErrorsFailClosed(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.json")
+	st := Store{Path: p, Now: func() time.Time { return historyTestTime }}
+	r := validHistoryRecord(t)
+	bad := math.NaN()
+	r.Trigger = Trigger{Kind: TriggerHook, Hook: &HookEvidence{Event: HookQuotaLow, Provider: "codex", Timestamp: historyTestTime, UsagePercent: &bad}}
+	if err := st.Save(State{Providers: map[string]ProviderState{}, Targets: map[string]TargetState{}, ReconcileHistory: ReconcileHistory{Records: []ReconcileRecord{r}}}); err == nil {
+		t.Fatal("Save accepted history containing unsupported JSON value")
 	}
 }
 
@@ -125,9 +160,9 @@ func TestHistoryTierBoundary64Vs65Targets(t *testing.T) {
 	for _, n := range []int{64, 65} {
 		t.Run(string(rune(n)), func(t *testing.T) {
 			tpl := validHistoryTemplate()
-			tpl.Targets = make([]TargetDetail, n)
+			tpl.Targets = make([]TemplateTarget, n)
 			for i := range tpl.Targets {
-				tpl.Targets[i] = TargetDetail{ID: "t" + strings.Repeat("x", i+1), Outcome: OutcomeApplied}
+				tpl.Targets[i] = TemplateTarget{ID: "t" + strings.Repeat("x", i+1), Outcome: OutcomeApplied}
 			}
 			r, err := ProjectHistoryRecord(tpl, historyTestTime)
 			if err != nil {
@@ -165,7 +200,7 @@ func TestHistoryRecordBudgetBoundaryAt256KiBAndOneByteOver(t *testing.T) {
 		chains[n].Name = "chain-" + strings.Repeat("x", n+1)
 		base.Targets[0].Chains = chains[:n+1]
 		bounded := SanitizeRecordTemplate(base)
-		raw := ReconcileRecord{Revision: bounded.Revision, CompletedAt: historyTestTime, Trigger: bounded.Trigger, Tier: TierFull, Counts: AuthoritativeTargetCounts{Total: 1, Applied: 1}, Providers: bounded.Providers, Ranks: bounded.Ranks, Targets: bounded.Targets, Omitted: bounded.Omitted}
+		raw := ReconcileRecord{Revision: bounded.Revision, CompletedAt: historyTestTime, Trigger: bounded.Trigger, Tier: TierFull, Counts: AuthoritativeTargetCounts{Total: 1, Applied: 1}, Providers: bounded.Providers, Ranks: bounded.Ranks, Targets: targetDetailsFromTemplate(bounded.Targets), Omitted: bounded.Omitted}
 		b, _ := json.Marshal(raw)
 		if len(b) <= HistoryRecordEncodedBytes {
 			lastFull = n + 1
@@ -196,9 +231,9 @@ func TestHistoryRecordBudgetBoundaryAt256KiBAndOneByteOver(t *testing.T) {
 
 func TestAggregateRecordBoundsCompactPendingTextToRecordCeiling(t *testing.T) {
 	tpl := validHistoryTemplate()
-	tpl.Targets = make([]TargetDetail, 65)
+	tpl.Targets = make([]TemplateTarget, 65)
 	for i := range tpl.Targets {
-		tpl.Targets[i] = TargetDetail{ID: "target-" + strings.Repeat("x", i+1), Outcome: OutcomePending, Pending: &PendingDetail{Stage: PendingPublish, Summary: strings.Repeat("s", HistoryFreeTextBytes), Remediation: strings.Repeat("r", HistoryFreeTextBytes)}}
+		tpl.Targets[i] = TemplateTarget{ID: "target-" + strings.Repeat("x", i+1), Outcome: OutcomePending, Pending: &PendingDetail{Stage: PendingPublish, Summary: strings.Repeat("s", HistoryFreeTextBytes), Remediation: strings.Repeat("r", HistoryFreeTextBytes)}}
 	}
 	r, err := ProjectHistoryRecord(tpl, historyTestTime)
 	if err != nil {
@@ -228,15 +263,18 @@ func TestHistoryEncodedAggregateCeilingDegradesThenValidates(t *testing.T) {
 	for i := 1; i <= HistoryRecordLimit; i++ {
 		tpl := validHistoryTemplate()
 		tpl.Revision = uint64(i)
-		tpl.Targets = make([]TargetDetail, 65)
+		tpl.Targets = make([]TemplateTarget, 65)
 		for j := range tpl.Targets {
-			tpl.Targets[j] = TargetDetail{ID: "t" + strings.Repeat("x", j+1), Outcome: OutcomePending, Pending: &PendingDetail{Stage: PendingPublish, Summary: strings.Repeat("s", HistoryFreeTextBytes), Remediation: strings.Repeat("r", HistoryFreeTextBytes)}}
+			tpl.Targets[j] = TemplateTarget{ID: "t" + strings.Repeat("x", j+1), Outcome: OutcomePending, Pending: &PendingDetail{Stage: PendingPublish, Summary: strings.Repeat("s", HistoryFreeTextBytes), Remediation: strings.Repeat("r", HistoryFreeTextBytes)}}
 		}
 		r, err := ProjectHistoryRecord(tpl, historyTestTime.Add(time.Duration(i)*time.Second))
 		if err != nil {
 			t.Fatal(err)
 		}
-		h = AppendHistory(h, r)
+		h, err = AppendHistory(h, r)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := ValidateReconcileHistory(h); err != nil {
 		t.Fatal(err)
@@ -263,7 +301,10 @@ func TestHistoryBudgetDegradesOldestThenPrunesOldest(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h = AppendHistory(h, r)
+		h, err = AppendHistory(h, r)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	if len(h.Records) == 0 || h.Records[0].Revision != 100 {
 		t.Fatalf("newest lost: %+v", h)

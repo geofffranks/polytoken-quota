@@ -173,9 +173,18 @@ type TargetDetail struct {
 	Omitted      TargetOmittedCounts
 }
 
-// TemplateTarget is an alias retained to make the plan/template distinction
-// explicit at call sites while sharing the bounded leaf representation.
-type TemplateTarget = TargetDetail
+// TemplateTarget is the plan-only target representation. Outcome and Pending are
+// retained only for compatibility with callers that build a template before
+// finalization; they are runtime fields and are never serialized as template data.
+type TemplateTarget struct {
+	ID           string
+	PlanComputed bool              `json:"-"`
+	Outcome      TargetOutcomeKind `json:"-"`
+	Pending      *PendingDetail    `json:"-"`
+	Chains       []ChainDetail     `json:",omitempty"`
+	Edits        []EditDetail      `json:",omitempty"`
+	Omitted      TargetOmittedCounts
+}
 type CompactTarget struct {
 	ID      string
 	Outcome TargetOutcomeKind
@@ -364,12 +373,17 @@ func SanitizeRecordTemplate(in RecordTemplate) RecordTemplate {
 		r.Explanation = sanitizeText(r.Explanation)
 		out.Ranks = append(out.Ranks, r)
 	}
-	targets := append([]TargetDetail(nil), in.Targets...)
+	targets := append([]TemplateTarget(nil), in.Targets...)
 	sort.SliceStable(targets, func(i, j int) bool { return targets[i].ID < targets[j].ID })
 	for _, t := range targets {
-		out.Targets = append(out.Targets, sanitizeTarget(t))
+		out.Targets = append(out.Targets, sanitizeTemplateTarget(t))
 	}
 	return out
+}
+
+func sanitizeTemplateTarget(t TemplateTarget) TemplateTarget {
+	bounded := sanitizeTarget(TargetDetail{ID: t.ID, Outcome: t.Outcome, Pending: t.Pending, Chains: t.Chains, Edits: t.Edits, Omitted: t.Omitted})
+	return TemplateTarget{ID: bounded.ID, PlanComputed: t.PlanComputed, Outcome: bounded.Outcome, Pending: bounded.Pending, Chains: bounded.Chains, Edits: bounded.Edits, Omitted: bounded.Omitted}
 }
 
 func sanitizeTarget(t TargetDetail) TargetDetail {
@@ -546,8 +560,12 @@ func ValidateHistoryRecord(r ReconcileRecord) error {
 		return err
 	}
 	if r.Tier == TierFull {
-		if r.DetailTruncated || len(r.CompactTargets) != 0 || len(r.Targets) > HistoryTargetsPerRecord || r.Counts.Total != len(r.Targets) || r.Counts.Omitted != 0 {
+		if r.DetailTruncated || len(r.CompactTargets) != 0 || len(r.Targets) > HistoryTargetsPerRecord || len(r.Providers) > HistoryProvidersPerRecord || len(r.Ranks) > HistoryRanksPerRecord || r.Counts.Total != len(r.Targets) || r.Counts.Omitted != 0 {
 			return fmt.Errorf("state: invalid full history structure")
+		}
+		actual := countTargets(r.Targets)
+		if actual.Applied != r.Counts.Applied || actual.Pending != r.Counts.Pending {
+			return fmt.Errorf("state: full history target counts do not match outcomes")
 		}
 		if err := validateRecordDetails(r.Targets); err != nil {
 			return err
@@ -871,7 +889,7 @@ func validFieldPath(p []string) error {
 	return nil
 }
 
-func AppendHistory(h ReconcileHistory, r ReconcileRecord) ReconcileHistory {
+func AppendHistory(h ReconcileHistory, r ReconcileRecord) (ReconcileHistory, error) {
 	out := DeepCopyReconcileHistory(h)
 	records := make([]ReconcileRecord, 0, len(out.Records)+1)
 	records = append(records, DeepCopyHistoryRecord(r))
@@ -887,8 +905,15 @@ func AppendHistory(h ReconcileHistory, r ReconcileRecord) ReconcileHistory {
 	out.Records = records
 	return boundHistory(out)
 }
-func boundHistory(h ReconcileHistory) ReconcileHistory {
-	for historySize(h) > HistoryEncodedBytes {
+func boundHistory(h ReconcileHistory) (ReconcileHistory, error) {
+	for {
+		size, err := historySize(h)
+		if err != nil {
+			return ReconcileHistory{}, err
+		}
+		if size <= HistoryEncodedBytes {
+			return h, nil
+		}
 		changed := false
 		for i := len(h.Records) - 1; i >= 0; i-- {
 			if h.Records[i].Tier == TierFull {
@@ -901,19 +926,18 @@ func boundHistory(h ReconcileHistory) ReconcileHistory {
 			continue
 		}
 		if len(h.Records) == 0 {
-			break
+			return h, nil
 		}
 		h.Records = h.Records[:len(h.Records)-1]
 		h.OmittedHistoryRecords++
 	}
-	return h
 }
-func historySize(h ReconcileHistory) int {
+func historySize(h ReconcileHistory) (int, error) {
 	b, err := json.Marshal(h)
 	if err != nil {
-		return int(^uint(0) >> 1)
+		return 0, err
 	}
-	return len(b)
+	return len(b), nil
 }
 
 func DeepCopyReconcileHistory(h ReconcileHistory) ReconcileHistory {
