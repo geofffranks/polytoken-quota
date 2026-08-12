@@ -677,11 +677,21 @@ func validateTrigger(t Trigger) error {
 				}
 			}
 		}
-	case TriggerRoutingDisable, TriggerRoutingEnable, TriggerQuotaCheck:
+	case TriggerRoutingDisable, TriggerRoutingEnable:
 		if t.MappingID == "" || t.Hook != nil || t.Set != nil || t.Clear != nil {
 			return fmt.Errorf("state: invalid mapping trigger")
 		}
 		if t.MappingID != "all" {
+			return validID(t.MappingID)
+		}
+	case TriggerQuotaCheck:
+		// A quota check targets all providers when no filter is supplied (empty
+		// MappingID, the common `check --reconcile` case) or a single mapping
+		// when --provider is given. It carries no hook/set/clear evidence.
+		if t.Hook != nil || t.Set != nil || t.Clear != nil {
+			return fmt.Errorf("state: invalid quota-check trigger")
+		}
+		if t.MappingID != "" {
 			return validID(t.MappingID)
 		}
 	case TriggerSet:

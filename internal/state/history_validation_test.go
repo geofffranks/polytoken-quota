@@ -258,6 +258,36 @@ func TestValidateHistoryRejectsDuplicateRevision(t *testing.T) {
 	}
 }
 
+// TestValidateQuotaCheckTriggerMatrix locks in the trigger contract for
+// TriggerQuotaCheck: a quota check targets all providers (empty MappingID, the
+// common `check --reconcile` case) or a single mapping, and must never carry
+// hook/set/clear evidence. Regression for the silent history-drop bug.
+func TestValidateQuotaCheckTriggerMatrix(t *testing.T) {
+	tpl := validHistoryTemplate()
+	accept := func(t *testing.T, trig Trigger) {
+		t.Helper()
+		b := tpl
+		b.Trigger = trig
+		if _, err := ProjectHistoryRecord(b, historyTestTime); err != nil {
+			t.Fatalf("expected accept for %+v, got %v", trig, err)
+		}
+	}
+	reject := func(t *testing.T, trig Trigger) {
+		t.Helper()
+		b := tpl
+		b.Trigger = trig
+		if _, err := ProjectHistoryRecord(b, historyTestTime); err == nil {
+			t.Fatalf("expected reject for %+v", trig)
+		}
+	}
+
+	t.Run("all_providers_empty_mapping", func(t *testing.T) { accept(t, Trigger{Kind: TriggerQuotaCheck}) })
+	t.Run("single_mapping", func(t *testing.T) { accept(t, Trigger{Kind: TriggerQuotaCheck, MappingID: "openai"}) })
+	t.Run("hook_evidence", func(t *testing.T) { reject(t, Trigger{Kind: TriggerQuotaCheck, Hook: &HookEvidence{}}) })
+	t.Run("set_evidence", func(t *testing.T) { reject(t, Trigger{Kind: TriggerQuotaCheck, Set: &SetEvidence{}}) })
+	t.Run("clear_evidence", func(t *testing.T) { reject(t, Trigger{Kind: TriggerQuotaCheck, Clear: &ClearEvidence{}}) })
+}
+
 func TestHistoryEncodedAggregateCeilingDegradesThenValidates(t *testing.T) {
 	h := ReconcileHistory{}
 	for i := 1; i <= HistoryRecordLimit; i++ {

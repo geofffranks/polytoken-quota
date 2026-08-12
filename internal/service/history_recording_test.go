@@ -91,6 +91,42 @@ func TestRecordHistorySkipsNoProvenChange(t *testing.T) {
 	}
 }
 
+// TestRecordHistoryQuotaCheckAllProviders verifies that a quota check run with
+// no provider filter — the `check --reconcile` all-providers case — records a
+// history record when there is a proven file change. Regression: a
+// TriggerQuotaCheck with an empty MappingID ("all") must validate.
+func TestRecordHistoryQuotaCheckAllProviders(t *testing.T) {
+	c := &Coordinator{}
+	s := &state.State{Revision: 5}
+	outcomes := []TargetOutcome{
+		{
+			TargetID:        "global",
+			AppliedRevision: 5,
+			Prepare: &PrepareResult{
+				TargetID:     "global",
+				PlanComputed: true,
+				ChangedFiles: map[string]bool{"config.yaml": true},
+				ChangedEdits: []reconcile.FieldEdit{
+					{File: "config.yaml", Path: []string{"defaults", "full"}, Scalar: strPtr("gpt-5.6")},
+				},
+			},
+		},
+	}
+
+	c.recordHistoryIfQualified(s, txQuotaCheck, transactionInput{}, outcomes, nil, policy.Desired{})
+
+	if len(s.ReconcileHistory.Records) != 1 {
+		t.Fatalf("quota check (all providers) with proven change should produce 1 history record, got %d", len(s.ReconcileHistory.Records))
+	}
+	rec := s.ReconcileHistory.Records[0]
+	if rec.Trigger.Kind != state.TriggerQuotaCheck {
+		t.Errorf("trigger kind: got %s, want %s", rec.Trigger.Kind, state.TriggerQuotaCheck)
+	}
+	if rec.Counts.Applied != 1 {
+		t.Errorf("counts applied: got %d, want 1", rec.Counts.Applied)
+	}
+}
+
 // TestRecordHistoryDeduplicatesRevision verifies that recording the same
 // revision twice replaces rather than duplicates.
 func TestRecordHistoryDeduplicatesRevision(t *testing.T) {
