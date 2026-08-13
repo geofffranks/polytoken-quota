@@ -91,14 +91,14 @@ type Operational struct {
 // reordered). The defaults below match the routing package's own defaults:
 // FreshnessTTL 30m, BalanceGroup "default", Weight 1 when zero/empty.
 type QuotaConfig struct {
-	Adapter      string        // "codex" | "zai" | "anthropic" (adapter name)
+	Adapter      string        // "codex" | "zai" | "anthropic" | "neuralwatt" (adapter name)
 	FreshnessTTL time.Duration // default 30m when zero
 	BalanceGroup string        // default "default"
 	Weight       int           // default 1
 	// MonthlyBudgetUSD is the user-defined monthly spend ceiling treated as
 	// the provider's quota. Required (and only meaningful) for the anthropic
 	// adapter: a pay-as-you-go API has no token allowance, so the budget IS
-	// the quota.
+	// the quota. Neuralwatt reads its provider-reported balance directly.
 	MonthlyBudgetUSD float64
 	Schedule         *routing.Schedule // nil = never off-peak
 }

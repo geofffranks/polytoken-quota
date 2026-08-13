@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -265,4 +266,76 @@ func (r *Registry) All() []QuotaSource {
 	out := make([]QuotaSource, len(r.sources))
 	copy(out, r.sources)
 	return out
+}
+
+// AdapterDefinition describes one built-in quota adapter. Keeping the name,
+// source factory, and evidence factory together prevents runtime support checks,
+// polling, and evidence registration from maintaining separate provider lists.
+type AdapterDefinition struct {
+	Name     string
+	Evidence func(time.Time) Evidence
+	New      func(string, *BoundedClient, CredentialResolver, float64, *EvidenceRegistry, time.Time) QuotaSource
+}
+
+var builtInAdapters = []AdapterDefinition{
+	{
+		Name:     codexProviderName,
+		Evidence: CodexUsageEvidence,
+		New: func(id string, client *BoundedClient, creds CredentialResolver, budget float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewCodexSource(id, client, creds, "", reg, now)
+		},
+	},
+	{
+		Name:     zaiProviderName,
+		Evidence: ZaiEvidence,
+		New: func(id string, client *BoundedClient, creds CredentialResolver, budget float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewZaiSource(id, client, creds, "", reg, now)
+		},
+	},
+	{
+		Name:     anthropicProviderName,
+		Evidence: AnthropicEvidence,
+		New: func(id string, client *BoundedClient, creds CredentialResolver, budget float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewAnthropicSource(id, client, creds, budget, reg, now)
+		},
+	},
+	{
+		Name:     neuralwattProviderName,
+		Evidence: NeuralwattEvidence,
+		New: func(id string, client *BoundedClient, creds CredentialResolver, budget float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewNeuralwattSource(id, client, creds, reg, now)
+		},
+	},
+}
+
+// AdapterDefinitions returns the built-in adapter definitions in stable name
+// order. Callers must not mutate the returned slice or its function values.
+func AdapterDefinitions() []AdapterDefinition {
+	out := append([]AdapterDefinition(nil), builtInAdapters...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// AdapterDefinitionFor returns the built-in adapter definition for name.
+func AdapterDefinitionFor(name string) (AdapterDefinition, bool) {
+	for _, definition := range builtInAdapters {
+		if definition.Name == name {
+			return definition, true
+		}
+	}
+	return AdapterDefinition{}, false
+}
+
+// KnownAdapter reports whether name is a built-in adapter.
+func KnownAdapter(name string) bool {
+	_, ok := AdapterDefinitionFor(name)
+	return ok
+}
+
+// RegisterBuiltInEvidence adds current built-in adapter evidence to reg. The
+// evidence factories themselves own their review-date policy.
+func RegisterBuiltInEvidence(reg *EvidenceRegistry, now time.Time) {
+	for _, definition := range builtInAdapters {
+		reg.Register(definition.Evidence(now))
+	}
 }

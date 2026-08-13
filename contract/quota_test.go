@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -278,10 +279,6 @@ func TestEvidenceAndReasonsAreSecretFree(t *testing.T) {
 
 // --- Release evidence gate -----------------------------------------------
 
-// releaseProviders enumerates the provider adapters expected to carry current
-// contract evidence for a release.
-var releaseProviders = []string{"codex", "zai", "anthropic"}
-
 // configuredProviders returns the provider names that are configured for this
 // environment, read from the PQ_TEST_PROVIDERS env var (comma-separated). When
 // unset or empty (the default local-dev case), no providers are configured.
@@ -309,6 +306,7 @@ func buildReleaseRegistry() *quota.EvidenceRegistry {
 	reg.Register(quota.CodexResetCreditsEvidence(time.Now()))
 	reg.Register(quota.ZaiEvidence(time.Now()))
 	reg.Register(quota.AnthropicEvidence(time.Now()))
+	reg.Register(quota.NeuralwattEvidence(time.Now()))
 	return reg
 }
 
@@ -783,6 +781,79 @@ func TestZaiContractFixturesAreSecretFree(t *testing.T) {
 		if secretPattern.MatchString(string(body)) {
 			t.Fatalf("fixture %s contains a secret pattern", e.Name())
 		}
+	}
+}
+
+// --- Neuralwatt adapter fixture acceptance ----------------------------------
+//
+// These acceptance tests replay the committed Neuralwatt fixture through the
+// real adapter so the evidence artifact and parser cannot drift independently.
+
+type neuralwattStubTransport struct {
+	body  []byte
+	code  int
+	calls int
+}
+
+func (t *neuralwattStubTransport) Do(*http.Request) (*http.Response, error) {
+	t.calls++
+	return &http.Response{
+		StatusCode: t.code,
+		Body:       io.NopCloser(bytes.NewReader(t.body)),
+		Header:     http.Header{},
+	}, nil
+}
+
+type neuralwattFixtureResolver struct{}
+
+func (neuralwattFixtureResolver) Resolve(quota.CredentialRef) (string, error) {
+	return "synthetic-neuralwatt-fixture-key", nil
+}
+
+func loadNeuralwattFixture(t *testing.T) []byte {
+	t.Helper()
+	path := filepath.Join("testdata", "quota", "neuralwatt", "quota.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	return b
+}
+
+func newNeuralwattFixtureSource(t *testing.T) *quota.NeuralwattSource {
+	t.Helper()
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.NeuralwattEvidence(contractNow))
+	client := &quota.BoundedClient{
+		Transport:    &neuralwattStubTransport{body: loadNeuralwattFixture(t), code: http.StatusOK},
+		Timeout:      time.Second,
+		MaxBodyBytes: 1 << 20,
+	}
+	fixtureNow := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	return quota.NewNeuralwattSource("neuralwatt-fixture", client, neuralwattFixtureResolver{}, reg, fixtureNow)
+}
+
+func TestNeuralwattContractFixture(t *testing.T) {
+	snap, err := newNeuralwattFixtureSource(t).Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable {
+		t.Fatalf("status=%s availability=%s", snap.Status, snap.Availability)
+	}
+	w := contractFindWindow(snap.Windows, "balance_usd")
+	if w == nil || w.Used == nil || *w.Used != 27.5 || w.Limit == nil || *w.Limit != 100 {
+		t.Fatalf("balance window=%+v", w)
+	}
+	if w.UsagePercent == nil || math.Abs(*w.UsagePercent-27.5) > 1e-9 {
+		t.Fatalf("balance usage percent=%v", *w.UsagePercent)
+	}
+}
+
+func TestNeuralwattContractFixtureIsSecretFree(t *testing.T) {
+	body := loadNeuralwattFixture(t)
+	if secretPattern.MatchString(string(body)) {
+		t.Fatal("Neuralwatt fixture contains a secret pattern")
 	}
 }
 

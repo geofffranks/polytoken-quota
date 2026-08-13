@@ -1,0 +1,16 @@
+{
+  "snapshot_at": "2026-08-15T12:00:00Z",
+  "balance": {
+    "credits_remaining_usd": 72.5,
+    "total_credits_usd": 100.0,
+    "credits_used_usd": 27.5,
+    "legacy_credits_usd": 0.0,
+    "new_credits_usd": 100.0
+  },
+  "usage": {
+    "lifetime": {"cost_usd": 27.5, "requests": 42, "energy_kwh": 1.25},
+    "current_month": {"cost_usd": 27.5, "requests": 12, "energy_kwh": 0.75}
+  },
+  "limits": {"overage_limit_usd": null, "rate_limit_tier": "standard"},
+  "subscription": null
+}

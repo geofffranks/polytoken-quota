@@ -134,12 +134,18 @@ The `models` list is the ownership boundary: only listed concrete models and the
 
 Quota fields are:
 
-- `adapter`: `codex`, `zai`, or `anthropic`.
-- `monthly_budget_usd`: required for (and only used by) the `anthropic` adapter — the monthly spend ceiling treated as that provider's quota.
+- `adapter`: `codex`, `zai`, `anthropic`, or `neuralwatt`.
+- `monthly_budget_usd`: required for (and only used by) the `anthropic` adapter — the monthly spend ceiling treated as that provider's quota. Neuralwatt uses its provider-reported USD balance and does not require this field.
 - `freshness_ttl`: how long a successful snapshot remains eligible; defaults to `30m`.
 - `balance_group`: isolates ranking comparisons between provider groups; defaults to `default`.
 - `weight`: deterministic tie-break weight; defaults to `1`.
 - `schedule`: optional IANA timezone and `peak` windows. Each window has lowercase `days` (`mon` through `sun`), `start`, and `end`. Peak windows are written in the provider's local timezone; outside them the provider is treated as off-peak for ranking.
+
+### Neuralwatt adapter
+
+The `neuralwatt` adapter polls Neuralwatt Cloud's read-only quota endpoint (`GET /v1/quota`) with a transient `NEURALWATT_API_KEY` Bearer credential. It selects the first present boundary in this order: key-specific allowance, subscription energy allowance, then provider-reported USD credit balance for PAYG accounts. A present but malformed boundary fails closed rather than falling back to a weaker signal. A blocked key, subscription overage, exhausted balance, authentication failure, or missing/invalid selected limit is never treated as healthy.
+
+The adapter reports the selected provider boundary as one routing window. Usage and energy totals are retained only as provider diagnostics in the response contract; they are not used as a synthetic quota when no enforceable allowance or balance is available. The account balance path does not invent a reset time when the provider does not report one.
 
 ### Anthropic adapter
 

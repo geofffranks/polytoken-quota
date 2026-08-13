@@ -80,17 +80,12 @@ func (p *QuotaPollerImpl) Poll(ctx context.Context, desired policy.Desired, prov
 // never registers or refreshes evidence. An unknown adapter yields an
 // explicitly unsupported source.
 func (p *QuotaPollerImpl) sourceFor(mappingID string, qc *policy.QuotaConfig, reg *quota.EvidenceRegistry, now func() time.Time) quota.QuotaSource {
-	switch qc.Adapter {
-	case "codex":
-		return quota.NewCodexSource(mappingID, p.Client, p.Credentials, "", reg, now())
-	case "zai":
-		return quota.NewZaiSource(mappingID, p.Client, p.Credentials, "", reg, now())
-	case "anthropic":
-		return quota.NewAnthropicSource(mappingID, p.Client, p.Credentials, qc.MonthlyBudgetUSD, reg, now())
-	default:
+	definition, ok := quota.AdapterDefinitionFor(qc.Adapter)
+	if !ok {
 		reason := "unknown quota adapter " + qc.Adapter + "; record evidence before enabling"
 		return unsupportedSource{mappingID: mappingID, reason: reason}
 	}
+	return definition.New(mappingID, p.Client, p.Credentials, qc.MonthlyBudgetUSD, reg, now())
 }
 
 // pollOne polls one source independently, always returning a snapshot. On
@@ -144,10 +139,10 @@ func (u unsupportedSource) Fetch(context.Context) (quota.QuotaSnapshot, error) {
 func NewQuotaPoller() QuotaPoller {
 	evidence := quota.NewEvidenceRegistry()
 	now := time.Now()
-	evidence.Register(quota.CodexUsageEvidence(now))
+	quota.RegisterBuiltInEvidence(evidence, now)
+	// Codex reset-credit inventory is an additional contract, not a separate
+	// adapter, so it remains registered alongside the built-in adapter registry.
 	evidence.Register(quota.CodexResetCreditsEvidence(now))
-	evidence.Register(quota.ZaiEvidence(now))
-	evidence.Register(quota.AnthropicEvidence(now))
 	return &QuotaPollerImpl{
 		Client:      &quota.BoundedClient{},
 		Credentials: quota.DefaultCredentialResolver(),

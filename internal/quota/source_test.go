@@ -17,6 +17,26 @@ import (
 	"time"
 )
 
+func TestBuiltInAdapterRegistry(t *testing.T) {
+	definitions := AdapterDefinitions()
+	want := []string{"anthropic", "codex", "neuralwatt", "zai"}
+	if len(definitions) != len(want) {
+		t.Fatalf("definitions=%d want %d", len(definitions), len(want))
+	}
+	for i, name := range want {
+		if definitions[i].Name != name || definitions[i].Evidence == nil || definitions[i].New == nil {
+			t.Fatalf("definition[%d]=%+v", i, definitions[i])
+		}
+		got, ok := AdapterDefinitionFor(name)
+		if !ok || got.Name != name || !KnownAdapter(name) {
+			t.Fatalf("lookup %q: got=%+v ok=%v known=%v", name, got, ok, KnownAdapter(name))
+		}
+	}
+	if _, ok := AdapterDefinitionFor("unknown"); ok || KnownAdapter("unknown") {
+		t.Fatal("unknown adapter reported as built in")
+	}
+}
+
 // --- HTTP transport fakes -------------------------------------------------
 
 // recordingDoer captures requests (cloned, so inspection survives body close)

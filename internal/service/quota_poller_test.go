@@ -61,8 +61,9 @@ func TestNewQuotaPollerUsesReviewedReleaseEvidence(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	transport := &fakeTransport{
 		canned: map[string]*http.Response{
-			"chatgpt.com": bodyResponse(`{"rate_limit":{"primary_window":{"used_percent":20,"reset_at":100}}}`),
-			"api.z.ai":    bodyResponse(`{"code":200,"success":true,"data":{"limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"percentage":34,"usage":40000000,"currentValue":13628365,"remaining":26371635,"nextResetTime":1768507567547},{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":34,"usage":40000000,"currentValue":13628365,"remaining":26371635,"nextResetTime":1768507567547}],"planName":"Pro"}}`),
+			"chatgpt.com":        bodyResponse(`{"rate_limit":{"primary_window":{"used_percent":20,"reset_at":100}}}`),
+			"api.z.ai":           bodyResponse(`{"code":200,"success":true,"data":{"limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"percentage":34,"usage":40000000,"currentValue":13628365,"remaining":26371635,"nextResetTime":1768507567547},{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":34,"usage":40000000,"currentValue":13628365,"remaining":26371635,"nextResetTime":1768507567547}],"planName":"Pro"}}`),
+			"api.neuralwatt.com": bodyResponse(`{"snapshot_at":"2026-07-19T12:00:00Z","balance":{"credits_remaining_usd":72.5,"total_credits_usd":100,"credits_used_usd":27.5},"subscription":null}`),
 		},
 		called: map[string]int{},
 	}
@@ -75,19 +76,20 @@ func TestNewQuotaPollerUsesReviewedReleaseEvidence(t *testing.T) {
 	impl.Credentials = literalCreds{}
 	impl.Now = func() time.Time { return now }
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
-		"zai":   {Quota: &policy.QuotaConfig{Adapter: "zai"}},
+		"codex":      {Quota: &policy.QuotaConfig{Adapter: "codex"}},
+		"zai":        {Quota: &policy.QuotaConfig{Adapter: "zai"}},
+		"neuralwatt": {Quota: &policy.QuotaConfig{Adapter: "neuralwatt"}},
 	}}
 	out, err := poller.Poll(context.Background(), desired, "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"codex", "zai"} {
+	for _, id := range []string{"codex", "zai", "neuralwatt"} {
 		if out[id].Status != quota.SourceFresh {
 			t.Fatalf("%s status=%s, want fresh: %+v", id, out[id].Status, out[id])
 		}
 	}
-	if transport.called["chatgpt.com"] == 0 || transport.called["api.z.ai"] == 0 {
+	if transport.called["chatgpt.com"] == 0 || transport.called["api.z.ai"] == 0 || transport.called["api.neuralwatt.com"] == 0 {
 		t.Fatalf("reviewed adapters did not poll: calls=%v", transport.called)
 	}
 }

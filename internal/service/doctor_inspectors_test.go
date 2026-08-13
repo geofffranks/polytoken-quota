@@ -20,6 +20,16 @@ func TestAdapterSupportRecognizesAnthropic(t *testing.T) {
 	}
 }
 
+func TestAdapterSupportRecognizesNeuralwatt(t *testing.T) {
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.NeuralwattEvidence(now))
+	status := adapterSupport("neuralwatt", now, reg)
+	if !status.Supported {
+		t.Fatalf("neuralwatt support=%+v, want supported", status)
+	}
+}
+
 func TestPublishDoctorInspectorFindings(t *testing.T) {
 	dir := t.TempDir()
 	journal := filepath.Join(dir, "apply.json")

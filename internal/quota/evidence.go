@@ -26,7 +26,7 @@ import (
 // adapter. It contains NO secrets — only public endpoint paths, auth type
 // categories, and metadata.
 type Evidence struct {
-	Provider    string    // adapter name: "codex", "zai"
+	Provider    string    // built-in adapter name, or a contract-specific provider key
 	ContractID  string    // endpoint contract within the provider; empty for legacy single-endpoint adapters
 	Endpoint    string    // sanitized base URL (no credentials, no query secrets)
 	Method      string    // HTTP method: "GET", "POST"
