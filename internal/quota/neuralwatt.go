@@ -38,6 +38,7 @@ type NeuralwattSource struct {
 }
 
 // NeuralwattEvidence returns the reviewed, sanitized Neuralwatt contract record.
+// The dates are release-owned and do not renew on construction.
 func NeuralwattEvidence(_ time.Time) Evidence {
 	return Evidence{
 		Provider:    neuralwattProviderName,
@@ -46,20 +47,9 @@ func NeuralwattEvidence(_ time.Time) Evidence {
 		AuthType:    "bearer-api-key",
 		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance, usage/limits metadata may be null; blocked/overage states fail closed",
 		FixturePath: "contract/testdata/quota/neuralwatt/quota.json",
-		RecordedAt:  neuralwattEvidenceRecordedAt(),
-		ReviewBy:    neuralwattEvidenceReviewBy(),
+		RecordedAt:  evidenceRecordedAt(),
+		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
 	}
-}
-
-// neuralwattEvidenceRecordedAt and neuralwattEvidenceReviewBy are release-owned
-// dates. They change only when the endpoint contract and fixture are re-reviewed;
-// constructing a poller must not renew evidence automatically.
-func neuralwattEvidenceRecordedAt() time.Time {
-	return time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
-}
-
-func neuralwattEvidenceReviewBy() time.Time {
-	return time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
 }
 
 // NewNeuralwattSource constructs a source using the supplied evidence registry.
@@ -98,10 +88,17 @@ func (n *NeuralwattSource) now() time.Time {
 }
 
 func (n *NeuralwattSource) Status() SupportStatus {
+	return SupportFromEvidence(n.evidenceStatus())
+}
+
+func (n *NeuralwattSource) evidenceStatus() EvidenceStatus {
 	if n.Evidence == nil {
-		return SupportStatus{Reason: "provider neuralwatt has no recorded contract evidence; record evidence before enabling"}
+		return EvidenceStatus{
+			State:  EvidenceAbsent,
+			Reason: "provider " + neuralwattProviderName + " has no recorded contract evidence; record evidence before enabling",
+		}
 	}
-	return SupportFromEvidence(n.Evidence.Status(neuralwattProviderName, n.now()))
+	return n.Evidence.Status(neuralwattProviderName, n.now())
 }
 
 func (n *NeuralwattSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
@@ -124,7 +121,7 @@ func (n *NeuralwattSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		msg := SanitizeError(err)
 		return n.fail(msg), errors.New(msg)
 	}
-	req.Header.Set("Authorization", "Bearer "+cleanNeuralwattKey(key))
+	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "polytoken-quota")
 	resp, err := n.Client.Do(req)
@@ -227,9 +224,6 @@ func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaW
 		if err != nil {
 			return time.Time{}, nil, false, false, err
 		}
-		if len(windows) == 0 && !unavailable {
-			return time.Time{}, nil, false, false, errors.New("neuralwatt: subscription is missing a usable allowance")
-		}
 		return observedAt, windows, unavailable, partial, nil
 	}
 	if response.Balance == nil {
@@ -282,7 +276,7 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription) ([]QuotaWindow, bool
 		return nil, true, false, nil
 	}
 	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || !finiteNonNegative(*s.KWHRemaining) || *s.KWHIncluded <= 0 {
-		return nil, false, false, nil
+		return nil, false, false, errors.New("neuralwatt: subscription is missing a usable allowance")
 	}
 	if *s.KWHRemaining > *s.KWHIncluded {
 		return nil, false, false, errors.New("neuralwatt: subscription remaining exceeds included allowance")

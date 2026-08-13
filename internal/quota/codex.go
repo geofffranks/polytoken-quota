@@ -60,10 +60,11 @@ type CodexSource struct {
 }
 
 // CodexEvidence is the compatibility name for mandatory usage evidence.
-func CodexEvidence(now time.Time) Evidence { return CodexUsageEvidence(now) }
+func CodexEvidence(_ time.Time) Evidence { return CodexUsageEvidence(time.Time{}) }
 
 // CodexUsageEvidence returns the mandatory /wham/usage contract evidence.
-func CodexUsageEvidence(now time.Time) Evidence {
+// The dates are release-owned and do not renew on construction.
+func CodexUsageEvidence(_ time.Time) Evidence {
 	return Evidence{
 		Provider:    codexProviderName,
 		ContractID:  CodexUsageContract,
@@ -72,14 +73,14 @@ func CodexUsageEvidence(now time.Time) Evidence {
 		AuthType:    "oauth-bearer",
 		SchemaNote:  "rate_limit windows + individual_limit spend control + ordinary credits",
 		FixturePath: "contract/testdata/quota/codex/pro.json",
-		RecordedAt:  now,
-		ReviewBy:    now.AddDate(1, 0, 0),
+		RecordedAt:  evidenceRecordedAt(),
+		ReviewBy:    evidenceRecordedAt().AddDate(1, 0, 0),
 	}
 }
 
 // CodexResetCreditsEvidence returns the optional account-scoped inventory
 // contract evidence. Its volatile schema is reviewed every three months.
-func CodexResetCreditsEvidence(now time.Time) Evidence {
+func CodexResetCreditsEvidence(_ time.Time) Evidence {
 	return Evidence{
 		Provider:    codexProviderName,
 		ContractID:  CodexResetCreditsContract,
@@ -88,8 +89,8 @@ func CodexResetCreditsEvidence(now time.Time) Evidence {
 		AuthType:    "oauth-bearer-account",
 		SchemaNote:  "non-negative available_count + credits status and optional ISO-8601 expires_at",
 		FixturePath: "contract/testdata/quota/codex/reset_credits.json",
-		RecordedAt:  now,
-		ReviewBy:    now.AddDate(0, 3, 0),
+		RecordedAt:  evidenceRecordedAt(),
+		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0),
 	}
 }
 

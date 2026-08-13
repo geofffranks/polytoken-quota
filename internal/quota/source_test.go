@@ -37,6 +37,41 @@ func TestBuiltInAdapterRegistry(t *testing.T) {
 	}
 }
 
+// TestBuiltInAdapterEvidenceDoesNotRenewOnConstruction verifies that every
+// built-in adapter returns release-owned fixed dates — the `now` parameter must
+// not slide the evidence window forward. All adapters share the same recording
+// date and derive their review-by per their own cadence.
+func TestBuiltInAdapterEvidenceDoesNotRenewOnConstruction(t *testing.T) {
+	for _, def := range AdapterDefinitions() {
+		t.Run(def.Name, func(t *testing.T) {
+			early := def.Evidence(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+			late := def.Evidence(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+			if !early.RecordedAt.Equal(late.RecordedAt) || !early.ReviewBy.Equal(late.ReviewBy) {
+				t.Fatalf("%s evidence dates changed with now: early=%+v late=%+v", def.Name, early, late)
+			}
+			// Evidence must genuinely expire after its review-by date.
+			status := EvaluateEvidence(&late, late.ReviewBy.Add(time.Minute))
+			if status.State != EvidenceExpired {
+				t.Fatalf("%s evidence should expire after ReviewBy: state=%s", def.Name, status.State)
+			}
+		})
+	}
+}
+
+// TestCodexResetCreditsEvidenceDoesNotRenewOnConstruction covers the additional
+// codex contract that is not part of the built-in adapter registry.
+func TestCodexResetCreditsEvidenceDoesNotRenewOnConstruction(t *testing.T) {
+	first := CodexResetCreditsEvidence(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	later := CodexResetCreditsEvidence(time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC))
+	if !first.RecordedAt.Equal(later.RecordedAt) || !first.ReviewBy.Equal(later.ReviewBy) {
+		t.Fatalf("reset credits evidence dates changed: first=%+v later=%+v", first, later)
+	}
+	status := EvaluateEvidence(&later, later.ReviewBy.Add(time.Minute))
+	if status.State != EvidenceExpired {
+		t.Fatalf("stale evidence state=%s want expired", status.State)
+	}
+}
+
 // --- HTTP transport fakes -------------------------------------------------
 
 // recordingDoer captures requests (cloned, so inspection survives body close)

@@ -659,11 +659,11 @@ func TestZaiEvidenceShape(t *testing.T) {
 	if e.FixturePath != "contract/testdata/quota/zai/pro.json" {
 		t.Fatalf("fixture path = %q", e.FixturePath)
 	}
-	if !e.RecordedAt.Equal(zaiTestNow) {
+	if !e.RecordedAt.Equal(evidenceRecordedAt()) {
 		t.Fatalf("recorded at = %v", e.RecordedAt)
 	}
 	// Quarterly review per evidence policy.
-	if want := zaiTestNow.AddDate(0, 3, 0); !e.ReviewBy.Equal(want) {
+	if want := evidenceRecordedAt().AddDate(0, 3, 0); !e.ReviewBy.Equal(want) {
 		t.Fatalf("review by = %v, want %v", e.ReviewBy, want)
 	}
 	// Evidence is fresh at its own recorded time and unsupported when empty.

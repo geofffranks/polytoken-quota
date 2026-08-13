@@ -80,10 +80,12 @@ type AnthropicSource struct {
 
 // AnthropicEvidence returns the sanitized contract evidence for the Anthropic
 // adapter. Register it in an EvidenceRegistry so the gate recognizes
-// "anthropic" as fresh. ReviewBy is three months after now (quarterly review):
-// the cost-report schema is documented but the amount-unit semantics were
-// confirmed against a live organization, so it reviews on the faster cadence.
-func AnthropicEvidence(now time.Time) Evidence {
+// "anthropic" as fresh. The dates are release-owned and do not renew on
+// construction. ReviewBy is three months after the recording date (quarterly
+// review): the cost-report schema is documented but the amount-unit semantics
+// were confirmed against a live organization, so it reviews on the faster
+// cadence.
+func AnthropicEvidence(_ time.Time) Evidence {
 	return Evidence{
 		Provider:    anthropicProviderName,
 		Endpoint:    anthropicCostReportBase,
@@ -91,8 +93,8 @@ func AnthropicEvidence(now time.Time) Evidence {
 		AuthType:    "admin-api-key",
 		SchemaNote:  "envelope {data:[{starting_at,ending_at,results:[{amount,currency,...}]}],has_more,next_page}; amount is a decimal string in cents; USD only; 1d buckets only, open day absent until UTC day close",
 		FixturePath: "contract/testdata/quota/anthropic/midmonth.json",
-		RecordedAt:  now,
-		ReviewBy:    now.AddDate(0, 3, 0), // quarterly review per evidence policy
+		RecordedAt:  evidenceRecordedAt(),
+		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
 	}
 }
 

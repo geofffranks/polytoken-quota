@@ -1127,10 +1127,10 @@ func TestCodexEvidenceShape(t *testing.T) {
 	if e.FixturePath != "contract/testdata/quota/codex/pro.json" {
 		t.Fatalf("fixture path = %q", e.FixturePath)
 	}
-	if !e.RecordedAt.Equal(codexTestNow) {
+	if !e.RecordedAt.Equal(evidenceRecordedAt()) {
 		t.Fatalf("recorded at = %v", e.RecordedAt)
 	}
-	if want := codexTestNow.AddDate(1, 0, 0); !e.ReviewBy.Equal(want) {
+	if want := evidenceRecordedAt().AddDate(1, 0, 0); !e.ReviewBy.Equal(want) {
 		t.Fatalf("review by = %v, want %v", e.ReviewBy, want)
 	}
 	// Evidence is fresh at its own recorded time and unsupported when empty.

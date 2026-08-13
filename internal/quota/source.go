@@ -332,8 +332,18 @@ func KnownAdapter(name string) bool {
 	return ok
 }
 
+// evidenceRecordedAt is the shared release-owned date when every built-in
+// adapter contract was last reviewed. It changes only when the contracts and
+// fixtures are re-reviewed; constructing a poller must not renew evidence
+// automatically. Each adapter derives its ReviewBy from this date per its own
+// review cadence.
+func evidenceRecordedAt() time.Time {
+	return time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)
+}
+
 // RegisterBuiltInEvidence adds current built-in adapter evidence to reg. The
-// evidence factories themselves own their review-date policy.
+// evidence factories return release-owned fixed dates; the now parameter is
+// accepted for signature compatibility but does not renew evidence.
 func RegisterBuiltInEvidence(reg *EvidenceRegistry, now time.Time) {
 	for _, definition := range builtInAdapters {
 		reg.Register(definition.Evidence(now))

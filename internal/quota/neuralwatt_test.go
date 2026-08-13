@@ -46,7 +46,7 @@ func TestNeuralwattEvidenceAndCredentialContract(t *testing.T) {
 	if ev.Endpoint != neuralwattQuotaEndpoint || ev.Method != http.MethodGet || ev.FixturePath == "" {
 		t.Fatalf("evidence=%+v", ev)
 	}
-	if !ev.RecordedAt.Equal(time.Date(2026, 8, 13, 0, 0, 0, 0, time.UTC)) || !ev.ReviewBy.Equal(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)) {
+	if !ev.RecordedAt.Equal(evidenceRecordedAt()) || !ev.ReviewBy.Equal(evidenceRecordedAt().AddDate(0, 3, 0)) {
 		t.Fatalf("evidence dates=%v/%v", ev.RecordedAt, ev.ReviewBy)
 	}
 	resolver := &neuralwattResolver{}
@@ -295,5 +295,13 @@ func TestNeuralwattEvidenceGateAndAuthFailure(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), neuralwattAPIKeyEnv) || strings.Contains(err.Error(), neuralwattTestKey) || strings.Contains(snap.Error, neuralwattTestKey) {
 			t.Fatalf("HTTP %d auth snapshot=%+v err=%v", status, snap, err)
 		}
+	}
+}
+
+func TestNeuralwattNoUsableBoundaryFailsClosed(t *testing.T) {
+	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","balance":null,"subscription":null}`, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
 	}
 }

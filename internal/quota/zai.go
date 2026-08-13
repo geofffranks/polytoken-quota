@@ -60,9 +60,10 @@ type ZaiSource struct {
 
 // ZaiEvidence returns the sanitized contract evidence for the z.ai adapter.
 // Register it in an EvidenceRegistry so the gate recognizes "zai" as fresh.
-// ReviewBy is three months after now (quarterly review) per the evidence policy,
-// reflecting the z.ai schema's higher drift rate.
-func ZaiEvidence(now time.Time) Evidence {
+// The dates are release-owned and do not renew on construction. ReviewBy is
+// three months after the recording date (quarterly review) per the evidence
+// policy, reflecting the z.ai schema's higher drift rate.
+func ZaiEvidence(_ time.Time) Evidence {
 	return Evidence{
 		Provider:    zaiProviderName,
 		Endpoint:    zaiGlobalEndpoint,
@@ -70,8 +71,8 @@ func ZaiEvidence(now time.Time) Evidence {
 		AuthType:    "api-key",
 		SchemaNote:  "envelope {code,success,data:{limits[]}} with percentage always present, optional raw counts, millis resets",
 		FixturePath: "contract/testdata/quota/zai/pro.json",
-		RecordedAt:  now,
-		ReviewBy:    now.AddDate(0, 3, 0), // quarterly review per evidence policy
+		RecordedAt:  evidenceRecordedAt(),
+		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
 	}
 }
 

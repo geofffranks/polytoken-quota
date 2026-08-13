@@ -431,6 +431,27 @@ func TestReleaseEvidenceGate(t *testing.T) {
 	}
 }
 
+// TestBuiltInReleaseEvidenceIsFreshNow is an unconditional CI guard. Built-in
+// adapter evidence uses release-owned fixed dates; this test fails if any
+// adapter's ReviewBy date has passed, so stale evidence cannot ship unnoticed.
+func TestBuiltInReleaseEvidenceIsFreshNow(t *testing.T) {
+	reg := buildReleaseRegistry()
+	now := time.Now()
+	for _, def := range quota.AdapterDefinitions() {
+		if def.Name == "codex" {
+			for _, contractID := range []string{quota.CodexUsageContract, quota.CodexResetCreditsContract} {
+				if got := reg.StatusContract(def.Name, contractID, now); got.State != quota.EvidenceFresh {
+					t.Errorf("adapter %s/%s evidence is %s at %s: %s", def.Name, contractID, got.State, now.Format("2006-01-02"), got.Reason)
+				}
+			}
+			continue
+		}
+		if got := reg.StatusContract(def.Name, "", now); got.State != quota.EvidenceFresh {
+			t.Errorf("adapter %s evidence is %s at %s: %s", def.Name, got.State, now.Format("2006-01-02"), got.Reason)
+		}
+	}
+}
+
 // --- Codex adapter fixture acceptance -------------------------------------
 //
 // These acceptance tests load the sanitized Codex fixture files from the
