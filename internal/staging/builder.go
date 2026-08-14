@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -58,6 +59,13 @@ const (
 // inert placeholders used in ConfigDir for validation never reach live files.
 // When empty (no plan edits, or the builder was constructed without a plan),
 // callers fall back to ConfigDir.
+//
+// AuthEnvRefs names the environment variables referenced (${VAR}) by the auth
+// of catalog/dynamic providers whose real values are preserved in the staged
+// ConfigDir. The validator resolves and threads exactly these into the Polytoken
+// subprocess so polytoken doctor can expand them for its live dynamic-catalog
+// fetch. It is empty for static-only configs, leaving subprocess env isolation
+// unchanged.
 type Candidate struct {
 	Root          string
 	ConfigDir     string
@@ -65,6 +73,7 @@ type Candidate struct {
 	UserConfigDir string
 	PublishDir    string
 	TargetID      string
+	AuthEnvRefs   []string
 	cleanup       func() error
 }
 
@@ -163,7 +172,8 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 		return Candidate{}, fmt.Errorf("staging: create publish dir: %w", err)
 	}
 	cleanup := newCleanup(root)
-	if err := b.stage(ctx, configDir, userConfigDir, publishDir, workDir, res, plan); err != nil {
+	var authEnvRefs []string
+	if err := b.stage(ctx, configDir, userConfigDir, publishDir, workDir, res, plan, &authEnvRefs); err != nil {
 		_ = cleanup()
 		return Candidate{}, err
 	}
@@ -174,6 +184,7 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 		UserConfigDir: userConfigDir,
 		PublishDir:    publishDir,
 		TargetID:      res.ID,
+		AuthEnvRefs:   authEnvRefs,
 		cleanup:       cleanup,
 	}, nil
 }
@@ -183,7 +194,7 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 // real-content copies of managed files (no secret redaction) with plan edits
 // applied, so publication never publishes the inert placeholders from configDir.
 // Any error leaves the caller responsible for removing root.
-func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir, workDir string, res target.Resolved, plan reconcile.Plan) error {
+func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir, workDir string, res target.Resolved, plan reconcile.Plan, authEnvRefs *[]string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -201,9 +212,12 @@ func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cfgBytes, err := buildEffectiveConfig(global.Config, project.Config, b.AuthMode)
+	cfgBytes, refs, err := buildEffectiveConfig(global.Config, project.Config, b.AuthMode)
 	if err != nil {
 		return fmt.Errorf("merge config: %w", err)
+	}
+	if authEnvRefs != nil {
+		*authEnvRefs = refs
 	}
 	if err := writeStaged(filepath.Join(configDir, stagedConfigFile), cfgBytes); err != nil {
 		return err
@@ -299,7 +313,7 @@ func buildPublishDir(publishDir string, global, project Layer, plan reconcile.Pl
 		seen[fe.File] = true
 	}
 	// Build the real (un-redacted) config once.
-	cfgBytes, err := buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
+	cfgBytes, _, err := buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
 	if err != nil {
 		return err
 	}
@@ -368,26 +382,30 @@ func fieldToEdit(fe reconcile.FieldEdit) document.Edit {
 
 // buildEffectiveConfig deep-merges the global and project config layers (project
 // wins), applies the auth branch, and marshals the result. Parsing through a map
-// guarantees no environment-variable secret expansion: values stay literal. No
-// source secret is written when mode is AuthInert.
-func buildEffectiveConfig(global, project []byte, mode AuthMode) ([]byte, error) {
+// guarantees no environment-variable secret expansion: values stay literal.
+// Under AuthInert, source secrets are replaced with inert placeholders — except
+// for catalog/dynamic providers, whose real auth is preserved verbatim because
+// polytoken doctor needs it for its live dynamic-catalog fetch.
+func buildEffectiveConfig(global, project []byte, mode AuthMode) ([]byte, []string, error) {
 	g, err := decodeConfig(global)
 	if err != nil {
-		return nil, fmt.Errorf("parse global: %w", err)
+		return nil, nil, fmt.Errorf("parse global: %w", err)
 	}
 	p, err := decodeConfig(project)
 	if err != nil {
-		return nil, fmt.Errorf("parse project: %w", err)
+		return nil, nil, fmt.Errorf("parse project: %w", err)
 	}
 	merged := deepMerge(g, p)
+	var authEnvRefs []string
 	if mode == AuthInert {
 		redactSecrets(merged)
+		authEnvRefs = catalogAuthEnvRefs(merged)
 	}
 	out, err := yaml.Marshal(merged)
 	if err != nil {
-		return nil, fmt.Errorf("marshal effective config: %w", err)
+		return nil, nil, fmt.Errorf("marshal effective config: %w", err)
 	}
-	return out, nil
+	return out, authEnvRefs, nil
 }
 
 // decodeConfig parses YAML bytes into a generic map. Empty input yields an empty
@@ -472,14 +490,112 @@ const inertSecret = "inert-validation-placeholder"
 // redactSecrets walks m recursively and replaces the scalar value of any
 // auth-bearing key with the inert placeholder. Nested maps are descended; map
 // values are updated in place.
+//
+// The providers map is handled specially: dynamic catalog providers are skipped
+// entirely, because polytoken doctor performs a live, authenticated
+// dynamic-catalog fetch for them and therefore needs their real auth. This is
+// the scoped AuthTransientSource exception from the design spec, limited to just
+// those providers. Every other provider and every other auth-bearing leaf is
+// redacted as usual, so static providers' secrets never reach staging.
 func redactSecrets(m map[string]any) {
 	for k, v := range m {
 		if vm, ok := v.(map[string]any); ok {
+			if k == "providers" {
+				redactProviders(vm)
+				continue
+			}
 			redactSecrets(vm)
 			continue
 		}
 		if authValueKeys[strings.ToLower(k)] {
 			m[k] = inertSecret
+		}
+	}
+}
+
+// redactProviders redacts each provider's secret-bearing values except for
+// dynamic catalog providers, whose auth is preserved verbatim for doctor.
+func redactProviders(providers map[string]any) {
+	for _, pv := range providers {
+		pm, ok := pv.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isCatalogProvider(pm) {
+			continue
+		}
+		redactSecrets(pm)
+	}
+}
+
+// isCatalogProvider reports whether a provider entry is a dynamic catalog
+// provider whose models polytoken discovers via a live authenticated fetch at
+// startup (and therefore during doctor).
+func isCatalogProvider(pm map[string]any) bool {
+	kind, ok := pm["kind"].(map[string]any)
+	if !ok {
+		return false
+	}
+	kt, ok := kind["type"].(string)
+	return ok && dynamicProviderKinds[strings.ToLower(kt)]
+}
+
+// dynamicProviderKinds names provider kind.type values whose models are
+// discovered via a live dynamic-catalog fetch. polytoken doctor performs an
+// authenticated network call for these providers, so their auth must survive
+// AuthInert redaction. Extend this set if Polytoken adds further dynamic kinds.
+var dynamicProviderKinds = map[string]bool{
+	"catalog": true,
+}
+
+// catalogAuthEnvRefs returns the deduplicated environment-variable names
+// referenced via ${VAR} inside the auth of preserved catalog providers. The
+// validator threads exactly these into the Polytoken subprocess so doctor can
+// expand them. Only catalog providers' auth is scanned; redacted static
+// providers contribute nothing.
+func catalogAuthEnvRefs(merged map[string]any) []string {
+	providers, ok := merged["providers"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var refs []string
+	seen := make(map[string]bool)
+	for _, pv := range providers {
+		pm, ok := pv.(map[string]any)
+		if !ok || !isCatalogProvider(pm) {
+			continue
+		}
+		auth, ok := pm["auth"].(map[string]any)
+		if !ok {
+			continue
+		}
+		collectEnvRefs(auth, seen, &refs)
+	}
+	return refs
+}
+
+// envRefRe matches a plain ${VAR} environment reference (the form the Polytoken
+// auth schema documents, e.g. ${NEURALWATT_API_KEY}).
+var envRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// collectEnvRefs appends each ${VAR} name found in string values of v to refs,
+// using seen to deduplicate across providers and fields.
+func collectEnvRefs(v any, seen map[string]bool, refs *[]string) {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, val := range t {
+			collectEnvRefs(val, seen, refs)
+		}
+	case []any:
+		for _, val := range t {
+			collectEnvRefs(val, seen, refs)
+		}
+	case string:
+		for _, match := range envRefRe.FindAllStringSubmatch(t, -1) {
+			if !seen[match[1]] {
+				seen[match[1]] = true
+				*refs = append(*refs, match[1])
+			}
 		}
 	}
 }
