@@ -372,9 +372,12 @@ func (d *doc) lineIndent(lineStart int) int {
 	return n
 }
 
-// indentForInsert returns the indentation a new key under the parent of path
-// should use: one level (2 spaces) deeper than the parent mapping, or 0 for a
-// top-level key. Polytoken config uses 2-space indentation throughout.
+// indentForInsert returns the indentation (in spaces) at which the final
+// segment of path should be placed. When the parent mapping at path[:len-1] is
+// populated, the new key matches the indentation of its existing siblings.
+// When the parent is null or empty (a freshly inserted intermediate key with no
+// children yet), the indentation is derived from the document's existing
+// structure so the result is correct for any indentation width.
 func (d *doc) indentForInsert(path []string) int {
 	if len(path) <= 1 {
 		return 0
@@ -391,14 +394,56 @@ func (d *doc) indentForInsert(path []string) int {
 			parent = parent.Content[0]
 		}
 	}
-	if parent.Kind != yaml.MappingNode || len(parent.Content) == 0 {
+	if parent.Kind == yaml.MappingNode && len(parent.Content) > 0 {
+		firstKey := parent.Content[0]
+		if firstKey != nil {
+			return d.lineIndent(d.offset(firstKey.Line, 1))
+		}
+	}
+	// Parent exists but is null or empty (e.g. a freshly inserted intermediate
+	// key). Derive the correct indentation from the surrounding structure
+	// instead of assuming a fixed step.
+	return d.deriveIndent(path)
+}
+
+// deriveIndent computes the indentation for a new key whose parent mapping is
+// null or empty. It examines the grandparent mapping (path[:len-2]) for a
+// sibling of the parent key whose value has populated children — since valid
+// YAML uses consistent indentation within a nesting level, that sibling's child
+// indentation is the correct indent for the new key. If no sibling has
+// children, it derives the indentation step from the grandparent's key-to-child
+// delta and adds it to the parent key's own indentation. The final fallback
+// assumes a 2-space step per level.
+func (d *doc) deriveIndent(path []string) int {
+	if len(path) < 3 {
 		return (len(path) - 1) * 2
 	}
-	firstKey := parent.Content[0]
-	if firstKey == nil {
-		return (len(path) - 1) * 2
+	gp, gpKey, _, gpExists, gpErr := d.resolveValue(path[:len(path)-2])
+	if gpErr == nil && gpExists && gp != nil && gp.Kind == yaml.MappingNode {
+		// A sibling whose value is a populated mapping reveals the child
+		// indentation directly.
+		for j := 0; j+1 < len(gp.Content); j += 2 {
+			v := gp.Content[j+1]
+			if v != nil && v.Kind == yaml.MappingNode && len(v.Content) > 0 {
+				if fc := v.Content[0]; fc != nil {
+					return d.lineIndent(d.offset(fc.Line, 1))
+				}
+			}
+		}
+		// No sibling has children. Derive the step from the grandparent's
+		// own key-to-child indentation delta and apply it to the parent key.
+		_, pKey, _, pExists, _ := d.resolveValue(path[:len(path)-1])
+		if pExists && pKey != nil && gpKey != nil &&
+			len(gp.Content) > 0 && gp.Content[0] != nil {
+			pIndent := d.lineIndent(d.offset(pKey.Line, 1))
+			gpIndent := d.lineIndent(d.offset(gpKey.Line, 1))
+			childIndent := d.lineIndent(d.offset(gp.Content[0].Line, 1))
+			if step := childIndent - gpIndent; step > 0 {
+				return pIndent + step
+			}
+		}
 	}
-	return d.lineIndent(d.offset(firstKey.Line, 1))
+	return (len(path) - 1) * 2
 }
 
 // insertKey inserts a new "key: value" (possibly multi-line) entry at path. The

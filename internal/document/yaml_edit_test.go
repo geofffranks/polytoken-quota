@@ -478,3 +478,83 @@ func TestIsAmbiguousDuplicateKeyIsStructural(t *testing.T) {
 		t.Fatalf("duplicate-key document not classified ambiguous: %v", err)
 	}
 }
+
+// TestBoolInsertMissingModelWideIndent reproduces the bug where inserting a
+// boolean under a model absent from a 4-space-indented document placed the key
+// at the model-key indentation (4) instead of the model-child indentation (8).
+// The old fallback (len(path)-1)*2 = 4 matched the model-key level, making
+// "enabled" a sibling of the model names rather than a child.
+func TestBoolInsertMissingModelWideIndent(t *testing.T) {
+	in := []byte("models:\n" +
+		"    codex/gpt-5.4:\n" +
+		"        enabled: false\n" +
+		"permissions: {}\n")
+	out, err := EditYAML(in, []Edit{
+		{Path: enabledPath("neuralwatt/deepseek-v4-flash"), Kind: Boolean, Bool: boolPtr(true)},
+	})
+	if err != nil {
+		t.Fatalf("insert under missing model failed: %v", err)
+	}
+	// The new enabled must be at 8-space indent (child of the model), not
+	// 4-space (sibling of model keys under models:). Anchor with \n so a
+	// 4-space pattern does not match inside the 8-space line.
+	if bytes.Contains(out, []byte("\n    enabled: true\n")) {
+		t.Fatalf("enabled inserted at model-key level (4-space):\n%s", out)
+	}
+	if !bytes.Contains(out, []byte("\n        enabled: true\n")) {
+		t.Fatalf("enabled not at model-child level (8-space):\n%s", out)
+	}
+	if _, err := EditYAML(out, nil); err != nil {
+		t.Fatalf("result does not parse: %v", err)
+	}
+}
+
+// TestBoolInsertMultipleMissingModelsNoDuplicate inserts enabled for three
+// models absent from a 4-space-indented document. Before the fix, the third
+// insertion failed with "duplicate key enabled" because the first two placed
+// enabled at the models-mapping level (4-space), creating siblings.
+func TestBoolInsertMultipleMissingModelsNoDuplicate(t *testing.T) {
+	in := []byte("models:\n" +
+		"    codex/gpt-5.4:\n" +
+		"        enabled: false\n" +
+		"permissions: {}\n")
+	edits := []Edit{
+		{Path: enabledPath("neuralwatt/a"), Kind: Boolean, Bool: boolPtr(true)},
+		{Path: enabledPath("neuralwatt/b"), Kind: Boolean, Bool: boolPtr(true)},
+		{Path: enabledPath("neuralwatt/c"), Kind: Boolean, Bool: boolPtr(false)},
+	}
+	out, err := EditYAML(in, edits)
+	if err != nil {
+		t.Fatalf("inserting enabled for multiple missing models failed: %v", err)
+	}
+	// No enabled key should appear at the 4-space model-key level.
+	if bytes.Contains(out, []byte("\n    enabled: ")) {
+		t.Fatalf("enabled key at wrong indentation level:\n%s", out)
+	}
+	if _, err := EditYAML(out, nil); err != nil {
+		t.Fatalf("result does not parse: %v", err)
+	}
+}
+
+// TestBoolInsertMissingModelNonStandardIndent verifies the indentation is
+// derived from siblings rather than a fixed step. With 3-space indentation the
+// old fallback (len(path)-1)*2 = 4 would not match the actual child indent (6).
+func TestBoolInsertMissingModelNonStandardIndent(t *testing.T) {
+	in := []byte("models:\n" +
+		"   codex/gpt-5.4:\n" +
+		"      enabled: false\n" +
+		"permissions: {}\n")
+	out, err := EditYAML(in, []Edit{
+		{Path: enabledPath("neuralwatt/deepseek-v4-flash"), Kind: Boolean, Bool: boolPtr(true)},
+	})
+	if err != nil {
+		t.Fatalf("insert under missing model failed: %v", err)
+	}
+	// Sibling children are at 6-space indent; the new key must match.
+	if !bytes.Contains(out, []byte("      enabled: true\n")) {
+		t.Fatalf("enabled not at sibling-child indentation (6-space):\n%s", out)
+	}
+	if _, err := EditYAML(out, nil); err != nil {
+		t.Fatalf("result does not parse: %v", err)
+	}
+}
