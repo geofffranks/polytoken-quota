@@ -543,13 +543,34 @@ func sanitizeIdentifierOptional(s string) string {
 	}
 	return sanitizeIdentifier(s)
 }
+// unsafeIdentifier is the redaction sentinel emitted by sanitizeIdentifier when
+// a required identifier is empty, invalid UTF-8, or contains control characters.
+// It is never a real provider or mapping identifier.
+const unsafeIdentifier = "unsafe-id"
+
 func sanitizeIdentifier(s string) string {
 	s = quota.SanitizeText(s)
 	if !utf8.ValidString(s) || s == "" || hasControl(s) {
-		return "unsafe-id"
+		return unsafeIdentifier
 	}
 	return truncateUTF8(s, HistoryIdentifierBytes)
 }
+
+// sanitizeEventProvider sanitizes the optional Provider field of an event
+// record. Unlike a required identifier, an empty provider is valid:
+// routing_changed events carry their identity in MappingID, and the display
+// falls back from an empty Provider to MappingID. Because the redaction
+// sentinel is never a real provider name, any occurrence — including pre-fix
+// records that baked it into this optional field — is healed to empty so the
+// MappingID fallback works.
+func sanitizeEventProvider(s string) string {
+	out := sanitizeIdentifierOptional(s)
+	if out == unsafeIdentifier {
+		return ""
+	}
+	return out
+}
+
 func truncateUTF8(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -712,7 +733,7 @@ func ValidateEventHistory(h EventHistory) error {
 func SanitizeEventHistory(h EventHistory) EventHistory {
 	out := EventHistory{OmittedEvents: h.OmittedEvents, Events: make([]EventRecord, len(h.Events))}
 	for i, e := range h.Events {
-		e.Provider = sanitizeIdentifier(e.Provider)
+		e.Provider = sanitizeEventProvider(e.Provider)
 		e.MappingID = sanitizeIdentifier(e.MappingID)
 		e.Action = sanitizeText(e.Action)
 		e.Reason = sanitizeText(e.Reason)
