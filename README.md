@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling and runtime routing are opt-in. When enabled, the tool ranks configured providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow.
+Quota polling participates per provider: any provider mapping with a `quota` block is polled and quota-based routing is enabled by default. The tool ranks configured providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
 The tool never controls a running Polytoken process, stores provider credentials, or persists raw provider responses, auth headers, or account IDs.
 
@@ -35,7 +35,7 @@ This creates `~/.polytoken-quota/desired.yaml`. `init` without `--force` refuses
 polytoken-quota init --force
 ```
 
-Review the generated policy before enabling quota polling or routing. Use `polytoken-quota doctor` for actionable configuration, mapping, quota, drift, and validation diagnostics.
+Review the generated policy before adding quota blocks. Use `polytoken-quota doctor` for actionable configuration, mapping, quota, drift, and validation diagnostics.
 
 ## Release downloads
 
@@ -72,14 +72,12 @@ All `polytoken-quota` configuration lives in:
 ~/.polytoken-quota/desired.yaml
 ```
 
-The file is versioned YAML and is created by `polytoken-quota init`. It has four main sections:
+The file is versioned YAML and is created by `polytoken-quota init`. Its main sections:
 
-- `providers.<id>` is the provider mapping identity and enumerates the exact concrete models managed by that mapping.
+- `providers.<id>` is the provider mapping identity, enumerates the exact concrete models managed by that mapping, and optionally carries a `quota` block that enrolls the provider in quota polling and routing. The mapping key selects the quota adapter (`codex`, `zai`, `anthropic`, or `neuralwatt`).
 - `global` defines the global Polytoken root, default chains (`full`, `mini`, `nano`, `classifier`), and the definition files whose `polytoken.model` or `polytoken.fallback_models` fields are managed.
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
-- `operational` controls validation timeout, lock wait, recovered-error retention, and backup count. If omitted, defaults are 30s, 10s, 168h, and 5 backups.
-
-Quota polling and managed routing use the same `desired.yaml` file. Add a `quota` block under each quota-participating `providers.<id>` mapping, then enable quota-based reordering with the top-level `routing.enabled` flag. The `status` command shows only mappings with a `quota` block. Mappings without a `quota` block remain managed routing participants: they keep their configured chain positions, are not quota-ranked, and still honor explicit disable or unavailable state.
+- `routing`, `operational`, and every quota field except `monthly_budget_usd` (required for `anthropic`) are optional with sane defaults — omit them.
 
 A complete minimal shape is:
 
@@ -87,55 +85,24 @@ A complete minimal shape is:
 version: 1
 providers:
   codex:
-    models:
-      - codex/gpt-5
+    models: [codex/gpt-5]
+    quota: {}
+  anthropic:
+    models: [anthropic/claude-sonnet-4-6]
     quota:
-      adapter: codex
-      freshness_ttl: 30m
-      balance_group: primary
-      weight: 2
-      schedule:
-        timezone: Asia/Singapore
-        peak:
-          - days: [mon, tue, wed, thu, fri]
-            start: "14:00"
-            end: "18:00"
-  zai:
-    models:
-      - zai/glm-4.5
-    quota:
-      adapter: zai
-      freshness_ttl: 30m
-      balance_group: reserve
-      weight: 1
+      monthly_budget_usd: 250
 
 global:
-  id: global
   root: /home/user/.config/polytoken
-  full: [codex/gpt-5, zai/glm-4.5]
-  definitions:
-    - path: agents/research.md
-      chain: [codex/gpt-5, zai/glm-4.5]
+  full: [codex/gpt-5, anthropic/claude-sonnet-4-6]
 projects: []
-routing:
-  enabled: true
-operational:
-  validation_timeout: 30s
-  lock_wait: 10s
-  recovered_retention: 168h
-  backup_count: 5
 ```
+
+Mappings without a `quota` block remain managed routing participants: they keep their configured chain positions, are not quota-ranked, and still honor explicit disable or unavailable state. The `status` command shows only mappings with a `quota` block.
 
 The `models` list is the ownership boundary: only listed concrete models and the listed target chains/definition fields are managed. Preserve unmanaged Polytoken settings outside those fields. Model entries may be bare names, as shown above, or explicit mappings such as `codex/gpt-5: {enabled: true}`.
 
-Quota fields are:
-
-- `adapter`: `codex`, `zai`, `anthropic`, or `neuralwatt`.
-- `monthly_budget_usd`: required for (and only used by) the `anthropic` adapter — the monthly spend ceiling treated as that provider's quota. Neuralwatt uses its provider-reported USD balance and does not require this field.
-- `freshness_ttl`: how long a successful snapshot remains eligible; defaults to `30m`.
-- `balance_group`: isolates ranking comparisons between provider groups; defaults to `default`.
-- `weight`: deterministic tie-break weight; defaults to `1`.
-- `schedule`: optional IANA timezone and `peak` windows. Each window has lowercase `days` (`mon` through `sun`), `start`, and `end`. Peak windows are written in the provider's local timezone; outside them the provider is treated as off-peak for ranking.
+See **[docs/configuration.md](docs/configuration.md)** for the complete reference: every quota field (`monthly_budget_usd`, `freshness_ttl`, `balance_group`, `weight`, `schedule`), routing opt-out, and the `operational` knobs, with their defaults.
 
 ### Neuralwatt adapter
 
@@ -176,7 +143,7 @@ z.ai allowance. The window resets at the first of each month (UTC).
   in about a minute, so a scheduled snapshot of them carries no
   session-start routing signal.
 
-`routing.enabled` defaults to `false`. Enabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
+`routing.enabled` defaults to `true` (an omitted `routing` section means enabled). Disabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
 
 ## Commands
 
@@ -226,7 +193,7 @@ The event timeline is bounded and atomically persisted inside `state.json`. It n
 
 ## Quota polling and routing
 
-Quota polling and routing are disabled by default. Run a one-shot check manually or schedule it with an external scheduler:
+Quota polling runs per provider with a `quota` block, and quota-based routing is enabled by default. Run a one-shot check manually or schedule it with an external scheduler:
 
 ```sh
 polytoken-quota check --reconcile

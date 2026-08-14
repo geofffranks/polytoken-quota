@@ -276,6 +276,59 @@ func TestLegacyAndOrphanedDiscoverabilityFindings(t *testing.T) {
 	})
 }
 
+// TestLegacyQuotaAdapterKeyDetection proves the ignored legacy `adapter` key
+// inside a provider quota block is detected structurally (block and flow
+// styles), scoped to providers.<id>.quota only.
+func TestLegacyQuotaAdapterKeyDetection(t *testing.T) {
+	hasLegacyAdapter := func(raw string) *Finding {
+		findings := DiscoverabilityFindings([]byte(raw), nil, nil)
+		for i := range findings {
+			if findings[i].Code == "legacy-quota-adapter" {
+				return &findings[i]
+			}
+		}
+		return nil
+	}
+	t.Run("block style", func(t *testing.T) {
+		raw := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\n    quota:\n      adapter: codex\n"
+		f := hasLegacyAdapter(raw)
+		if f == nil {
+			t.Fatal("missing legacy-quota-adapter finding for block-style adapter key")
+		}
+		if !strings.Contains(f.Message, "codex") || !strings.Contains(f.Message, "adapter") {
+			t.Errorf("finding message lacks provider or key: %s", f.Message)
+		}
+	})
+	t.Run("flow style", func(t *testing.T) {
+		raw := "version: 1\nproviders:\n  zai: {models: [zai/m], quota: {adapter: zai}}\n"
+		if hasLegacyAdapter(raw) == nil {
+			t.Fatal("missing legacy-quota-adapter finding for flow-style adapter key")
+		}
+	})
+	t.Run("clean quota block", func(t *testing.T) {
+		raw := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\n    quota: {}\n"
+		if hasLegacyAdapter(raw) != nil {
+			t.Fatal("unexpected legacy-quota-adapter finding for clean quota block")
+		}
+	})
+	t.Run("adapter key outside quota not flagged", func(t *testing.T) {
+		raw := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\nnotproviders:\n  adapter: x\n"
+		if hasLegacyAdapter(raw) != nil {
+			t.Fatal("unexpected legacy-quota-adapter finding for adapter key outside a quota block")
+		}
+	})
+	t.Run("multiple providers bounded and sorted", func(t *testing.T) {
+		raw := "version: 1\nproviders:\n  zai:\n    models: [zai/m]\n    quota: {adapter: zai}\n  codex:\n    models: [codex/m]\n    quota: {adapter: codex}\n"
+		f := hasLegacyAdapter(raw)
+		if f == nil {
+			t.Fatal("missing legacy-quota-adapter finding")
+		}
+		if !strings.Contains(f.Message, "codex") || !strings.Contains(f.Message, "zai") {
+			t.Errorf("finding message lacks providers: %s", f.Message)
+		}
+	})
+}
+
 // TestDoctorFindingsAndPersistedErrorFields proves Run emits a finding for every
 // static/live/pending condition and that the persisted pending target error
 // carries the required detail fields.

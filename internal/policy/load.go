@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"gopkg.in/yaml.v3"
 )
@@ -263,7 +264,10 @@ func operationalFromWire(w *operationalWire) (Operational, error) {
 	if err != nil {
 		return Operational{}, err
 	}
-	bc := w.BackupCount
+	bc := defaultOperational.BackupCount
+	if w.BackupCount != nil {
+		bc = *w.BackupCount
+	}
 	if bc <= 0 {
 		return Operational{}, fmt.Errorf("policy: operational backup_count must be >= 1, got %d", bc)
 	}
@@ -346,7 +350,9 @@ type operationalWire struct {
 	ValidationTimeout  string `yaml:"validation_timeout"`
 	LockWait           string `yaml:"lock_wait"`
 	RecoveredRetention string `yaml:"recovered_retention"`
-	BackupCount        int    `yaml:"backup_count"`
+	// BackupCount is a pointer so an omitted key (nil) can default to 5 while
+	// an explicit zero or negative value is still rejected.
+	BackupCount *int `yaml:"backup_count"`
 }
 
 type targetWire struct {
@@ -369,9 +375,10 @@ type routingWire struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// quotaWire is the on-disk shape of a mapping's `quota` section.
+// quotaWire is the on-disk shape of a mapping's `quota` section. The mapping
+// key itself selects the quota adapter, so there is no adapter field; a quota
+// block under a key that is not a known adapter name rejects policy load.
 type quotaWire struct {
-	Adapter          string        `yaml:"adapter"`
 	FreshnessTTL     string        `yaml:"freshness_ttl"`
 	BalanceGroup     string        `yaml:"balance_group"`
 	Weight           int           `yaml:"weight"`
@@ -415,22 +422,32 @@ type peakWindowWire struct {
 }
 
 // routingFromWire translates the optional top-level routing section. A nil
-// section yields routing disabled (the backward-compatible default).
+// section yields routing enabled: quota-based routing is the tool's primary
+// purpose, so desired.yaml files without a routing section route by default.
+// An explicit `routing: {enabled: false}` opts out.
 func routingFromWire(w *routingWire) RoutingConfig {
 	if w == nil {
-		return RoutingConfig{}
+		return RoutingConfig{Enabled: true}
 	}
 	return RoutingConfig{Enabled: w.Enabled}
 }
 
 // quotaFromWire translates a mapping's quota section into a QuotaConfig. The
-// schedule, when present, is validated via routing.ParseSchedule so an invalid
-// timezone/day/time rejects policy loading. FreshnessTTL defaults to 30m when
-// omitted (matching the routing package's default), like the operational
-// durations.
+// mapping key is the adapter name and must be a known adapter, validated here
+// so an unknown key rejects policy load. The schedule, when present, is
+// validated via routing.ParseSchedule so an invalid timezone/day/time rejects
+// policy loading. FreshnessTTL defaults to 30m when omitted (matching the
+// routing package's default), like the operational durations.
 func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
+	if !quota.KnownAdapter(mappingID) {
+		names := make([]string, 0, 4)
+		for _, def := range quota.AdapterDefinitions() {
+			names = append(names, def.Name)
+		}
+		return nil, fmt.Errorf("policy: mapping %q: the provider key selects the quota adapter and must be one of: %s", mappingID, strings.Join(names, ", "))
+	}
 	qc := &QuotaConfig{
-		Adapter:          w.Adapter,
+		Adapter:          mappingID,
 		FreshnessTTL:     defaultQuotaFreshness,
 		BalanceGroup:     w.BalanceGroup,
 		Weight:           w.Weight,
@@ -441,7 +458,7 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	}
 	// The anthropic adapter measures month-to-date spend against a
 	// user-defined budget; without one there is nothing to measure against.
-	if w.Adapter == "anthropic" && w.MonthlyBudgetUSD == 0 {
+	if mappingID == "anthropic" && w.MonthlyBudgetUSD == 0 {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
 	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)

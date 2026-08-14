@@ -198,7 +198,15 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 		return Desired{}, nil, fmt.Errorf("policy: read project sources: %w", err)
 	}
 
-	d := Desired{Version: supportedVersion, Providers: map[MappingID]Mapping{}, Operational: defaultOperational}
+	d := Desired{
+		Version:     supportedVersion,
+		Providers:   map[MappingID]Mapping{},
+		Operational: defaultOperational,
+		// Match Load's default for an omitted routing section (marshalDesired
+		// writes no routing section) so the returned proposal and the file a
+		// caller persists from it agree.
+		Routing: RoutingConfig{Enabled: true},
+	}
 	owner := map[string]MappingID{}
 	if err := buildProviders(&d, global.Config.Providers, owner); err != nil {
 		return Desired{}, nil, err

@@ -87,7 +87,10 @@ type Operational struct {
 // reordered). The defaults below match the routing package's own defaults:
 // FreshnessTTL 30m, BalanceGroup "default", Weight 1 when zero/empty.
 type QuotaConfig struct {
-	Adapter      string        // "codex" | "zai" | "anthropic" | "neuralwatt" (adapter name)
+	// Adapter is the quota adapter name ("codex" | "zai" | "anthropic" |
+	// "neuralwatt"). It is not user-configurable: Load derives it from the
+	// provider mapping key and validates it is a known adapter.
+	Adapter      string
 	FreshnessTTL time.Duration // default 30m when zero
 	BalanceGroup string        // default "default"
 	Weight       int           // default 1
@@ -100,8 +103,10 @@ type QuotaConfig struct {
 }
 
 // RoutingConfig holds the top-level routing enablement (additive on Desired).
-// The zero value means routing is disabled, which is the backward-compatible
-// default for desired.yaml files without a routing section.
+// Load resolves an omitted routing section to enabled; `routing: {enabled:
+// false}` is the explicit opt-out. Note the struct zero value is disabled —
+// only Load applies the enabled default, so code constructing Desired by hand
+// must set Routing explicitly where it means "as loaded".
 type RoutingConfig struct {
 	Enabled bool
 }
@@ -114,8 +119,9 @@ type Desired struct {
 	Projects    []Target
 	Operational Operational
 
-	// Routing holds the top-level routing enablement. When Enabled is false (the
-	// default for a desired.yaml without a routing section) reconciliation is
-	// byte-for-byte identical to the pre-routing behavior.
+	// Routing holds the top-level routing enablement. Load defaults it to
+	// enabled when the routing section is omitted; explicit
+	// `routing: {enabled: false}` disables quota-based reordering (managed
+	// fields then reconcile to their configured chain positions only).
 	Routing RoutingConfig
 }
