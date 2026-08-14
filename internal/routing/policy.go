@@ -536,7 +536,7 @@ func (e entry) toRankEntry(rank int) RankEntry {
 }
 
 // explain renders a short, sanitized explanation referencing the decisive
-// factors (off-peak status and headroom) for an eligible provider.
+// factors (projection pace and off-peak status) for an eligible provider.
 func (e entry) explain() string {
 	status := "peak"
 	if e.item.offPeak {

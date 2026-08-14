@@ -18,8 +18,9 @@ import (
 
 // ComputeRanking builds the routing ranking from the desired policy and observed
 // state. It maps provider quota configs → routing.ProviderPolicy, state
-// snapshots → routing.ProviderObs, then calls routing.Rank. Returns the RankLookup (mapping ID → global rank) for
-// reconcile.Build, plus the full RankingResult for explain/status.
+// snapshots → routing.ProviderObs, then calls routing.Rank. Returns the
+// RankLookup (mapping ID → global rank) for reconcile.Build, plus the full
+// RankingResult for explain/status.
 //
 // Only mappings carrying a Quota config participate in routing. A mapping's
 // observed mode is the worst (most degraded) effective mode across its CodExBar

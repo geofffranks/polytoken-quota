@@ -711,6 +711,68 @@ func TestRankPaceClusterChain(t *testing.T) {
 	eqOrder(t, Rank(in), "b", "a", "c")
 }
 
+func TestRankPaceBeatsOffPeak(t *testing.T) {
+	// Headline inversion: a peak provider with lower pace outranks an off-peak
+	// provider with higher pace when the gap exceeds 10%.
+	offPeak := alwaysOffPeak(t)
+	// A: peak, pace 0.6 (under-utilized). B: off-peak, pace 1.4 (over-utilized).
+	// Gap = 0.8 > 10% → pace outranks off-peak: A wins.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a"},
+			{MappingID: "b", Schedule: &offPeak},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPaceTransitiveCluster(t *testing.T) {
+	// Transitive closure: A-B gap 0.08 < 10%, B-C gap 0.08 < 10%, but A-C gap
+	// 0.16 > 10%. Connected-components puts all three in cluster 0, so weight
+	// decides — the behavior that distinguishes clustering from fixed buckets.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.08, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "c", "a")
+}
+
+func TestRankPaceReorderedDeterminism(t *testing.T) {
+	// All-paced group: reordering input Policies/Obs yields the same order.
+	// Paces 0.6 / 1.0 / 1.4 are all >10% apart, so each is its own cluster.
+	policies := []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}}
+	obs := []ProviderObs{
+		{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+		{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.5, 0.5)},
+		{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.7, 0.5)},
+	}
+	first := Rank(RankingInput{Now: rankNow, Policies: policies, Obs: obs})
+
+	// Same data, shuffled input order.
+	second := Rank(RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{policies[2], policies[0], policies[1]},
+		Obs:      []ProviderObs{obs[2], obs[0], obs[1]},
+	})
+	if !reflect.DeepEqual(order(first), order(second)) {
+		t.Fatalf("reordered input changed order:\n  first:  %v\n  second: %v", order(first), order(second))
+	}
+}
+
 // ----- Part 6: balance group isolation -------------------------------------
 
 func TestRankBalanceGroupIsolation(t *testing.T) {
