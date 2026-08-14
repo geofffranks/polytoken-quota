@@ -200,6 +200,27 @@ func remSnapReset(mid string, rem float64, checkedAt, reset time.Time) *quota.Qu
 	}
 }
 
+// paceSnap creates a snapshot with one window that has a computable pace.
+// usedFrac and elapsedFrac are both in [0,1]; the window period is one week
+// anchored on rankNow.
+func paceSnap(mid string, usedFrac, elapsedFrac float64) *quota.QuotaSnapshot {
+	period := 7 * 24 * time.Hour
+	timeToReset := time.Duration((1 - elapsedFrac) * float64(period))
+	return &quota.QuotaSnapshot{
+		MappingID:    mid,
+		CheckedAt:    rankNow,
+		Status:       quota.SourceFresh,
+		Availability: quota.QuotaAvailable,
+		Windows: []quota.QuotaWindow{{
+			Name:    "primary",
+			Used:    fptr(usedFrac),
+			Limit:   fptr(1.0),
+			ResetAt: tptr(rankNow.Add(timeToReset)),
+			Period:  durptr(period),
+		}},
+	}
+}
+
 // order returns the ordered mapping IDs of a ranking result.
 func order(r RankingResult) []string {
 	out := make([]string, len(r.Entries))
@@ -594,34 +615,6 @@ func TestRankHeadroomTieBreak(t *testing.T) {
 	eqOrder(t, Rank(in), "high", "low")
 }
 
-func TestRankUsageTieBreak(t *testing.T) {
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.5, rankNow)},
-			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.5, rankNow)},
-		},
-		Usage: []UsageShare{
-			{MappingID: "a", Share: 0.1},
-			{MappingID: "b", Share: 0.3},
-		},
-	}
-	eqOrder(t, Rank(in), "a", "b")
-}
-
-func TestRankResetTieBreak(t *testing.T) {
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "sooner"}, {MappingID: "later"}},
-		Obs: []ProviderObs{
-			{MappingID: "sooner", Mode: "normal", Snapshot: remSnapReset("sooner", 0.5, rankNow, rankNow.Add(1*time.Hour))},
-			{MappingID: "later", Mode: "normal", Snapshot: remSnapReset("later", 0.5, rankNow, rankNow.Add(2*time.Hour))},
-		},
-	}
-	eqOrder(t, Rank(in), "sooner", "later")
-}
-
 func TestRankWeightTieBreak(t *testing.T) {
 	in := RankingInput{
 		Now: rankNow,
@@ -649,44 +642,73 @@ func TestRankLexicalTieBreak(t *testing.T) {
 	eqOrder(t, Rank(in), "alpha", "zebra")
 }
 
-// ----- Part 5: incomparable units ------------------------------------------
+// ----- Part 5: pace projection ranking -------------------------------------
 
-func TestRankIncomparableUnits(t *testing.T) {
-	t.Run("two unknown share ranked by headroom", func(t *testing.T) {
-		in := RankingInput{
-			Now:      rankNow,
-			Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
-			Obs: []ProviderObs{
-				{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.7, rankNow)},
-				{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.4, rankNow)},
-			},
-			Usage: []UsageShare{
-				{MappingID: "a", Share: -1},
-				{MappingID: "b", Share: -1},
-			},
-		}
-		// Both unknown -> usage key skipped -> headroom decides: a before b.
-		eqOrder(t, Rank(in), "a", "b")
-	})
-	t.Run("one unknown skips usage for whole group", func(t *testing.T) {
-		// Without usage, headroom orders: a(0.7), b(0.4), c(0.1).
-		// If usage were (wrongly) applied, b(0.2) would beat a(0.9). It must NOT.
-		in := RankingInput{
-			Now:      rankNow,
-			Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}},
-			Obs: []ProviderObs{
-				{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.7, rankNow)},
-				{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.4, rankNow)},
-				{MappingID: "c", Mode: "normal", Snapshot: remSnap("c", 0.1, rankNow)},
-			},
-			Usage: []UsageShare{
-				{MappingID: "a", Share: 0.9},
-				{MappingID: "b", Share: 0.2},
-				{MappingID: "c", Share: -1}, // unknown -> group incomparable
-			},
-		}
-		eqOrder(t, Rank(in), "a", "b", "c")
-	})
+func TestRankPaceLowerFirst(t *testing.T) {
+	// A: pace 0.6 (under-utilized), B: pace 1.4 (over-utilized). Gap > 10%.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPaceWithinTenPercentOffPeakDecides(t *testing.T) {
+	offPeak := alwaysOffPeak(t)
+	// A: pace 1.0 (off-peak), B: pace 1.08 (peak). Gap = 0.08 < 10% → tied.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Schedule: &offPeak},
+			{MappingID: "b"},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.5, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPacePairwiseSkip(t *testing.T) {
+	// A has pace (qualifying window), B has no pace (remSnap: no Period).
+	// Pace skipped for this pair → weight decides. B has higher weight.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 5},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.5, rankNow)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a")
+}
+
+func TestRankPaceClusterChain(t *testing.T) {
+	// A: pace 0.0, B: pace 0.08, C: pace 0.25.
+	// A-B gap 0.08 < 10% → same cluster. B-C gap 0.17 > 10% → new cluster.
+	// Within cluster 0: weight decides (B=3 before A=1).
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.125, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a", "c")
 }
 
 // ----- Part 6: balance group isolation -------------------------------------
@@ -711,7 +733,7 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 			{MappingID: "p4", Mode: "normal", Snapshot: remSnap("p4", 0.8, rankNow)},
 		},
 	}
-	eqOrder(t, Rank(in), "p2", "p1", "p4", "p3")
+	eqOrder(t, Rank(in), "p1", "p2", "p3", "p4")
 }
 
 // ----- Part 7: ineligible placement ----------------------------------------
@@ -728,7 +750,7 @@ func TestRankIneligiblePlacement(t *testing.T) {
 		},
 	}
 	r := Rank(in)
-	eqOrder(t, r, "e2", "e1", "d1", "d3") // eligible by headroom, then ineligible by ID
+	eqOrder(t, r, "e1", "e2", "d1", "d3") // eligible by ID, then ineligible by ID
 	// Verify eligible/ineligible flags and contiguous 0-based ranks.
 	for i, e := range r.Entries {
 		if e.Rank != i {
@@ -801,7 +823,6 @@ func TestRankDeterminism(t *testing.T) {
 			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.6, rankNow)},
 			{MappingID: "c", Mode: "reserve", Snapshot: remSnap("c", 0.9, rankNow)},
 		},
-		Usage: []UsageShare{{MappingID: "a", Share: 0.4}, {MappingID: "b", Share: 0.1}},
 	}
 	first := Rank(in)
 	second := Rank(in)

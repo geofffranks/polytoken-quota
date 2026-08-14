@@ -18,8 +18,7 @@ import (
 
 // ComputeRanking builds the routing ranking from the desired policy and observed
 // state. It maps provider quota configs → routing.ProviderPolicy, state
-// snapshots → routing.ProviderObs, and usage history → routing.UsageShare, then
-// calls routing.Rank. Returns the RankLookup (mapping ID → global rank) for
+// snapshots → routing.ProviderObs, then calls routing.Rank. Returns the RankLookup (mapping ID → global rank) for
 // reconcile.Build, plus the full RankingResult for explain/status.
 //
 // Only mappings carrying a Quota config participate in routing. A mapping's
@@ -61,7 +60,6 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 		Now:      now,
 		Policies: policies,
 		Obs:      obs,
-		Usage:    usageShares(observed),
 	})
 
 	lookup := make(reconcile.RankLookup, len(result.Entries))
@@ -154,37 +152,5 @@ func equalDepletion(a, b *quota.QuotaSnapshot) bool {
 	return *ar == *br
 }
 
-// usageShares computes normalized weekly usage shares from the observed usage
-// history. Each mapping's share is its aggregated total across weeks divided by
-// the sum of all totals. A nil/empty history or non-positive total sum yields no
-// shares, so routing treats every group's usage as incomparable and skips the
-// usage key. Only mappings present in the history receive a share; an absent
-// mapping is unknown (not zero), keeping its group incomparable.
-func usageShares(observed state.State) []routing.UsageShare {
-	if observed.UsageHistory == nil || len(observed.UsageHistory.Weeks) == 0 {
-		return nil
-	}
-	totals := make(map[string]float64)
-	for _, w := range observed.UsageHistory.Weeks {
-		for mid, t := range w.Totals {
-			totals[mid] += t
-		}
-	}
-	var sum float64
-	for _, t := range totals {
-		sum += t
-	}
-	if sum <= 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(totals))
-	for mid := range totals {
-		ids = append(ids, mid)
-	}
-	sort.Strings(ids)
-	shares := make([]routing.UsageShare, 0, len(ids))
-	for _, mid := range ids {
-		shares = append(shares, routing.UsageShare{MappingID: mid, Share: totals[mid] / sum})
-	}
-	return shares
-}
+// usageShares removed: pace projection uses only the current snapshot, not
+// usage history. See docs/superpowers/pace-projection-routing/design_spec.md.
