@@ -274,6 +274,35 @@ func TestEventHistoryAppendIsNewestFirstAndDeepCopied(t *testing.T) {
 	}
 }
 
+func TestSanitizeEventHistoryPreservesEmptyProviderForRoutingEvents(t *testing.T) {
+	at := historyTestTime
+	// routing_changed events are keyed by MappingID and intentionally carry no
+	// Provider; the display falls back from an empty Provider to MappingID.
+	routing := EventRecord{Sequence: 1, Revision: 1, Ordinal: 0, At: at, RecordedAt: at, Category: EventRoutingChange, Action: "routing_changed", MappingID: "codex", Result: EventChanged, Reason: "peak, pace 98%"}
+	// A hook event carries a real provider that must survive sanitization.
+	hook := EventRecord{Sequence: 2, Revision: 1, Ordinal: 1, At: at, RecordedAt: at, Category: EventHook, Action: "quota_low", Provider: "zai", Result: EventChanged}
+	// A pre-fix record that baked the redaction sentinel into the optional Provider.
+	legacy := EventRecord{Sequence: 3, Revision: 1, Ordinal: 2, At: at, RecordedAt: at, Category: EventRoutingChange, Action: "routing_changed", Provider: "unsafe-id", MappingID: "neuralwatt", Result: EventChanged}
+
+	out := SanitizeEventHistory(EventHistory{Events: []EventRecord{routing, hook, legacy}})
+
+	if out.Events[0].Provider != "" {
+		t.Fatalf("routing event provider = %q, want empty so display falls back to MappingID %q", out.Events[0].Provider, out.Events[0].MappingID)
+	}
+	if out.Events[0].MappingID != "codex" {
+		t.Fatalf("routing event mappingID = %q, want codex", out.Events[0].MappingID)
+	}
+	if out.Events[1].Provider != "zai" {
+		t.Fatalf("hook event provider = %q, want zai", out.Events[1].Provider)
+	}
+	if out.Events[2].Provider != "" {
+		t.Fatalf("legacy routing event provider = %q, want empty (healed from sentinel)", out.Events[2].Provider)
+	}
+	if out.Events[2].MappingID != "neuralwatt" {
+		t.Fatalf("legacy routing event mappingID = %q, want neuralwatt", out.Events[2].MappingID)
+	}
+}
+
 func TestValidateEventHistoryRejectsNonFiniteAndNonUTCFields(t *testing.T) {
 	bad := math.NaN()
 	e := EventRecord{Sequence: 1, Revision: 1, Ordinal: 0, At: historyTestTime.In(time.FixedZone("offset", 3600)), RecordedAt: historyTestTime, Category: EventHook, Action: "quota_low", Result: EventChanged, UsagePercent: &bad}
