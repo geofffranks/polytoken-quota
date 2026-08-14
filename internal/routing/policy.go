@@ -251,19 +251,11 @@ type ProviderObs struct {
 	Snapshot  *quota.QuotaSnapshot
 }
 
-// UsageShare is a provider's normalized weekly usage share (0.0–1.0), or
-// negative when unknown/incomparable.
-type UsageShare struct {
-	MappingID string
-	Share     float64 // < 0 means unknown/incomparable units
-}
-
 // RankingInput is everything the pure policy needs.
 type RankingInput struct {
 	Now      time.Time
 	Policies []ProviderPolicy
 	Obs      []ProviderObs
-	Usage    []UsageShare
 }
 
 // Eligibility reports whether a provider is rankable, with a reason when not.
@@ -326,9 +318,8 @@ type RankingResult struct {
 type rankItem struct {
 	policy  ProviderPolicy
 	offPeak bool
-	rem     *float64   // EffectiveRemaining; nil when unavailable
-	reset   *time.Time // NextResetAt; nil when unavailable
-	share   float64    // usage share when known
+	pace    *float64 // projection pace; nil when not computable
+	cluster int      // pace cluster index; -1 when no pace
 	weight  int
 }
 
@@ -340,32 +331,104 @@ type entry struct {
 }
 
 // less compares two items within a balance group by the lexicographic key
-// sequence. groupComparable reports whether usage shares are comparable for the
-// whole group (no member is unknown); when false the usage key is skipped.
-func (a rankItem) less(b rankItem, groupComparable bool) bool {
-	// Key 1: off-peak before peak.
+// sequence: pace cluster (pairwise) → off-peak → weight → mapping ID.
+func (a rankItem) less(b rankItem) bool {
+	// Key 1: projection pace cluster (pairwise: both must have a pace).
+	if a.cluster >= 0 && b.cluster >= 0 && a.cluster != b.cluster {
+		return a.cluster < b.cluster
+	}
+	// Key 2: off-peak before peak.
 	if a.offPeak != b.offPeak {
 		return a.offPeak
 	}
-	// Key 2: larger effective headroom first; only when both are available.
-	if a.rem != nil && b.rem != nil && *a.rem != *b.rem {
-		return *a.rem > *b.rem
-	}
-	// Key 3: lower observed weekly usage share first; only when the group's
-	// units are comparable.
-	if groupComparable && a.share != b.share {
-		return a.share < b.share
-	}
-	// Key 4: sooner limiting-window reset first; only when both report one.
-	if a.reset != nil && b.reset != nil && !a.reset.Equal(*b.reset) {
-		return a.reset.Before(*b.reset)
-	}
-	// Key 5: higher configured weight first.
+	// Key 3: higher configured weight first.
 	if a.weight != b.weight {
 		return a.weight > b.weight
 	}
-	// Key 6: lexical mapping ID ascending (stable final tie-breaker).
+	// Key 4: lexical mapping ID ascending (stable final tie-breaker).
 	return a.policy.MappingID < b.policy.MappingID
+}
+
+// minProjectionPeriod is the minimum window duration eligible to be a projection
+// anchor. Windows shorter than one day (e.g. codex's 5h session window) are rate
+// limits, not quota cycles, and are excluded from projection.
+const minProjectionPeriod = 24 * time.Hour
+
+// computePace calculates the projection pace for a provider from its anchor
+// window — the longest window with Period + ResetAt + a usable remaining that
+// clears the minimum-period floor. Returns the pace and true when computable;
+// 0 and false when no qualifying window exists.
+//
+//	usedFrac    = 1 - remainingFraction
+//	elapsedFrac = clamp01(1 - (ResetAt - now) / Period)
+//	pace        = usedFrac / max(elapsedFrac, eps)
+//
+// pace < 1.0 → under-utilized (ranks first); pace > 1.0 → over-utilized.
+// A just-reset window (used≈0, elapsed≈0) yields pace ≈ 0.
+func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
+	if snap == nil {
+		return 0, false
+	}
+	var anchor *quota.QuotaWindow
+	for i := range snap.Windows {
+		w := &snap.Windows[i]
+		if w.Period == nil || *w.Period < minProjectionPeriod {
+			continue
+		}
+		if w.ResetAt == nil {
+			continue
+		}
+		if w.Remaining() == nil {
+			continue
+		}
+		if anchor == nil || *w.Period > *anchor.Period {
+			anchor = w
+		}
+	}
+	if anchor == nil {
+		return 0, false
+	}
+	rem := anchor.Remaining()
+	usedFrac := 1.0 - *rem
+	timeToReset := anchor.ResetAt.Sub(now)
+	elapsedFrac := 1.0 - float64(timeToReset)/float64(*anchor.Period)
+	if elapsedFrac < 0 {
+		elapsedFrac = 0
+	} else if elapsedFrac > 1 {
+		elapsedFrac = 1
+	}
+	eps := float64(5*time.Minute) / float64(*anchor.Period)
+	if elapsedFrac < eps {
+		elapsedFrac = eps
+	}
+	return usedFrac / elapsedFrac, true
+}
+
+// assignPaceClusters assigns cluster indices to entries within a balance group.
+// Items without a pace get cluster -1. Among projecting items, connected
+// components of the "within 10% absolute pace" relation form clusters,
+// indexed in ascending pace order.
+func assignPaceClusters(items []entry) {
+	type paced struct {
+		idx  int
+		pace float64
+	}
+	var ps []paced
+	for i := range items {
+		if items[i].item.pace != nil {
+			ps = append(ps, paced{idx: i, pace: *items[i].item.pace})
+		}
+	}
+	sort.Slice(ps, func(i, j int) bool {
+		return ps[i].pace < ps[j].pace
+	})
+	clusterIdx := 0
+	for i, p := range ps {
+		if i > 0 && p.pace-ps[i-1].pace >= 0.10 {
+			clusterIdx++
+		}
+		items[p.idx].item.cluster = clusterIdx
+	}
 }
 
 // Rank computes the deterministic global ranking for the given input.
@@ -373,18 +436,13 @@ func (a rankItem) less(b rankItem, groupComparable bool) bool {
 // Eligible providers are grouped by balance group (in first-appearance order;
 // groups never interleave) and sorted within each group by the lexicographic
 // keys. Ineligible providers are placed after all eligible ones, sorted by
-// mapping ID. Within a balance group the usage-share key is skipped entirely if
-// any member's usage is unknown, so comparisons are never fabricated.
+// mapping ID. Within a balance group the pace-projection key is compared
+// pairwise: two providers compare on pace only when both can project; if
+// either cannot, that pair falls through to off-peak → weight → ID.
 func Rank(in RankingInput) RankingResult {
 	obsBy := make(map[string]ProviderObs, len(in.Obs))
 	for _, o := range in.Obs {
 		obsBy[o.MappingID] = o
-	}
-	shareKnown := make(map[string]bool, len(in.Usage))
-	shareVal := make(map[string]float64, len(in.Usage))
-	for _, u := range in.Usage {
-		shareVal[u.MappingID] = u.Share
-		shareKnown[u.MappingID] = u.Share >= 0
 	}
 
 	entries := make([]entry, 0, len(in.Policies))
@@ -392,23 +450,21 @@ func Rank(in RankingInput) RankingResult {
 		obs, ok := obsBy[p.MappingID]
 		// The policy (including MappingID) is always set so a missing
 		// observation never silently loses the provider's identity.
-		item := rankItem{policy: p}
+		item := rankItem{policy: p, cluster: -1}
 		var eligible bool
 		var reason string
 		if ok {
 			el := CheckEligibility(p, obs, in.Now)
 			eligible = el.Rankable
 			reason = el.Reason
-			item = rankItem{policy: p, weight: p.weight(), offPeak: offPeakAt(p.Schedule, in.Now)}
+			item = rankItem{policy: p, weight: p.weight(), offPeak: offPeakAt(p.Schedule, in.Now), cluster: -1}
 			if obs.Snapshot != nil {
-				item.rem = obs.Snapshot.EffectiveRemaining()
-				item.reset = obs.Snapshot.NextResetAt()
+				if pace, ok := computePace(obs.Snapshot, in.Now); ok {
+					item.pace = &pace
+				}
 			}
 		} else {
 			reason = "no fresh snapshot"
-		}
-		if known, ok := shareKnown[p.MappingID]; ok && known {
-			item.share = shareVal[p.MappingID]
 		}
 		entries = append(entries, entry{item: item, eligible: eligible, reason: reason})
 	}
@@ -434,18 +490,12 @@ func Rank(in RankingInput) RankingResult {
 		groups[g].items = append(groups[g].items, e)
 	}
 
-	// Resolve comparability per group, then stable-sort within each group.
+	// Assign pace clusters and stable-sort within each group.
 	for _, name := range groupOrder {
 		g := groups[name]
-		comparable := len(g.items) > 0
-		for _, e := range g.items {
-			if known, ok := shareKnown[e.item.policy.MappingID]; !ok || !known {
-				comparable = false
-				break
-			}
-		}
+		assignPaceClusters(g.items)
 		sort.SliceStable(g.items, func(i, j int) bool {
-			return g.items[i].item.less(g.items[j].item, comparable)
+			return g.items[i].item.less(g.items[j].item)
 		})
 	}
 
@@ -486,14 +536,14 @@ func (e entry) toRankEntry(rank int) RankEntry {
 }
 
 // explain renders a short, sanitized explanation referencing the decisive
-// factors (off-peak status and headroom) for an eligible provider.
+// factors (projection pace and off-peak status) for an eligible provider.
 func (e entry) explain() string {
 	status := "peak"
 	if e.item.offPeak {
 		status = "off-peak"
 	}
-	if e.item.rem != nil {
-		return fmt.Sprintf("%s, %d%% headroom", status, int(math.Round(*e.item.rem*100)))
+	if e.item.pace != nil {
+		return fmt.Sprintf("%s, pace %d%%", status, int(math.Round(*e.item.pace*100)))
 	}
 	return status
 }

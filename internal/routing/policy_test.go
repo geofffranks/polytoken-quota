@@ -13,6 +13,15 @@ import (
 
 func fptr(v float64) *float64     { x := v; return &x }
 func tptr(t time.Time) *time.Time { x := t; return &x }
+func durptr(d time.Duration) *time.Duration { x := d; return &x }
+
+func floatClose(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-9
+}
 
 var allDays = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday}
 
@@ -20,6 +29,116 @@ var allDays = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
 var rankNow = time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 
 // dayOf maps a time.Weekday to the canonical DayOfWeek abbreviation.
+func TestComputePace(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	halfWeek := week / 2
+
+	tests := []struct {
+		name   string
+		window quota.QuotaWindow
+		now    time.Time
+		want   float64
+		ok     bool
+	}{
+		{
+			name:   "on track: 50% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   1.0,
+			ok:     true,
+		},
+		{
+			name:   "under-utilized: 30% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(30), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   0.6,
+			ok:     true,
+		},
+		{
+			name:   "over-utilized: 70% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(70), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   1.4,
+			ok:     true,
+		},
+		{
+			name:   "fresh: 0% used, near-reset start",
+			window: quota.QuotaWindow{Used: fptr(0), Limit: fptr(100), ResetAt: tptr(rankNow.Add(week)), Period: durptr(week)},
+			now:    rankNow,
+			want:   0.0,
+			ok:     true,
+		},
+		{
+			name:   "no qualifying window: period below 1-day floor",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(2 * time.Hour)), Period: durptr(5 * time.Hour)},
+			now:    rankNow,
+			ok:     false,
+		},
+		{
+			name:   "no qualifying window: nil period",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek))},
+			now:    rankNow,
+			ok:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{tc.window}}
+			got, ok := computePace(snap, tc.now)
+			if ok != tc.ok {
+				t.Fatalf("computePace ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && !floatClose(got, tc.want) {
+				t.Fatalf("computePace = %.4f, want %.4f", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputePaceAnchorSelection(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	twoDays := 2 * 24 * time.Hour
+	// Two qualifying windows (>1 day): the longer (7d) must be the anchor.
+	// Set different used fractions so we can tell which was chosen.
+	shortWin := quota.QuotaWindow{
+		Name: "short", Used: fptr(90), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(week)), Period: durptr(twoDays),
+	}
+	longWin := quota.QuotaWindow{
+		Name: "long", Used: fptr(10), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(week / 2)), Period: durptr(week),
+	}
+	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{shortWin, longWin}}
+	pace, ok := computePace(snap, rankNow)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	// longWin: usedFrac=0.1, elapsedFrac=0.5 → pace=0.2.
+	// If shortWin were the anchor: usedFrac=0.9, elapsedFrac varies.
+	// Verify the long window was used (pace should be 0.2).
+	if want := 0.2; !floatClose(pace, want) {
+		t.Fatalf("pace = %.4f, want %.4f (wrong anchor selected)", pace, want)
+	}
+}
+
+func TestComputePaceClampBounds(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	// now is after ResetAt → elapsedFrac clamps to 1.0.
+	// usedFrac = 0.5 → pace = 0.5/1.0 = 0.5.
+	w := quota.QuotaWindow{
+		Used: fptr(50), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(-time.Hour)), Period: durptr(week),
+	}
+	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{w}}
+	pace, ok := computePace(snap, rankNow)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if want := 0.5; !floatClose(pace, want) {
+		t.Fatalf("pace = %.4f, want %.4f", pace, want)
+	}
+}
+
 func dayOf(t time.Time) DayOfWeek {
 	switch t.Weekday() {
 	case time.Sunday:
@@ -77,6 +196,27 @@ func remSnapReset(mid string, rem float64, checkedAt, reset time.Time) *quota.Qu
 			Used:    fptr(1 - rem),
 			Limit:   fptr(1.0),
 			ResetAt: tptr(reset),
+		}},
+	}
+}
+
+// paceSnap creates a snapshot with one window that has a computable pace.
+// usedFrac and elapsedFrac are both in [0,1]; the window period is one week
+// anchored on rankNow.
+func paceSnap(mid string, usedFrac, elapsedFrac float64) *quota.QuotaSnapshot {
+	period := 7 * 24 * time.Hour
+	timeToReset := time.Duration((1 - elapsedFrac) * float64(period))
+	return &quota.QuotaSnapshot{
+		MappingID:    mid,
+		CheckedAt:    rankNow,
+		Status:       quota.SourceFresh,
+		Availability: quota.QuotaAvailable,
+		Windows: []quota.QuotaWindow{{
+			Name:    "primary",
+			Used:    fptr(usedFrac),
+			Limit:   fptr(1.0),
+			ResetAt: tptr(rankNow.Add(timeToReset)),
+			Period:  durptr(period),
 		}},
 	}
 }
@@ -475,34 +615,6 @@ func TestRankHeadroomTieBreak(t *testing.T) {
 	eqOrder(t, Rank(in), "high", "low")
 }
 
-func TestRankUsageTieBreak(t *testing.T) {
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.5, rankNow)},
-			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.5, rankNow)},
-		},
-		Usage: []UsageShare{
-			{MappingID: "a", Share: 0.1},
-			{MappingID: "b", Share: 0.3},
-		},
-	}
-	eqOrder(t, Rank(in), "a", "b")
-}
-
-func TestRankResetTieBreak(t *testing.T) {
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "sooner"}, {MappingID: "later"}},
-		Obs: []ProviderObs{
-			{MappingID: "sooner", Mode: "normal", Snapshot: remSnapReset("sooner", 0.5, rankNow, rankNow.Add(1*time.Hour))},
-			{MappingID: "later", Mode: "normal", Snapshot: remSnapReset("later", 0.5, rankNow, rankNow.Add(2*time.Hour))},
-		},
-	}
-	eqOrder(t, Rank(in), "sooner", "later")
-}
-
 func TestRankWeightTieBreak(t *testing.T) {
 	in := RankingInput{
 		Now: rankNow,
@@ -530,44 +642,135 @@ func TestRankLexicalTieBreak(t *testing.T) {
 	eqOrder(t, Rank(in), "alpha", "zebra")
 }
 
-// ----- Part 5: incomparable units ------------------------------------------
+// ----- Part 5: pace projection ranking -------------------------------------
 
-func TestRankIncomparableUnits(t *testing.T) {
-	t.Run("two unknown share ranked by headroom", func(t *testing.T) {
-		in := RankingInput{
-			Now:      rankNow,
-			Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
-			Obs: []ProviderObs{
-				{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.7, rankNow)},
-				{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.4, rankNow)},
-			},
-			Usage: []UsageShare{
-				{MappingID: "a", Share: -1},
-				{MappingID: "b", Share: -1},
-			},
-		}
-		// Both unknown -> usage key skipped -> headroom decides: a before b.
-		eqOrder(t, Rank(in), "a", "b")
+func TestRankPaceLowerFirst(t *testing.T) {
+	// A: pace 0.6 (under-utilized), B: pace 1.4 (over-utilized). Gap > 10%.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPaceWithinTenPercentOffPeakDecides(t *testing.T) {
+	offPeak := alwaysOffPeak(t)
+	// A: pace 1.0 (off-peak), B: pace 1.08 (peak). Gap = 0.08 < 10% → tied.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Schedule: &offPeak},
+			{MappingID: "b"},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.5, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPacePairwiseSkip(t *testing.T) {
+	// A has pace (qualifying window), B has no pace (remSnap: no Period).
+	// Pace skipped for this pair → weight decides. B has higher weight.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 5},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.5, rankNow)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a")
+}
+
+func TestRankPaceClusterChain(t *testing.T) {
+	// A: pace 0.0, B: pace 0.08, C: pace 0.25.
+	// A-B gap 0.08 < 10% → same cluster. B-C gap 0.17 > 10% → new cluster.
+	// Within cluster 0: weight decides (B=3 before A=1).
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.125, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a", "c")
+}
+
+func TestRankPaceBeatsOffPeak(t *testing.T) {
+	// Headline inversion: a peak provider with lower pace outranks an off-peak
+	// provider with higher pace when the gap exceeds 10%.
+	offPeak := alwaysOffPeak(t)
+	// A: peak, pace 0.6 (under-utilized). B: off-peak, pace 1.4 (over-utilized).
+	// Gap = 0.8 > 10% → pace outranks off-peak: A wins.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a"},
+			{MappingID: "b", Schedule: &offPeak},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPaceTransitiveCluster(t *testing.T) {
+	// Transitive closure: A-B gap 0.08 < 10%, B-C gap 0.08 < 10%, but A-C gap
+	// 0.16 > 10%. Connected-components puts all three in cluster 0, so weight
+	// decides — the behavior that distinguishes clustering from fixed buckets.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.08, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "c", "a")
+}
+
+func TestRankPaceReorderedDeterminism(t *testing.T) {
+	// All-paced group: reordering input Policies/Obs yields the same order.
+	// Paces 0.6 / 1.0 / 1.4 are all >10% apart, so each is its own cluster.
+	policies := []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}}
+	obs := []ProviderObs{
+		{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
+		{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.5, 0.5)},
+		{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.7, 0.5)},
+	}
+	first := Rank(RankingInput{Now: rankNow, Policies: policies, Obs: obs})
+
+	// Same data, shuffled input order.
+	second := Rank(RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{policies[2], policies[0], policies[1]},
+		Obs:      []ProviderObs{obs[2], obs[0], obs[1]},
 	})
-	t.Run("one unknown skips usage for whole group", func(t *testing.T) {
-		// Without usage, headroom orders: a(0.7), b(0.4), c(0.1).
-		// If usage were (wrongly) applied, b(0.2) would beat a(0.9). It must NOT.
-		in := RankingInput{
-			Now:      rankNow,
-			Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}},
-			Obs: []ProviderObs{
-				{MappingID: "a", Mode: "normal", Snapshot: remSnap("a", 0.7, rankNow)},
-				{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.4, rankNow)},
-				{MappingID: "c", Mode: "normal", Snapshot: remSnap("c", 0.1, rankNow)},
-			},
-			Usage: []UsageShare{
-				{MappingID: "a", Share: 0.9},
-				{MappingID: "b", Share: 0.2},
-				{MappingID: "c", Share: -1}, // unknown -> group incomparable
-			},
-		}
-		eqOrder(t, Rank(in), "a", "b", "c")
-	})
+	if !reflect.DeepEqual(order(first), order(second)) {
+		t.Fatalf("reordered input changed order:\n  first:  %v\n  second: %v", order(first), order(second))
+	}
 }
 
 // ----- Part 6: balance group isolation -------------------------------------
@@ -592,10 +795,37 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 			{MappingID: "p4", Mode: "normal", Snapshot: remSnap("p4", 0.8, rankNow)},
 		},
 	}
-	eqOrder(t, Rank(in), "p2", "p1", "p4", "p3")
+	eqOrder(t, Rank(in), "p1", "p2", "p3", "p4")
 }
 
 // ----- Part 7: ineligible placement ----------------------------------------
+
+func TestRankExplainPace(t *testing.T) {
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nopace"}},
+		Obs: []ProviderObs{
+			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},
+			{MappingID: "nopace", Mode: "normal", Snapshot: remSnap("nopace", 0.5, rankNow)},
+		},
+	}
+	r := Rank(in)
+	for _, e := range r.Entries {
+		if !e.Eligible {
+			continue
+		}
+		if e.MappingID == "proj" {
+			if !strings.Contains(e.Explanation, "pace") {
+				t.Fatalf("projecting entry %s explanation %q must reference pace", e.MappingID, e.Explanation)
+			}
+		}
+		if e.MappingID == "nopace" {
+			if strings.Contains(e.Explanation, "pace") {
+				t.Fatalf("non-projecting entry %s explanation %q must not reference pace", e.MappingID, e.Explanation)
+			}
+		}
+	}
+}
 
 func TestRankIneligiblePlacement(t *testing.T) {
 	in := RankingInput{
@@ -609,7 +839,7 @@ func TestRankIneligiblePlacement(t *testing.T) {
 		},
 	}
 	r := Rank(in)
-	eqOrder(t, r, "e2", "e1", "d1", "d3") // eligible by headroom, then ineligible by ID
+	eqOrder(t, r, "e1", "e2", "d1", "d3") // eligible by ID, then ineligible by ID
 	// Verify eligible/ineligible flags and contiguous 0-based ranks.
 	for i, e := range r.Entries {
 		if e.Rank != i {
@@ -682,7 +912,6 @@ func TestRankDeterminism(t *testing.T) {
 			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.6, rankNow)},
 			{MappingID: "c", Mode: "reserve", Snapshot: remSnap("c", 0.9, rankNow)},
 		},
-		Usage: []UsageShare{{MappingID: "a", Share: 0.4}, {MappingID: "b", Share: 0.1}},
 	}
 	first := Rank(in)
 	second := Rank(in)

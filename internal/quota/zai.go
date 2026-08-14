@@ -418,6 +418,10 @@ func decodeZaiLimit(raw json.RawMessage) (zaiDecodedLimit, bool) {
 		t := millisToTime(*lr.NextResetTime)
 		dl.window.ResetAt = &t
 	}
+	if mins := zaiWindowMinutes(dl.unit, dl.number); mins > 0 {
+		d := time.Duration(mins * float64(time.Minute))
+		dl.window.Period = &d
+	}
 
 	return dl, false
 }

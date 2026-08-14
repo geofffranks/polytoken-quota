@@ -560,8 +560,9 @@ func decodePercentWindow(raw json.RawMessage, name string) (QuotaWindow, bool, b
 		return QuotaWindow{}, false, false
 	}
 	var pw struct {
-		UsedPercent *float64 `json:"used_percent"`
-		ResetAt     *int64   `json:"reset_at"`
+		UsedPercent        *float64 `json:"used_percent"`
+		ResetAt            *int64   `json:"reset_at"`
+		LimitWindowSeconds *int64   `json:"limit_window_seconds"`
 	}
 	if err := json.Unmarshal(raw, &pw); err != nil {
 		return QuotaWindow{}, false, true
@@ -571,6 +572,10 @@ func decodePercentWindow(raw json.RawMessage, name string) (QuotaWindow, bool, b
 	if pw.ResetAt != nil {
 		t := time.Unix(*pw.ResetAt, 0).UTC()
 		w.ResetAt = &t
+	}
+	if pw.LimitWindowSeconds != nil {
+		d := time.Duration(*pw.LimitWindowSeconds) * time.Second
+		w.Period = &d
 	}
 	if w.UsagePercent == nil && w.ResetAt == nil {
 		// present but empty object; skip without marking partial

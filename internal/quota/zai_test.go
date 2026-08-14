@@ -351,6 +351,36 @@ func TestZaiProParse(t *testing.T) {
 	}
 }
 
+func TestZaiPeriodCapture(t *testing.T) {
+	doer := &recordingDoer{resp: bodyResponse(200, []byte(zaiProBody))}
+	src := freshZai(t, doer)
+
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Primary TOKENS_LIMIT: unit=3 (hours), number=5 → 5h.
+	primary := findWindow(snap.Windows, "primary")
+	if primary == nil {
+		t.Fatal("missing primary window")
+	}
+	want := 5 * time.Hour
+	if primary.Period == nil || *primary.Period != want {
+		t.Fatalf("primary period = %v, want %v", primary.Period, want)
+	}
+
+	// Monthly TIME_LIMIT: unit=5 (minutes), number=1 → 1m.
+	monthly := findWindow(snap.Windows, "monthly")
+	if monthly == nil {
+		t.Fatal("missing monthly window")
+	}
+	want = 1 * time.Minute
+	if monthly.Period == nil || *monthly.Period != want {
+		t.Fatalf("monthly period = %v, want %v", monthly.Period, want)
+	}
+}
+
 func TestZaiBigmodelCNParse(t *testing.T) {
 	doer := &recordingDoer{resp: bodyResponse(200, []byte(zaiBigmodelCNBody))}
 	src := freshZai(t, doer)

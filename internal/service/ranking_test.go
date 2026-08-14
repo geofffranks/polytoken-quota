@@ -17,8 +17,8 @@ import (
 )
 
 // These tests cover ComputeRanking: the mapping of desired quota configs →
-// routing.ProviderPolicy, observed state → routing.ProviderObs, usage history →
-// routing.UsageShare, and the resulting reconcile.RankLookup consumed by Build.
+// routing.ProviderPolicy, observed state → routing.ProviderObs, and the
+// resulting reconcile.RankLookup consumed by Build.
 
 // rankNow is a fixed, Monday-morning UTC instant used as the injected clock. Jan
 // 1 2024 is a Monday, so an all-day-Monday off-peak window is active at 10:00.

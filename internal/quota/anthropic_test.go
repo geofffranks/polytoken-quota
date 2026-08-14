@@ -137,6 +137,24 @@ func TestAnthropicMidMonthSpend(t *testing.T) {
 	}
 }
 
+func TestAnthropicPeriodCapture(t *testing.T) {
+	doer := &recordingDoer{resp: costResponse(200, costBody("12050", "2950"))}
+	src := freshAnthropic(t, doer)
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(snap.Windows) != 1 {
+		t.Fatalf("windows = %d, want 1", len(snap.Windows))
+	}
+	w := snap.Windows[0]
+	// Period = nextMonthStart − monthStart for the current month (August → 31 days).
+	want := 31 * 24 * time.Hour
+	if w.Period == nil || *w.Period != want {
+		t.Fatalf("period = %v, want %v", w.Period, want)
+	}
+}
+
 // TestAnthropicEmptyMonthIsFreshAndFullyAvailable proves an empty cost report
 // (no spend yet, or within the report's lag) is a valid zero-spend snapshot.
 func TestAnthropicEmptyMonthIsFreshAndFullyAvailable(t *testing.T) {

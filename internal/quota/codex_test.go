@@ -793,6 +793,45 @@ func TestCodexProParse(t *testing.T) {
 	}
 }
 
+func TestCodexPeriodCapture(t *testing.T) {
+	doer := &recordingDoer{resp: bodyResponse(200, []byte(codexProBody))}
+	src := freshCodex(t, doer)
+
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Session window: limit_window_seconds 18000 (5h).
+	session := findWindow(snap.Windows, "session")
+	if session == nil {
+		t.Fatal("missing session window")
+	}
+	want := 18000 * time.Second
+	if session.Period == nil || *session.Period != want {
+		t.Fatalf("session period = %v, want %v", session.Period, want)
+	}
+
+	// Weekly window: limit_window_seconds 604800 (7d).
+	weekly := findWindow(snap.Windows, "weekly")
+	if weekly == nil {
+		t.Fatal("missing weekly window")
+	}
+	want = 604800 * time.Second
+	if weekly.Period == nil || *weekly.Period != want {
+		t.Fatalf("weekly period = %v, want %v", weekly.Period, want)
+	}
+
+	// Spend-control (individual_limit) has no limit_window_seconds → nil.
+	sc := findWindow(snap.Windows, "spend-control")
+	if sc == nil {
+		t.Fatal("missing spend-control window")
+	}
+	if sc.Period != nil {
+		t.Fatalf("spend-control period = %v, want nil", *sc.Period)
+	}
+}
+
 func TestCodexMinimalParse(t *testing.T) {
 	doer := &recordingDoer{resp: bodyResponse(200, []byte(codexMinimalBody))}
 	src := freshCodex(t, doer)
