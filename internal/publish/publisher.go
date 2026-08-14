@@ -71,8 +71,19 @@ func (p Publisher) saveState(s state.State) error {
 // never overlaps. It returns the committed state.
 //
 // Apply order: lock → recover prior journal → create backups → write journal →
-// per file: write temp, fsync temp, atomic rename, fsync parent dir, update
-// journal progress → publish state.json last (commit) → remove journal → unlock.
+// prepare every staged temp (hash verify + fsync, no live touches) → rename
+// every temp onto its live path back-to-back with no intervening durable I/O →
+// fsync each affected parent dir → record journal progress once → publish
+// state.json last (commit) → remove journal → unlock.
+//
+// The renames are batched deliberately: a reconcile transaction can replace
+// several managed files at once, and any durable bookkeeping (journal rewrite,
+// directory fsync) interleaved between two live renames widens the window in
+// which a concurrent reader — a `polytoken` launch — observes a mixed old/new
+// file set and rejects it as invalid. Back-to-back renames swap the whole file
+// set within consecutive rename(2) calls. Crash safety is unchanged: recovery
+// is hash-driven (allIntendedPresent), not progress-driven, so an interrupted
+// batch still converges to a coherent state.
 //
 // Apply is the self-locking entry point and owns recovery for standalone use.
 // Callers that already hold the lock (e.g. the Coordinator, which locks once
@@ -149,24 +160,68 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 		return state.State{}, err
 	}
 
-	// 3. Apply each replacement: temp write, fsync temp, atomic rename, fsync
-	// parent dir, then record progress in the journal.
+	// 3. Prepare every staged temp file WITHOUT touching live state: TOCTOU
+	// re-check, hash verification against NewHash, mode application, and
+	// fsync. Doing all preparation up front means a failure here aborts
+	// before ANY live file is renamed, and nothing but rename(2) calls sit
+	// between the live renames below.
 	for i := range tx.Replacements {
 		r := &tx.Replacements[i]
-		if err := p.applyOne(p.managedRootFor(tx), r); err != nil {
-			// Leave the journal in place; Recover will restore from backup.
-			return state.State{}, err
-		}
-		j.Replacements[i].Applied = true
-		if err := p.hook(stepProgress); err != nil {
-			return state.State{}, err
-		}
-		if err := writeJournal(p.fs(), p.JournalPath, j, p.Fault); err != nil {
+		if err := p.prepareOne(p.managedRootFor(tx), r); err != nil {
+			// No live file has been touched yet; the journal written in step 2
+			// remains for Recover to clean up (no-op against intact live files).
 			return state.State{}, err
 		}
 	}
 
-	// 4. Publish state.json last — the commit record. The durability boundary
+	// 4. Rename every prepared temp onto its live path back-to-back. No
+	// journal rewrite or directory fsync may interleave: each durable step
+	// would widen the window in which a concurrent reader observes a mixed
+	// old/new file set (see the Apply order comment). The whole managed file
+	// set swaps within consecutive rename(2) calls.
+	fs := p.fs()
+	for i := range tx.Replacements {
+		r := &tx.Replacements[i]
+		if err := p.hook(stepRename); err != nil {
+			// Leave the journal in place; Recover will restore from backup.
+			return state.State{}, err
+		}
+		if err := fs.Rename(r.TempPath, r.LivePath); err != nil {
+			// Leave the journal in place; Recover will restore from backup.
+			return state.State{}, errStep(stepRename, err)
+		}
+		r.Applied = true
+	}
+
+	// 5. Make the rename entries durable: fsync each distinct affected parent
+	// directory once, after the batch.
+	seen := map[string]bool{}
+	for i := range tx.Replacements {
+		dir := parentDir(tx.Replacements[i].LivePath)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if err := p.hook(stepDirFsync); err != nil {
+			return state.State{}, err
+		}
+		if err := fs.SyncDir(dir); err != nil {
+			return state.State{}, errStep(stepDirFsync, err)
+		}
+	}
+
+	// 6. Record journal progress once for the whole batch.
+	for i := range j.Replacements {
+		j.Replacements[i].Applied = true
+	}
+	if err := p.hook(stepProgress); err != nil {
+		return state.State{}, err
+	}
+	if err := writeJournal(p.fs(), p.JournalPath, j, p.Fault); err != nil {
+		return state.State{}, err
+	}
+
+	// 7. Publish state.json last — the commit record. The durability boundary
 	// lives inside Save (stepStateFsync): the fault hook fires after the temp
 	// write but before the fsync, so if a crash lands there state.json stays at
 	// the prior revision and the journal survives for Recover to repair. The
@@ -178,7 +233,7 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 		return state.State{}, err
 	}
 
-	// 5. Remove the journal only after the committed state is durable.
+	// 8. Remove the journal only after the committed state is durable.
 	if err := p.hook(stepJournalRemove); err != nil {
 		return state.State{}, err
 	}
@@ -221,16 +276,19 @@ func (p Publisher) managedRootFor(tx Transaction) string {
 	return p.ManagedRoot
 }
 
-// applyOne performs one durable replacement: verify the staged temp file's hash,
-// fsync it, atomically rename it over the live path, then fsync the parent dir.
-// root is the containment root the live path must stay within (empty disables
-// the check). Each step consults the fault hook so failures are recoverable.
-func (p Publisher) applyOne(root string, r *Replacement) error {
+// prepareOne stages one replacement for renaming WITHOUT touching the live
+// file: verify the staged temp file's hash, rewrite it with the source mode,
+// and fsync it. root is the containment root the live path must stay within
+// (empty disables the check); the TOCTOU symlink re-check runs here,
+// immediately before the caller's rename batch. Each step consults the fault
+// hook so failures are recoverable. The live-file rename itself is performed
+// by ApplyUnderLock's batch loop so all renames stay contiguous.
+func (p Publisher) prepareOne(root string, r *Replacement) error {
 	fs := p.fs()
 	if r.TempPath == "" {
 		return fmt.Errorf("publish: replacement %s has no temp path", r.LivePath)
 	}
-	// TOCTOU: re-check immediately before write.
+	// TOCTOU: re-check immediately before the rename batch.
 	if root != "" {
 		if err := ensureNoSymlink(root, r.LivePath); err != nil {
 			return err
@@ -253,25 +311,7 @@ func (p Publisher) applyOne(root string, r *Replacement) error {
 		return errStep(stepTempWrite, err)
 	}
 	// fsync the temp file via an open handle.
-	if err := p.fsyncPath(r.TempPath, stepTempFsync); err != nil {
-		return err
-	}
-	// Atomic rename temp → live.
-	if err := p.hook(stepRename); err != nil {
-		return err
-	}
-	if err := fs.Rename(r.TempPath, r.LivePath); err != nil {
-		return errStep(stepRename, err)
-	}
-	// fsync parent dir so the rename entry is durable.
-	if err := p.hook(stepDirFsync); err != nil {
-		return err
-	}
-	if err := fs.SyncDir(parentDir(r.LivePath)); err != nil {
-		return errStep(stepDirFsync, err)
-	}
-	r.Applied = true
-	return nil
+	return p.fsyncPath(r.TempPath, stepTempFsync)
 }
 
 // fsyncPath opens path through the FS's Open, fsyncs it, and closes it. Used for
