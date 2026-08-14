@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -68,6 +69,21 @@ type Runner struct {
 	MaxOutput int64
 	Sanitize  func([]byte) string
 	Env       map[string]string
+	// EnvLookup resolves a catalog auth env-ref name (e.g. NEURALWATT_API_KEY)
+	// to its value for the validation subprocess. When nil the process
+	// environment (os.Getenv) is used. Only non-empty resolutions are threaded
+	// into the child; the parent environment is never inherited wholesale.
+	EnvLookup func(string) string
+}
+
+// envLookup returns the configured env resolver, defaulting to the process
+// environment so production resolves ${VAR} from os.Getenv while tests inject
+// a deterministic fake.
+func (r Runner) envLookup() func(string) string {
+	if r.EnvLookup != nil {
+		return r.EnvLookup
+	}
+	return os.Getenv
 }
 
 // defaultMaxOutput bounds the combined stdout+stderr captured per command.
@@ -88,7 +104,7 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	defer cancel()
 
 	// Stage 1: config validate.
-	out, errOut, exit, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c))
+	out, errOut, exit, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
@@ -96,7 +112,7 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	}
 
 	// Stage 2: doctor (only after config validation passed).
-	out, errOut, exit, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c))
+	out, errOut, exit, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
@@ -142,13 +158,24 @@ func doctorArgs(c staging.Candidate) []string {
 	return []string{"--working-dir", c.WorkingDir, "doctor"}
 }
 
-func doctorEnv(base map[string]string, c staging.Candidate) map[string]string {
-	env := make(map[string]string, len(base)+2)
+// doctorEnv builds the exact subprocess environment for a validation command:
+// the explicit base vars, the staged XDG_CONFIG_HOME and HOME, and — for
+// catalog/dynamic providers whose real auth is preserved in the staged config —
+// the resolved ${VAR} references so polytoken can expand them. Only refs that
+// resolve to a non-empty value are added; the parent process environment is
+// never inherited wholesale, so unrelated inherited secrets stay out.
+func doctorEnv(base map[string]string, c staging.Candidate, lookup func(string) string) map[string]string {
+	env := make(map[string]string, len(base)+2+len(c.AuthEnvRefs))
 	for key, value := range base {
 		env[key] = value
 	}
 	env["XDG_CONFIG_HOME"] = c.UserConfigDir
 	env["HOME"] = c.Root
+	for _, ref := range c.AuthEnvRefs {
+		if v := lookup(ref); v != "" {
+			env[ref] = v
+		}
+	}
 	return env
 }
 
