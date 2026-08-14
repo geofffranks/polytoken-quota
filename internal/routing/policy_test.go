@@ -41,24 +41,24 @@ func TestComputePace(t *testing.T) {
 		ok     bool
 	}{
 		{
-			name:   "on track: 50% used, 50% elapsed",
+			name:   "on track: 50% used, 3.5 days elapsed rounds to 4 days",
 			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
 			now:    rankNow,
-			want:   1.0,
+			want:   0.875,
 			ok:     true,
 		},
 		{
-			name:   "under-utilized: 30% used, 50% elapsed",
+			name:   "under-utilized: 30% used, 3.5 days elapsed rounds to 4 days",
 			window: quota.QuotaWindow{Used: fptr(30), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
 			now:    rankNow,
-			want:   0.6,
+			want:   0.525,
 			ok:     true,
 		},
 		{
-			name:   "over-utilized: 70% used, 50% elapsed",
+			name:   "over-utilized: 70% used, 3.5 days elapsed rounds to 4 days",
 			window: quota.QuotaWindow{Used: fptr(70), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
 			now:    rankNow,
-			want:   1.4,
+			want:   1.225,
 			ok:     true,
 		},
 		{
@@ -95,6 +95,25 @@ func TestComputePace(t *testing.T) {
 	}
 }
 
+func TestComputePaceRoundsElapsedTimeUpToWholeDays(t *testing.T) {
+	period := 31 * 24 * time.Hour
+	used := 0.01
+	window := quota.QuotaWindow{
+		Used: fptr(used), Limit: fptr(1),
+		ResetAt: tptr(rankNow.Add(period - time.Minute)), Period: durptr(period),
+	}
+	pace, ok := computePace(&quota.QuotaSnapshot{Windows: []quota.QuotaWindow{window}}, rankNow)
+	if !ok {
+		t.Fatal("expected pace to be computable")
+	}
+	// One minute elapsed rounds up to one day, so 1% usage is projected at
+	// 31% pace rather than producing a transient multi-thousand-percent spike.
+	want := used / (1.0 / 31.0)
+	if !floatClose(pace, want) {
+		t.Fatalf("pace = %.4f, want %.4f", pace, want)
+	}
+}
+
 func TestComputePaceAnchorSelection(t *testing.T) {
 	week := 7 * 24 * time.Hour
 	twoDays := 2 * 24 * time.Hour
@@ -113,10 +132,10 @@ func TestComputePaceAnchorSelection(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
-	// longWin: usedFrac=0.1, elapsedFrac=0.5 → pace=0.2.
+	// longWin: usedFrac=0.1, 3.5 elapsed days rounds to 4 days, so pace=0.175.
 	// If shortWin were the anchor: usedFrac=0.9, elapsedFrac varies.
-	// Verify the long window was used (pace should be 0.2).
-	if want := 0.2; !floatClose(pace, want) {
+	// Verify the long window was used (pace should be 0.175).
+	if want := 0.175; !floatClose(pace, want) {
 		t.Fatalf("pace = %.4f, want %.4f (wrong anchor selected)", pace, want)
 	}
 }
