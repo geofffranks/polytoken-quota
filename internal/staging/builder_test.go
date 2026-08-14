@@ -806,3 +806,115 @@ func TestStagingExcludesBackupWithSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// catalogProviderConfig is a global layer exercising the catalog/dynamic
+// provider auth preservation path: neuralwatt is a dynamic catalog provider
+// whose models polytoken doctor discovers via a live authenticated fetch, so its
+// auth must survive AuthInert redaction; codex is a static provider whose auth
+// is redacted as usual. Both reference an environment variable.
+var catalogProviderConfig = "providers:\n" +
+	"  neuralwatt:\n" +
+	"    kind:\n" +
+	"      type: catalog\n" +
+	"      name: neuralwatt\n" +
+	"    auth:\n" +
+	"      type: static_key\n" +
+	"      key: ${NEURALWATT_API_KEY}\n" +
+	"  codex:\n" +
+	"    kind:\n" +
+	"      type: custom_open_ai_compatible\n" +
+	"    auth:\n" +
+	"      type: static_key\n" +
+	"      key: ${CODEX_API_KEY}\n" +
+	"models:\n" +
+	"  codex/gpt:\n" +
+	"    enabled: true\n"
+
+// buildCatalogStage builds an AuthInert candidate from catalogProviderConfig
+// against the global target.
+func buildCatalogStage(t *testing.T) Candidate {
+	t.Helper()
+	root := t.TempDir()
+	globalDir := filepath.Join(root, "global")
+	testutil.WriteFile(t, filepath.Join(globalDir, "config.yaml"), catalogProviderConfig)
+	c, err := Builder{
+		TempRoot: t.TempDir(),
+		AuthMode: AuthInert,
+		Sources:  FSMaterializer{GlobalDir: globalDir},
+	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	if err != nil {
+		t.Fatalf("build candidate: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	return c
+}
+
+func sliceHas(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAuthInertPreservesCatalogProviderAuth proves AuthInert keeps a dynamic
+// catalog provider's auth verbatim (polytoken doctor needs it for the live
+// dynamic-catalog fetch) while still replacing static providers' auth with the
+// inert placeholder.
+func TestAuthInertPreservesCatalogProviderAuth(t *testing.T) {
+	c := buildCatalogStage(t)
+	data, err := os.ReadFile(filepath.Join(c.ConfigDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("${NEURALWATT_API_KEY}")) {
+		t.Fatalf("AuthInert redacted catalog provider auth (must be preserved for doctor):\n%s", data)
+	}
+	if bytes.Contains(data, []byte("${CODEX_API_KEY}")) {
+		t.Fatalf("AuthInert left static provider env ref in staging:\n%s", data)
+	}
+	if !bytes.Contains(data, []byte(inertSecret)) {
+		t.Fatalf("AuthInert did not redact static provider auth:\n%s", data)
+	}
+}
+
+// TestCatalogProviderAuthEnvRefs proves a staged candidate reports exactly the
+// environment-variable names referenced by preserved catalog provider auth, so
+// the validator threads only those (and never a redacted static provider's ref).
+func TestCatalogProviderAuthEnvRefs(t *testing.T) {
+	c := buildCatalogStage(t)
+	if !sliceHas(c.AuthEnvRefs, "NEURALWATT_API_KEY") {
+		t.Fatalf("candidate missing catalog provider auth env ref, got %v", c.AuthEnvRefs)
+	}
+	if sliceHas(c.AuthEnvRefs, "CODEX_API_KEY") {
+		t.Fatalf("candidate reported redacted static provider ref, got %v", c.AuthEnvRefs)
+	}
+}
+
+// TestNoCatalogProviderYieldsNoEnvRefs proves a config with no dynamic catalog
+// provider contributes no auth env refs, leaving validation env isolation
+// unchanged for the common (static-only) case.
+func TestNoCatalogProviderYieldsNoEnvRefs(t *testing.T) {
+	root := t.TempDir()
+	globalDir := filepath.Join(root, "global")
+	staticOnly := "providers:\n" +
+		"  codex:\n" +
+		"    kind:\n" +
+		"      type: custom_open_ai_compatible\n" +
+		"    auth:\n" +
+		"      key: ${CODEX_API_KEY}\n"
+	testutil.WriteFile(t, filepath.Join(globalDir, "config.yaml"), staticOnly)
+	got, err := Builder{
+		TempRoot: t.TempDir(),
+		AuthMode: AuthInert,
+		Sources:  FSMaterializer{GlobalDir: globalDir},
+	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	if err != nil {
+		t.Fatalf("build candidate: %v", err)
+	}
+	t.Cleanup(func() { _ = got.Cleanup() })
+	if len(got.AuthEnvRefs) != 0 {
+		t.Fatalf("static-only config reported env refs %v, want none", got.AuthEnvRefs)
+	}
+}

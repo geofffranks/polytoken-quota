@@ -348,3 +348,78 @@ func TestExecRunnerDirectInvocation(t *testing.T) {
 		t.Fatalf("combined output %d exceeds max %d", len(combined), max)
 	}
 }
+
+// TestValidateThreadsCatalogAuthEnvRefs proves the validator resolves a staged
+// candidate's catalog auth env refs and threads exactly the present ones into
+// BOTH the config-validate and doctor subprocess environments, so polytoken can
+// expand them. Unset/empty refs are not threaded.
+func TestValidateThreadsCatalogAuthEnvRefs(t *testing.T) {
+	spy := newSpy()
+	lookup := func(name string) string {
+		if name == "NEURALWATT_API_KEY" {
+			return "resolved-neuralwatt-key"
+		}
+		return ""
+	}
+	r := Runner{Binary: "/opt/polytoken", Commands: spy, MaxOutput: 4096, Sanitize: sanitize, EnvLookup: lookup}
+	c := staging.Candidate{
+		Root:          "/private/root",
+		ConfigDir:     "/private/config",
+		UserConfigDir: "/private/user",
+		WorkingDir:    "/private/work",
+		AuthEnvRefs:   []string{"NEURALWATT_API_KEY", "UNSET_PROVIDER_KEY"},
+	}
+	if got := r.Validate(context.Background(), c, time.Second); !got.ConfigValid || !got.StartupValid {
+		t.Fatalf("expected success, got %+v", got)
+	}
+	if len(spy.Envs) != 2 {
+		t.Fatalf("expected two subprocess invocations, got %d", len(spy.Envs))
+	}
+	for i, env := range spy.Envs {
+		if env["NEURALWATT_API_KEY"] != "resolved-neuralwatt-key" {
+			t.Fatalf("env[%d] did not thread resolved catalog auth ref: %v", i, env)
+		}
+		if _, ok := env["UNSET_PROVIDER_KEY"]; ok {
+			t.Fatalf("env[%d] threaded an unset/empty ref", i)
+		}
+	}
+}
+
+// TestValidateEnvLookupDefaultsToOsGetenv proves that when no EnvLookup is
+// configured the validator resolves catalog auth refs from the process
+// environment (the production path).
+func TestValidateEnvLookupDefaultsToOsGetenv(t *testing.T) {
+	t.Setenv("PQ_TEST_CATALOG_KEY", "from-process-env")
+	spy := newSpy()
+	r := newRunner(spy) // no EnvLookup set
+	c := staging.Candidate{
+		Root:          "/private/root",
+		ConfigDir:     "/private/config",
+		UserConfigDir: "/private/user",
+		WorkingDir:    "/private/work",
+		AuthEnvRefs:   []string{"PQ_TEST_CATALOG_KEY"},
+	}
+	r.Validate(context.Background(), c, time.Second)
+	if spy.Envs[0]["PQ_TEST_CATALOG_KEY"] != "from-process-env" {
+		t.Fatalf("default lookup did not resolve ref from process env: %v", spy.Envs[0])
+	}
+}
+
+// TestValidateNoEnvRefsLeavesEnvIsolated proves a candidate with no catalog auth
+// refs produces a subprocess env containing only the explicit base vars plus
+// XDG_CONFIG_HOME/HOME — env isolation unchanged for static-only configs.
+func TestValidateNoEnvRefsLeavesEnvIsolated(t *testing.T) {
+	t.Setenv("LEAKED_SECRET", "must-not-appear")
+	spy := newSpy()
+	r := Runner{Binary: "/opt/polytoken", Commands: spy, MaxOutput: 4096, Sanitize: sanitize, Env: map[string]string{"PATH": "/usr/bin"}}
+	c := staging.Candidate{Root: "/r", ConfigDir: "/c", UserConfigDir: "/u", WorkingDir: "/w"}
+	r.Validate(context.Background(), c, time.Second)
+	for i, env := range spy.Envs {
+		if _, ok := env["LEAKED_SECRET"]; ok {
+			t.Fatalf("env[%d] leaked an inherited secret", i)
+		}
+		if env["PATH"] != "/usr/bin" || env["XDG_CONFIG_HOME"] != "/u" || env["HOME"] != "/r" {
+			t.Fatalf("env[%d] missing base vars: %v", i, env)
+		}
+	}
+}

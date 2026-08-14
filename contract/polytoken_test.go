@@ -358,3 +358,81 @@ func strPtrContract(s string) *string { return &s }
 
 // versionTag extracts the version token from a `polytoken --version` line.
 var versionTag = regexp.MustCompile(`[0-9][0-9A-Za-z.\-]+`)
+
+// TestPolytokenContractCatalogProviderConfigValidate proves the staged config
+// for a dynamic catalog provider whose auth is an environment reference
+// (${NEURALWATT_API_KEY}) passes `config validate` exactly when the reconciler
+// threads the resolved value into the subprocess environment. It is the contract
+// justification for preserving catalog provider auth (the scoped
+// AuthTransientSource exception) and threading its ${VAR} refs through
+// validate.doctorEnv. doctor is not exercised here: its dynamic-catalog fetch
+// needs live provider auth and is covered by unit tests instead.
+func TestPolytokenContractCatalogProviderConfigValidate(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("set POLYTOKEN_CONTRACT_BIN (or POLYTOKEN_BIN) for the supported-binary contract")
+	}
+
+	// A global layer with one dynamic catalog provider whose auth is an env ref.
+	globalDir := filepath.Join(t.TempDir(), "global")
+	cfg := "providers:\n" +
+		"  neuralwatt:\n" +
+		"    kind:\n" +
+		"      type: catalog\n" +
+		"      name: neuralwatt\n" +
+		"    auth:\n" +
+		"      key: ${NEURALWATT_API_KEY}\n" +
+		"      type: static_key\n"
+	if err := os.MkdirAll(globalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := staged(t, globalDir, "", reconcile.Plan{}, target.Resolved{ID: "global", Global: true})
+
+	// Staging must preserve the catalog provider auth reference and report it.
+	data, err := os.ReadFile(filepath.Join(c.ConfigDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("${NEURALWATT_API_KEY}")) {
+		t.Fatalf("staging redacted catalog provider auth:\n%s", data)
+	}
+	hasRef := false
+	for _, ref := range c.AuthEnvRefs {
+		if ref == "NEURALWATT_API_KEY" {
+			hasRef = true
+		}
+	}
+	if !hasRef {
+		t.Fatalf("staging did not report catalog auth env ref: %v", c.AuthEnvRefs)
+	}
+
+	work := t.TempDir()
+	// Mirror validate.doctorEnv: isolation env plus the resolved catalog auth
+	// refs (non-empty values only).
+	threaded := isolateEnv(t, work)
+	for _, ref := range c.AuthEnvRefs {
+		threaded = append(threaded, ref+"=synthetic-contract-key")
+	}
+
+	// With the env ref threaded, config validate passes.
+	if code := runCommand(t, bin, threaded, c, work, "config", "validate", "--user"); code != 0 {
+		t.Fatalf("catalog provider config validate failed with threaded env, exit %d", code)
+	}
+
+	// Without the threaded ref, config validate must fail: polytoken expands
+	// ${VAR} at load and rejects an unset reference. This is exactly why the
+	// reconciler threads the resolved value into both validation stages.
+	var stripped []string
+	for _, kv := range threaded {
+		if strings.HasPrefix(kv, "NEURALWATT_API_KEY=") {
+			continue
+		}
+		stripped = append(stripped, kv)
+	}
+	if code := runCommand(t, bin, stripped, c, work, "config", "validate", "--user"); code == 0 {
+		t.Fatal("config validate passed without the threaded catalog auth env ref (expected failure)")
+	}
+}
