@@ -13,6 +13,15 @@ import (
 
 func fptr(v float64) *float64     { x := v; return &x }
 func tptr(t time.Time) *time.Time { x := t; return &x }
+func durptr(d time.Duration) *time.Duration { x := d; return &x }
+
+func floatClose(a, b float64) bool {
+	d := a - b
+	if d < 0 {
+		d = -d
+	}
+	return d < 1e-9
+}
 
 var allDays = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday}
 
@@ -20,6 +29,116 @@ var allDays = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
 var rankNow = time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 
 // dayOf maps a time.Weekday to the canonical DayOfWeek abbreviation.
+func TestComputePace(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	halfWeek := week / 2
+
+	tests := []struct {
+		name   string
+		window quota.QuotaWindow
+		now    time.Time
+		want   float64
+		ok     bool
+	}{
+		{
+			name:   "on track: 50% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   1.0,
+			ok:     true,
+		},
+		{
+			name:   "under-utilized: 30% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(30), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   0.6,
+			ok:     true,
+		},
+		{
+			name:   "over-utilized: 70% used, 50% elapsed",
+			window: quota.QuotaWindow{Used: fptr(70), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
+			now:    rankNow,
+			want:   1.4,
+			ok:     true,
+		},
+		{
+			name:   "fresh: 0% used, near-reset start",
+			window: quota.QuotaWindow{Used: fptr(0), Limit: fptr(100), ResetAt: tptr(rankNow.Add(week)), Period: durptr(week)},
+			now:    rankNow,
+			want:   0.0,
+			ok:     true,
+		},
+		{
+			name:   "no qualifying window: period below 1-day floor",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(2 * time.Hour)), Period: durptr(5 * time.Hour)},
+			now:    rankNow,
+			ok:     false,
+		},
+		{
+			name:   "no qualifying window: nil period",
+			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek))},
+			now:    rankNow,
+			ok:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{tc.window}}
+			got, ok := computePace(snap, tc.now)
+			if ok != tc.ok {
+				t.Fatalf("computePace ok = %v, want %v", ok, tc.ok)
+			}
+			if ok && !floatClose(got, tc.want) {
+				t.Fatalf("computePace = %.4f, want %.4f", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputePaceAnchorSelection(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	twoDays := 2 * 24 * time.Hour
+	// Two qualifying windows (>1 day): the longer (7d) must be the anchor.
+	// Set different used fractions so we can tell which was chosen.
+	shortWin := quota.QuotaWindow{
+		Name: "short", Used: fptr(90), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(week)), Period: durptr(twoDays),
+	}
+	longWin := quota.QuotaWindow{
+		Name: "long", Used: fptr(10), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(week / 2)), Period: durptr(week),
+	}
+	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{shortWin, longWin}}
+	pace, ok := computePace(snap, rankNow)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	// longWin: usedFrac=0.1, elapsedFrac=0.5 → pace=0.2.
+	// If shortWin were the anchor: usedFrac=0.9, elapsedFrac varies.
+	// Verify the long window was used (pace should be 0.2).
+	if want := 0.2; !floatClose(pace, want) {
+		t.Fatalf("pace = %.4f, want %.4f (wrong anchor selected)", pace, want)
+	}
+}
+
+func TestComputePaceClampBounds(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	// now is after ResetAt → elapsedFrac clamps to 1.0.
+	// usedFrac = 0.5 → pace = 0.5/1.0 = 0.5.
+	w := quota.QuotaWindow{
+		Used: fptr(50), Limit: fptr(100),
+		ResetAt: tptr(rankNow.Add(-time.Hour)), Period: durptr(week),
+	}
+	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{w}}
+	pace, ok := computePace(snap, rankNow)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if want := 0.5; !floatClose(pace, want) {
+		t.Fatalf("pace = %.4f, want %.4f", pace, want)
+	}
+}
+
 func dayOf(t time.Time) DayOfWeek {
 	switch t.Weekday() {
 	case time.Sunday:

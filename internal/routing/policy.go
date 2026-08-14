@@ -368,6 +368,61 @@ func (a rankItem) less(b rankItem, groupComparable bool) bool {
 	return a.policy.MappingID < b.policy.MappingID
 }
 
+// minProjectionPeriod is the minimum window duration eligible to be a projection
+// anchor. Windows shorter than one day (e.g. codex's 5h session window) are rate
+// limits, not quota cycles, and are excluded from projection.
+const minProjectionPeriod = 24 * time.Hour
+
+// computePace calculates the projection pace for a provider from its anchor
+// window — the longest window with Period + ResetAt + a usable remaining that
+// clears the minimum-period floor. Returns the pace and true when computable;
+// 0 and false when no qualifying window exists.
+//
+//	usedFrac    = 1 - remainingFraction
+//	elapsedFrac = clamp01(1 - (ResetAt - now) / Period)
+//	pace        = usedFrac / max(elapsedFrac, eps)
+//
+// pace < 1.0 → under-utilized (ranks first); pace > 1.0 → over-utilized.
+// A just-reset window (used≈0, elapsed≈0) yields pace ≈ 0.
+func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
+	if snap == nil {
+		return 0, false
+	}
+	var anchor *quota.QuotaWindow
+	for i := range snap.Windows {
+		w := &snap.Windows[i]
+		if w.Period == nil || *w.Period < minProjectionPeriod {
+			continue
+		}
+		if w.ResetAt == nil {
+			continue
+		}
+		if w.Remaining() == nil {
+			continue
+		}
+		if anchor == nil || *w.Period > *anchor.Period {
+			anchor = w
+		}
+	}
+	if anchor == nil {
+		return 0, false
+	}
+	rem := anchor.Remaining()
+	usedFrac := 1.0 - *rem
+	timeToReset := anchor.ResetAt.Sub(now)
+	elapsedFrac := 1.0 - float64(timeToReset)/float64(*anchor.Period)
+	if elapsedFrac < 0 {
+		elapsedFrac = 0
+	} else if elapsedFrac > 1 {
+		elapsedFrac = 1
+	}
+	eps := float64(5*time.Minute) / float64(*anchor.Period)
+	if elapsedFrac < eps {
+		elapsedFrac = eps
+	}
+	return usedFrac / elapsedFrac, true
+}
+
 // Rank computes the deterministic global ranking for the given input.
 //
 // Eligible providers are grouped by balance group (in first-appearance order;
