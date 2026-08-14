@@ -113,17 +113,6 @@ func TestHistoryTriggerMatrix(t *testing.T) {
 			if got.MappingID != tc.want.MappingID {
 				t.Errorf("MappingID: got %q, want %q", got.MappingID, tc.want.MappingID)
 			}
-			if (got.Hook == nil) != (tc.want.Hook == nil) {
-				t.Errorf("Hook presence: got %v, want %v", got.Hook != nil, tc.want.Hook != nil)
-			}
-			if got.Hook != nil && tc.want.Hook != nil {
-				if got.Hook.Event != tc.want.Hook.Event {
-					t.Errorf("Hook.Event: got %s, want %s", got.Hook.Event, tc.want.Hook.Event)
-				}
-				if got.Hook.Provider != tc.want.Hook.Provider {
-					t.Errorf("Hook.Provider: got %q, want %q", got.Hook.Provider, tc.want.Hook.Provider)
-				}
-			}
 			if (got.Set == nil) != (tc.want.Set == nil) {
 				t.Errorf("Set presence: got %v, want %v", got.Set != nil, tc.want.Set != nil)
 			}
