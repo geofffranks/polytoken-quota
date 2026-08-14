@@ -1,8 +1,8 @@
 // Package service holds the Coordinator: the single CLI-facing mutator that
-// wires hook decoding, policy/state, reconciliation, staging, validation,
-// publication, and recovery into one common locked transaction path.
+// wires policy/state, reconciliation, staging, validation, publication, and
+// recovery into one common locked transaction path.
 //
-// Every mutating operation (Init, HandleEvent, Reconcile, Set, Clear) goes
+// Every mutating operation (Init, Reconcile, Set, Clear) goes
 // through Coordinator.transact with this exact order:
 //
 //  1. acquire the advisory lock
@@ -15,8 +15,7 @@
 //  8. release the lock
 //
 // Partial success: valid targets apply the accepted revision; invalid targets
-// remain last-known-good/pending at the same observed revision. An accepted hook
-// event is persisted even when every target stays pending. Exit codes: 0
+// remain last-known-good/pending at the same observed revision. Exit codes: 0
 // accepted + all applied, 2 accepted + one or more pending, 1 rejected/no
 // mutation.
 package service
@@ -32,7 +31,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
@@ -79,7 +77,6 @@ type transactionKind uint8
 
 const (
 	txInit transactionKind = iota
-	txEvent
 	txReconcile
 	txSet
 	txClear
@@ -91,7 +88,6 @@ const (
 
 // transactionInput carries the kind-specific arguments into the common path.
 type transactionInput struct {
-	Event       *hook.Event
 	DryRun      bool
 	KeepStaging bool
 	Force       bool
@@ -104,12 +100,6 @@ type transactionInput struct {
 	// Verbose requests the verbose reconcile trace in target outcomes.
 	Verbose bool
 }
-
-// Rejected/stale outcomes are non-mutating and exit 1.
-var (
-	errHookRejected = errors.New("service: rejected hook event; no mutation")
-	errStaleEvent   = errors.New("service: stale event ignored; no mutation")
-)
 
 // defaultValidationTimeout is used when the policy omits an operational timeout.
 const defaultValidationTimeout = 30 * time.Second
@@ -127,14 +117,6 @@ type InitOptions struct {
 // only an existing valid policy.
 func (c *Coordinator) InitWithOptions(ctx context.Context, opts InitOptions) Outcome {
 	return c.transact(ctx, txInit, transactionInput{Force: opts.Force})
-}
-
-// HandleEvent applies a decoded CodexBar hook event through the transaction
-// path. A valid event is accepted and persisted even when all targets remain
-// pending; a malformed/unknown event is rejected without mutation.
-func (c *Coordinator) HandleEvent(ctx context.Context, e hook.Event) Outcome {
-	ev := e
-	return c.transact(ctx, txEvent, transactionInput{Event: &ev})
 }
 
 // Reconcile regenerates candidates from the current policy and persisted state.
@@ -201,20 +183,6 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	}()
 
 	var initExisting bool
-	if kind == txEvent {
-		if !validEvent(in.Event) {
-			return Outcome{Accepted: false, Error: errHookRejected}
-		}
-		// Hook identity qualification is deliberately before state load/recovery:
-		// rejected hooks must not trigger publisher recovery or any mutation.
-		desired, err := c.Policy.LoadPolicy()
-		if err != nil {
-			return Outcome{Accepted: false, Error: err}
-		}
-		if err := qualifyHookEvent(desired, *in.Event); err != nil {
-			return Outcome{Accepted: false, Error: err}
-		}
-	}
 	if kind == txInit {
 		_, err := c.Policy.LoadPolicy()
 		switch {
@@ -248,8 +216,6 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	switch kind {
 	case txInit:
 		return c.transactInit(ctx, recovered, in, initExisting)
-	case txEvent:
-		return c.transactEvent(ctx, recovered, in)
 	case txReconcile:
 		return c.transactReconcile(ctx, recovered, in)
 	case txSet, txClear:
@@ -309,92 +275,6 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
-
-// transactEvent accepts a hook event and reconciles all targets with a detailed
-// per-target trace.
-func (c *Coordinator) transactEvent(ctx context.Context, recovered state.State, in transactionInput) Outcome {
-	c.step("load-policy")
-	desired, err := c.Policy.LoadPolicy()
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	observed := recovered
-	if observed.NextArrivalSequence == 0 {
-		observed.NextArrivalSequence = nextArrivalSequence(observed)
-	}
-	arrivalSeq := observed.NextArrivalSequence
-	arrival := state.Arrival{Sequence: arrivalSeq, ReceivedAt: c.now()}
-	next, accepted, diag, err := state.ApplyEvent(observed, *in.Event, arrival)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	next.NextArrivalSequence = arrivalSeq + 1
-	if !accepted {
-		event := eventFromHook(*in.Event, observed, next, state.EventIgnored, diag.Summary, arrivalSeq, observed.Revision, c.now())
-		event.Sequence = nextEventSequence(&next)
-		next.EventHistory, err = state.AppendEvent(next.EventHistory, event)
-		if err != nil {
-			return Outcome{Accepted: false, Error: err}
-		}
-		c.step("save-state")
-		if err := c.State.Save(next); err != nil {
-			return Outcome{Accepted: false, DurabilityFailure: true, Error: err}
-		}
-		return Outcome{Accepted: true, HandledWithoutRevision: true, Revision: observed.Revision}
-	}
-	next.Revision = observed.Revision + 1
-	result := state.EventChanged
-	reason := ""
-	if diag.Code == "no-change" {
-		result = state.EventNoChange
-		reason = diag.Summary
-	}
-	event := eventFromHook(*in.Event, observed, next, result, reason, arrivalSeq, next.Revision, c.now())
-	event.Sequence = nextEventSequence(&next)
-	next.EventHistory, err = state.AppendEvent(next.EventHistory, event)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	if result == state.EventNoChange {
-		c.step("save-state")
-		if err := c.State.Save(next); err != nil {
-			return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Error: err}
-		}
-		return Outcome{Accepted: true, Revision: next.Revision, HandledWithoutRevision: true}
-	}
-	if desired.Routing.Enabled {
-		next = appendRoutingEvents(next, desired, observed, c.now())
-	}
-	c.step("load-sources")
-	targets, err := c.Targets.ResolveTargets(desired)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
-	next = c.recordTargetOutcomes(next, outcomes)
-	c.step("save-state")
-	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
-	}
-	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
-}
-
-func nextArrivalSequence(s state.State) uint64 {
-	max := uint64(0)
-	for _, ps := range s.Providers {
-		if ps.QuotaArrival > max {
-			max = ps.QuotaArrival
-		}
-		if ps.AvailabilityArrival > max {
-			max = ps.AvailabilityArrival
-		}
-	}
-	if max == ^uint64(0) {
-		return 0
-	}
-	return max + 1
-}
-
 func nextEventSequence(s *state.State) uint64 {
 	if s.NextEventSequence == 0 {
 		s.NextEventSequence = 1
@@ -406,26 +286,13 @@ func nextEventSequence(s *state.State) uint64 {
 	s.NextEventSequence++
 	return seq
 }
-
-func qualifyHookEvent(desired policy.Desired, event hook.Event) error {
-	owners := 0
-	for _, mapping := range desired.Providers {
-		for _, provider := range mapping.CodexBarProviders {
-			if provider == event.Provider {
-				owners++
-			}
-		}
+func trackedProviders(s state.State) []string {
+	out := make([]string, 0, len(s.Providers))
+	for provider := range s.Providers {
+		out = append(out, provider)
 	}
-	if owners != 1 {
-		return fmt.Errorf("service: hook provider %q is unknown or ambiguous", sanitizeFailure(event.Provider))
-	}
-	return nil
-}
-
-func eventFromHook(e hook.Event, prior, next state.State, result state.EventResult, reason string, arrival, revision uint64, now time.Time) state.EventRecord {
-	before := prior.Providers[e.Provider]
-	after := next.Providers[e.Provider]
-	return state.EventRecord{ArrivalSequence: arrival, Revision: revision, At: e.Timestamp.UTC(), RecordedAt: now.UTC(), Category: state.EventHook, Action: string(e.Type), Provider: e.Provider, Result: result, Reason: reason, BeforeQuota: before.Quota, AfterQuota: after.Quota, BeforeAvail: before.Availability, AfterAvail: after.Availability, BeforeMode: state.EffectiveMode(before), AfterMode: state.EffectiveMode(after), UsagePercent: e.UsagePercent, Used: e.Used, Limit: e.Limit, ResetAt: e.ResetAt, Status: optionalString(e.Status)}
+	sort.Strings(out)
+	return out
 }
 
 func appendRoutingEvents(next state.State, desired policy.Desired, prior state.State, now time.Time) state.State {
@@ -461,22 +328,6 @@ func appendRoutingEvents(next state.State, desired policy.Desired, prior state.S
 
 func eventIntPtr(v int) *int    { return &v }
 func eventBoolPtr(v bool) *bool { return &v }
-
-func optionalString(v *string) string {
-	if v == nil {
-		return ""
-	}
-	return *v
-}
-
-func trackedProviders(s state.State) []string {
-	out := make([]string, 0, len(s.Providers))
-	for provider := range s.Providers {
-		out = append(out, provider)
-	}
-	sort.Strings(out)
-	return out
-}
 
 func appendManualEvent(next, prior state.State, kind transactionKind, in transactionInput, now time.Time) state.State {
 	action := ""
@@ -849,11 +700,6 @@ func targetID(rt RegisteredTarget) string {
 		return "global"
 	}
 	return rt.Resolved.ID
-}
-
-// validEvent reports whether a decoded hook event carries the required identity.
-func validEvent(e *hook.Event) bool {
-	return e != nil && e.Type != "" && e.Provider != "" && !e.Timestamp.IsZero()
 }
 
 // sortedProviderNames returns the keys of m in sorted order for deterministic

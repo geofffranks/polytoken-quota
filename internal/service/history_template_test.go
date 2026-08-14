@@ -2,9 +2,7 @@ package service
 
 import (
 	"testing"
-	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -15,11 +13,6 @@ import (
 // coordinator transaction kind to the correct typed state trigger with
 // kind-relevant sanitized fields.
 func TestHistoryTriggerMatrix(t *testing.T) {
-	ts := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
-	usagePct := 0.75
-	used := 7500.0
-	limit := 10000.0
-
 	tests := []struct {
 		name string
 		kind transactionKind
@@ -31,31 +24,6 @@ func TestHistoryTriggerMatrix(t *testing.T) {
 			kind: txInit,
 			in:   transactionInput{},
 			want: state.Trigger{Kind: state.TriggerInit},
-		},
-		{
-			name: "hook with evidence",
-			kind: txEvent,
-			in: transactionInput{
-				Event: &hook.Event{
-					Type:         hook.QuotaLow,
-					Provider:     "codex",
-					Timestamp:    ts,
-					UsagePercent: &usagePct,
-					Used:         &used,
-					Limit:        &limit,
-				},
-			},
-			want: state.Trigger{
-				Kind: state.TriggerHook,
-				Hook: &state.HookEvidence{
-					Event:        state.HookQuotaLow,
-					Provider:     "codex",
-					Timestamp:    ts,
-					UsagePercent: &usagePct,
-					Used:         &used,
-					Limit:        &limit,
-				},
-			},
 		},
 		{
 			name: "explicit reconcile",
@@ -262,5 +230,5 @@ func TestBuildRecordTemplateEmpty(t *testing.T) {
 
 // --- helpers ---------------------------------------------------------------
 
-func quotaPtr(q state.Quota) *state.Quota { return &q }
+func quotaPtr(q state.Quota) *state.Quota               { return &q }
 func availPtr(a state.Availability) *state.Availability { return &a }

@@ -8,7 +8,6 @@ package service
 // Task 4 finalizes the template with outcomes, timestamp, and tier selection.
 
 import (
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -22,8 +21,6 @@ func TriggerFromTransaction(kind transactionKind, in transactionInput) state.Tri
 	switch kind {
 	case txInit:
 		return state.Trigger{Kind: state.TriggerInit}
-	case txEvent:
-		return state.Trigger{Kind: state.TriggerHook, Hook: hookEvidenceFromEvent(in.Event)}
 	case txReconcile:
 		return state.Trigger{Kind: state.TriggerReconcile}
 	case txDisable:
@@ -40,23 +37,6 @@ func TriggerFromTransaction(kind transactionKind, in transactionInput) state.Tri
 		return state.Trigger{Kind: state.TriggerClear, Clear: clearEvidenceFromInput(in)}
 	default:
 		return state.Trigger{}
-	}
-}
-
-func hookEvidenceFromEvent(e *hook.Event) *state.HookEvidence {
-	if e == nil {
-		return nil
-	}
-	return &state.HookEvidence{
-		Event:        state.HookEventKind(e.Type),
-		Provider:     e.Provider,
-		Timestamp:    e.Timestamp,
-		Window:       e.Window,
-		UsagePercent: e.UsagePercent,
-		Used:         e.Used,
-		Limit:        e.Limit,
-		ResetAt:      e.ResetAt,
-		Status:       e.Status,
 	}
 }
 
