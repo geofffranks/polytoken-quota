@@ -1,7 +1,7 @@
 # Synthetic desired-policy example — NOT a built-in default.
 #
-# This fixture illustrates the explicit CodexBar→Polytoken provider mapping with
-# exact concrete base-model enumeration. It is consumed by the policy graph tests
+# This fixture illustrates the single top-level provider mapping keyed by provider
+# ID with exact concrete base-model enumeration. It is consumed by the policy graph tests
 # to prove deterministic, offline resolution. These provider/model names are
 # synthetic examples, not real or shipped defaults.
 version: 1

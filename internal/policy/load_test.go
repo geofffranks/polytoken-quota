@@ -40,7 +40,8 @@ func sliceEq(got []string, want ...string) bool {
 }
 
 // TestLoadSyntheticFixture is the Task 4 schema happy path: version, explicit
-// CodexBar→Polytoken provider mapping with exact concrete model enumeration, the
+// single top-level provider mapping keyed by provider ID with exact concrete model
+// enumeration, the
 // global target with chains, a registered project, a suffixed definition chain
 // that resolves to a managed base, and operational bounds.
 func TestLoadSyntheticFixture(t *testing.T) {
