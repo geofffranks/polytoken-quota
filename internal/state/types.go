@@ -15,10 +15,16 @@ import (
 )
 
 // CurrentSchema is the on-disk state schema version this build reads and writes.
-// Load accepts older known schemas (0 through 3) by migrating them in memory to
-// CurrentSchema and rejects any newer, unknown schema by failing closed. Save
-// always persists CurrentSchema.
-const CurrentSchema = 4
+// Schema 5 adds the meaningful event timeline and durable arrival/event sequence
+// counters. Older schemas migrate operational state in memory and discard the
+// legacy reconcile-history records.
+const CurrentSchema = 5
+
+const (
+	EventHistoryLimit        = 500
+	EventHistoryEncodedBytes = 4 * 1024 * 1024
+	EventTextBytes           = 512
+)
 
 // Mode is the reconciler-internal effective operating mode derived from a
 // provider's independent quota and availability axes. It is never persisted to
@@ -120,6 +126,19 @@ type ProviderRouting struct {
 	LastRank            int // last computed global rank (0-based)
 	LastDecisionAt      time.Time
 	LastAppliedRevision uint64
+	// Decision retains the prior ranking view used to qualify routing events.
+	Decision *RoutingDecision
+}
+
+// RoutingDecision is the bounded persisted view of one provider's last ranking
+// result. It intentionally mirrors the existing routing result contract and does
+// not invent additional comparative metrics.
+type RoutingDecision struct {
+	Rank        int
+	Eligible    bool
+	OffPeak     bool
+	Explanation string
+	EvaluatedAt time.Time
 }
 
 // ApplyFailure describes a target that could not be fully reconciled. It is the
@@ -169,9 +188,16 @@ type State struct {
 	RoutingHistory *RoutingHistory
 	UsageHistory   *UsageHistory
 
-	// ReconcileHistory is the additive schema-v4 bounded record of qualifying
-	// reconciles, newest revision first.
-	ReconcileHistory ReconcileHistory
+	// EventHistory is the authoritative bounded meaningful-event timeline in
+	// schema 5. Legacy reconcile history is accepted only by the migration sink.
+	EventHistory        EventHistory
+	NextEventSequence   uint64
+	NextArrivalSequence uint64
+
+	// ReconcileHistory is retained temporarily as an in-memory compatibility
+	// field for existing callers; Store.Load/Save never treats it as durable
+	// history in schema 5.
+	ReconcileHistory ReconcileHistory `json:"-"`
 }
 
 // RoutingHistory records the last good global provider ranking computed by the

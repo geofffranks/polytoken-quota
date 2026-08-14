@@ -175,16 +175,9 @@ type strErr string
 func (e strErr) Error() string { return string(e) }
 
 // Load reads and decodes the state file. A missing file returns a fresh, empty
-// state (Schema CurrentSchema) with initialized maps and no error.
-//
-// Schema handling is additive and backward-compatible: schemas 0 through 3 are
-// legacy documents and are migrated in memory to CurrentSchema (new additive
-// fields default to nil/zero); schema CurrentSchema is loaded as-is. Any newer,
-// unknown schema fails closed — Load returns an error
-// rather than silently accepting a format it does not know. Nil maps from a
-// sparse file are normalized to empty maps so callers can assign without
-// panicking. Migration is in memory only; the file is rewritten to CurrentSchema
-// on the next accepted Save.
+// schema-5 state with initialized maps and counters. Legacy schemas migrate
+// operational fields in memory and discard legacy reconcile history before event
+// validation. Loading never writes the file.
 func (st Store) Load() (State, error) {
 	data, err := os.ReadFile(st.Path)
 	if err != nil {
@@ -200,20 +193,37 @@ func (st Store) Load() (State, error) {
 	if s.Schema < 0 || s.Schema > CurrentSchema {
 		return State{}, fmt.Errorf("state: unsupported schema %d in %s (current %d)", s.Schema, st.Path, CurrentSchema)
 	}
-	// Legacy schemas 0 through 3 migrate additively, but schema-v4 history is
-	// ignored even if a legacy document happens to contain a same-named field.
-	if s.Schema < CurrentSchema {
+	legacySchema := s.Schema < CurrentSchema
+	if legacySchema {
 		s.ReconcileHistory = ReconcileHistory{}
-	}
-	s.Schema = CurrentSchema
-	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
-		return State{}, fmt.Errorf("state: validate history in %s: %w", st.Path, err)
+		s.EventHistory = EventHistory{}
 	}
 	if s.Providers == nil {
 		s.Providers = map[string]ProviderState{}
 	}
 	if s.Targets == nil {
 		s.Targets = map[string]TargetState{}
+	}
+	if s.NextArrivalSequence == 0 {
+		maxArrival := uint64(0)
+		for _, ps := range s.Providers {
+			if ps.QuotaArrival > maxArrival {
+				maxArrival = ps.QuotaArrival
+			}
+			if ps.AvailabilityArrival > maxArrival {
+				maxArrival = ps.AvailabilityArrival
+			}
+		}
+		if maxArrival == ^uint64(0) {
+			return State{}, fmt.Errorf("state: arrival sequence overflow in %s", st.Path)
+		}
+		s.NextArrivalSequence = maxArrival + 1
+	}
+	if s.Schema < CurrentSchema {
+		s.Schema = CurrentSchema
+	}
+	if err := ValidateEventHistory(s.EventHistory); err != nil {
+		return State{}, fmt.Errorf("state: validate event history in %s: %w", st.Path, err)
 	}
 	return s, nil
 }
@@ -232,14 +242,28 @@ func (st Store) Save(s State) error {
 	s = PruneUsageHistory(s, st.now())
 	s = sanitizeSnapshots(s)
 	s = sanitizeDiagnostics(s)
-	s.ReconcileHistory = sanitizeHistory(s.ReconcileHistory)
 	var err error
-	s.ReconcileHistory, err = boundHistory(s.ReconcileHistory)
+	s.EventHistory, err = BoundEventHistory(SanitizeEventHistory(s.EventHistory))
 	if err != nil {
-		return fmt.Errorf("state: bound history: %w", err)
+		return fmt.Errorf("state: bound event history: %w", err)
 	}
-	if err := ValidateReconcileHistory(s.ReconcileHistory); err != nil {
-		return fmt.Errorf("state: validate history: %w", err)
+	if err := ValidateEventHistory(s.EventHistory); err != nil {
+		return fmt.Errorf("state: validate event history: %w", err)
+	}
+	if s.NextArrivalSequence == 0 {
+		maxArrival := uint64(0)
+		for _, ps := range s.Providers {
+			if ps.QuotaArrival > maxArrival {
+				maxArrival = ps.QuotaArrival
+			}
+			if ps.AvailabilityArrival > maxArrival {
+				maxArrival = ps.AvailabilityArrival
+			}
+		}
+		if maxArrival == ^uint64(0) {
+			return fmt.Errorf("state: arrival sequence overflow")
+		}
+		s.NextArrivalSequence = maxArrival + 1
 	}
 	s.Schema = CurrentSchema
 	data, err := json.MarshalIndent(s, "", "  ")
@@ -331,8 +355,10 @@ func (st Store) now() time.Time {
 
 func newState() State {
 	return State{
-		Schema:    CurrentSchema,
-		Providers: map[string]ProviderState{},
-		Targets:   map[string]TargetState{},
+		Schema:              CurrentSchema,
+		Providers:           map[string]ProviderState{},
+		Targets:             map[string]TargetState{},
+		NextEventSequence:   1,
+		NextArrivalSequence: 1,
 	}
 }

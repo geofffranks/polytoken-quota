@@ -15,56 +15,47 @@ import (
 
 // fakeHistoryQuerier implements service.HistoryQuerier for testing.
 type fakeHistoryQuerier struct {
-	summaries service.HistorySummaryReport
-	detail    service.HistoryDetailReport
-	summaryFn func(limit int) (service.HistorySummaryReport, error)
-	detailFn  func(rev uint64) (service.HistoryDetailReport, error)
-	summaryCalls int
-	detailCalls  int
-	lastLimit    int
-	lastRev      uint64
+	events        service.HistoryEventReport
+	revision      service.HistoryRevisionReport
+	eventsFn      func(limit int) (service.HistoryEventReport, error)
+	revisionFn    func(rev uint64) (service.HistoryRevisionReport, error)
+	eventCalls    int
+	revisionCalls int
+	lastLimit     int
+	lastRev       uint64
 }
 
-func (f *fakeHistoryQuerier) Summaries(limit int) (service.HistorySummaryReport, error) {
-	f.summaryCalls++
+func (f *fakeHistoryQuerier) Events(limit int) (service.HistoryEventReport, error) {
+	f.eventCalls++
 	f.lastLimit = limit
-	if f.summaryFn != nil {
-		return f.summaryFn(limit)
+	if f.eventsFn != nil {
+		return f.eventsFn(limit)
 	}
-	return f.summaries, nil
+	return f.events, nil
 }
 
-func (f *fakeHistoryQuerier) Detail(revision uint64) (service.HistoryDetailReport, error) {
-	f.detailCalls++
+func (f *fakeHistoryQuerier) RevisionEvents(revision uint64) (service.HistoryRevisionReport, error) {
+	f.revisionCalls++
 	f.lastRev = revision
-	if f.detailFn != nil {
-		return f.detailFn(revision)
+	if f.revisionFn != nil {
+		return f.revisionFn(revision)
 	}
-	return f.detail, nil
+	return f.revision, nil
 }
 
-func sampleSummaryReport(n int) service.HistorySummaryReport {
-	recs := make([]service.HistorySummary, n)
-	for i := range recs {
-		recs[i] = service.HistorySummary{
-			Revision:    uint64(100 - i),
-			CompletedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
-			Trigger:     state.Trigger{Kind: state.TriggerReconcile},
-			Applied:     2,
-			Pending:     1,
-		}
+func sampleEventReport(n int) service.HistoryEventReport {
+	events := make([]state.EventRecord, n)
+	for i := range events {
+		events[i] = state.EventRecord{Sequence: uint64(100 - i), Revision: uint64(100 - i), Ordinal: 0, At: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC), RecordedAt: time.Date(2026, 8, 11, 13, 0, 0, 0, time.UTC), Category: state.EventHook, Action: "quota_low", Provider: "codex", Result: state.EventChanged, Reason: "reserve"}
 	}
-	return service.HistorySummaryReport{
-		ReportedAt: time.Date(2026, 8, 11, 13, 0, 0, 0, time.UTC),
-		Records:    recs,
-	}
+	return service.HistoryEventReport{ReportedAt: time.Date(2026, 8, 11, 13, 0, 0, 0, time.UTC), Events: events}
 }
 
 func sampleDetailRecord() state.ReconcileRecord {
 	return state.ReconcileRecord{
 		Revision:    42,
 		CompletedAt: time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
-		Trigger:     state.Trigger{Kind: state.TriggerHook, Hook: &state.HookEvidence{
+		Trigger: state.Trigger{Kind: state.TriggerHook, Hook: &state.HookEvidence{
 			Event:     state.HookQuotaLow,
 			Provider:  "codex",
 			Timestamp: time.Date(2026, 8, 11, 11, 55, 0, 0, time.UTC),
@@ -163,228 +154,107 @@ func TestHistoryFlagParsingUnknownFlag(t *testing.T) {
 	}
 }
 
-// --- Summary mode tests (AC.9) ---
+// --- Timeline mode tests ---
 
-func TestHistorySummaryEmpty(t *testing.T) {
+func TestHistoryTimelineEmpty(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{summaries: service.HistorySummaryReport{
-		ReportedAt: time.Now(),
-		Records:    []service.HistorySummary{},
-	}}
+	q := &fakeHistoryQuerier{events: service.HistoryEventReport{ReportedAt: time.Now(), Events: []state.EventRecord{}}}
 	code := runHistory(nil, depsWithHistory(q), &stdout, &stderr)
 	if code != ExitOK {
 		t.Fatalf("exit = %d, want 0", code)
 	}
-	if !strings.Contains(stdout.String(), "No reconcile changes recorded.") {
-		t.Fatalf("expected empty message, got: %s", stdout.String())
+	if !strings.Contains(stdout.String(), "No provider or routing events recorded.") {
+		t.Fatalf("output=%s", stdout.String())
 	}
 }
 
-func TestHistorySummaryRendersRecords(t *testing.T) {
+func TestHistoryTimelineRendersEvents(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{summaries: sampleSummaryReport(3)}
+	q := &fakeHistoryQuerier{events: sampleEventReport(3)}
 	code := runHistory(nil, depsWithHistory(q), &stdout, &stderr)
 	if code != ExitOK {
 		t.Fatalf("exit = %d, want 0", code)
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "REV") {
-		t.Fatal("missing header row")
-	}
-	// Should show revision 100, 99, 98
-	for _, rev := range []string{"100", "99", "98"} {
-		if !strings.Contains(out, rev) {
-			t.Fatalf("missing revision %s in output: %s", rev, out)
+	for _, want := range []string{"EVENT HISTORY", "WHEN", "quota_low", "codex", "reserve"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in %s", want, out)
 		}
 	}
-	if !strings.Contains(out, "reconcile") {
-		t.Fatal("missing trigger kind")
-	}
 }
 
-func TestHistorySummaryRespectsLimit(t *testing.T) {
+func TestHistoryTimelineRespectsLimit(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{summaries: sampleSummaryReport(10)}
-	deps := depsWithHistory(q)
-	runHistory([]string{"--limit", "3"}, deps, &stdout, &stderr)
+	q := &fakeHistoryQuerier{events: sampleEventReport(10)}
+	runHistory([]string{"--limit", "3"}, depsWithHistory(q), &stdout, &stderr)
 	if q.lastLimit != 3 {
-		t.Fatalf("limit passed to querier = %d, want 3", q.lastLimit)
+		t.Fatalf("limit=%d", q.lastLimit)
 	}
 }
 
-// --- Detail mode tests (AC.9) ---
-
-func TestHistoryDetailFound(t *testing.T) {
+func TestHistoryRevisionFoundAndNotFound(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{detail: service.HistoryDetailReport{
-		ReportedAt: time.Now(),
-		Record:     sampleDetailRecord(),
-		Found:      true,
-	}}
-	code := runHistory([]string{"--revision", "42"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d, want 0", code)
+	q := &fakeHistoryQuerier{revision: service.HistoryRevisionReport{Revision: 42, ReportedAt: time.Now(), Found: true, Events: []state.EventRecord{{Revision: 42, Sequence: 1, Ordinal: 0, At: time.Now(), RecordedAt: time.Now(), Category: state.EventHook, Action: "quota_reached", Provider: "zai", Result: state.EventChanged, Reason: "disabled"}}}}
+	if code := runHistory([]string{"--revision", "42"}, depsWithHistory(q), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
-	out := stdout.String()
-	if !strings.Contains(out, "Revision:     42") {
-		t.Fatalf("missing revision in detail output: %s", out)
+	if !strings.Contains(stdout.String(), "Revision: 42") || !strings.Contains(stdout.String(), "quota_reached") {
+		t.Fatalf("output=%s", stdout.String())
 	}
-	if !strings.Contains(out, "full") {
-		t.Fatalf("missing tier in detail output: %s", out)
-	}
-	if !strings.Contains(out, "global") {
-		t.Fatalf("missing target ID in detail output: %s", out)
+	stdout.Reset()
+	stderr.Reset()
+	q.revision = service.HistoryRevisionReport{Revision: 999}
+	if code := runHistory([]string{"--revision", "999"}, depsWithHistory(q), &stdout, &stderr); code != ExitRejected || !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("code=%d stderr=%s", code, stderr.String())
 	}
 }
 
-func TestHistoryDetailNotFound(t *testing.T) {
+func TestHistoryJSONEventReports(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{detail: service.HistoryDetailReport{Found: false}}
-	code := runHistory([]string{"--revision", "999"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitRejected {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if !strings.Contains(stderr.String(), "not found") {
-		t.Fatalf("expected not-found error, got: %s", stderr.String())
-	}
-}
-
-func TestHistoryDetailAggregateTier(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	rec := state.ReconcileRecord{
-		Revision:        10,
-		CompletedAt:     time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC),
-		Trigger:         state.Trigger{Kind: state.TriggerReconcile},
-		Tier:            state.TierAggregate,
-		DetailTruncated: true,
-		Counts: state.AuthoritativeTargetCounts{Total: 70, Applied: 60, Pending: 10, Omitted: 6},
-		CompactTargets: []state.CompactTarget{
-			{ID: "global", Outcome: state.OutcomeApplied},
-		},
-	}
-	q := &fakeHistoryQuerier{detail: service.HistoryDetailReport{
-		ReportedAt: time.Now(),
-		Record:     rec,
-		Found:      true,
-	}}
-	code := runHistory([]string{"--revision", "10"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-	out := stdout.String()
-	if !strings.Contains(out, "aggregate") {
-		t.Fatalf("missing tier in output: %s", out)
-	}
-	if !strings.Contains(out, "detail truncated") || !strings.Contains(out, "omitted") {
-		t.Fatalf("expected truncation indicator with omitted count: %s", out)
-	}
-}
-
-// --- JSON tests (AC.10) ---
-
-func TestHistoryJSONSummary(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{summaries: sampleSummaryReport(2)}
-	code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d, want 0", code)
+	q := &fakeHistoryQuerier{events: sampleEventReport(2)}
+	if code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("exit=%d", code)
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, stdout.String())
+		t.Fatal(err)
 	}
-	recs, ok := result["records"].([]interface{})
-	if !ok {
-		t.Fatalf("records not an array: %v", result)
-	}
-	if len(recs) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(recs))
+	if _, ok := result["events"].([]interface{}); !ok {
+		t.Fatalf("events=%v", result)
 	}
 	if _, ok := result["reported_at"]; !ok {
-		t.Fatal("missing reported_at field")
+		t.Fatal("reported_at missing")
 	}
-}
-
-func TestHistoryJSONEmptyRecords(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{summaries: service.HistorySummaryReport{
-		ReportedAt: time.Now(),
-		Records:    nil, // nil should become empty array
-	}}
-	code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d, want 0", code)
+	stdout.Reset()
+	q.events = service.HistoryEventReport{ReportedAt: time.Now(), Events: nil}
+	if code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr); code != ExitOK {
+		t.Fatalf("exit=%d", code)
 	}
-	var result map[string]interface{}
 	json.Unmarshal(stdout.Bytes(), &result)
-	recs, _ := result["records"].([]interface{})
-	if recs == nil {
-		t.Fatal("records should be an empty array, not null")
-	}
-	if len(recs) != 0 {
-		t.Fatalf("expected 0 records, got %d", len(recs))
+	if result["events"] == nil {
+		t.Fatal("events must be an empty array")
 	}
 }
 
-func TestHistoryJSONDetail(t *testing.T) {
+func TestHistoryJSONNotFoundAndLoadError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{detail: service.HistoryDetailReport{
-		ReportedAt: time.Now(),
-		Record:     sampleDetailRecord(),
-		Found:      true,
-	}}
-	code := runHistory([]string{"--revision", "42", "--json"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitOK {
-		t.Fatalf("exit = %d, want 0", code)
-	}
-	var result state.ReconcileRecord
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("invalid JSON: %v\n%s", err, stdout.String())
-	}
-	if result.Revision != 42 {
-		t.Fatalf("revision = %d, want 42", result.Revision)
-	}
-	if result.Tier != state.TierFull {
-		t.Fatalf("tier = %s, want full", result.Tier)
-	}
-	if len(result.Targets) != 2 {
-		t.Fatalf("expected 2 targets, got %d", len(result.Targets))
-	}
-}
-
-func TestHistoryJSONNotFoundError(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{detail: service.HistoryDetailReport{Found: false}}
-	code := runHistory([]string{"--revision", "999", "--json"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitRejected {
-		t.Fatalf("exit = %d, want 1", code)
+	q := &fakeHistoryQuerier{revision: service.HistoryRevisionReport{Revision: 999}}
+	if code := runHistory([]string{"--revision", "999", "--json"}, depsWithHistory(q), &stdout, &stderr); code != ExitRejected {
+		t.Fatalf("exit=%d", code)
 	}
 	var result map[string]interface{}
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("error output must be valid JSON: %v\n%s", err, stdout.String())
+		t.Fatal(err)
 	}
 	if _, ok := result["error"]; !ok {
-		t.Fatalf("expected error key, got: %v", result)
+		t.Fatal("error missing")
 	}
-}
-
-func TestHistoryJSONLoadError(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	q := &fakeHistoryQuerier{
-		summaryFn: func(int) (service.HistorySummaryReport, error) {
-			return service.HistorySummaryReport{}, errors.New("state load failed")
-		},
+	stdout.Reset()
+	q.eventsFn = func(int) (service.HistoryEventReport, error) {
+		return service.HistoryEventReport{}, errors.New("state load failed")
 	}
-	code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr)
-	if code != ExitRejected {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	var result map[string]interface{}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
-		t.Fatalf("error output must be valid JSON: %v", err)
-	}
-	if !strings.Contains(result["error"].(string), "state load failed") {
-		t.Fatalf("error message mismatch: %v", result["error"])
+	if code := runHistory([]string{"--json"}, depsWithHistory(q), &stdout, &stderr); code != ExitRejected {
+		t.Fatalf("exit=%d", code)
 	}
 }
 
@@ -407,8 +277,8 @@ func TestHistoryNilQuerier(t *testing.T) {
 func TestHistoryHumanLoadError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	q := &fakeHistoryQuerier{
-		summaryFn: func(int) (service.HistorySummaryReport, error) {
-			return service.HistorySummaryReport{}, fmt.Errorf("disk read error")
+		eventsFn: func(int) (service.HistoryEventReport, error) {
+			return service.HistoryEventReport{}, fmt.Errorf("disk read error")
 		},
 	}
 	code := runHistory(nil, depsWithHistory(q), &stdout, &stderr)

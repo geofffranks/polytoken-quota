@@ -55,6 +55,10 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	if desired.Routing.Enabled {
 		next = applyRoutingMetadata(next, desired, c.now())
 	}
+	next = appendQuotaEvents(next, attempts, c.now())
+	if desired.Routing.Enabled {
+		next = appendRoutingEvents(next, desired, observed, c.now())
+	}
 	problem := anyAttemptFailed(attempts)
 
 	var outcomes []TargetOutcome
@@ -76,7 +80,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 
 	c.step("save-state")
 	if serr := c.State.Save(next); serr != nil {
-		return Outcome{Accepted: false, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports, Error: fmt.Errorf("service: persist quota observations: %w", serr)}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports, Error: fmt.Errorf("service: persist quota observations: %w", serr)}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports}
 }
@@ -145,6 +149,23 @@ func quotaAttemptDiagnostics(attempts map[string]quota.QuotaSnapshot) []QuotaAtt
 		out = append(out, QuotaAttemptDiagnostic{MappingID: id, Status: string(s.Status), Error: quota.SanitizeText(s.Error), CheckedAt: s.CheckedAt})
 	}
 	return out
+}
+
+func appendQuotaEvents(next state.State, attempts map[string]quota.QuotaSnapshot, now time.Time) state.State {
+	ids := make([]string, 0, len(attempts))
+	for id := range attempts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		snap := attempts[id]
+		if snap.Status != quota.SourceFailed {
+			continue
+		}
+		e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: snap.CheckedAt.UTC(), RecordedAt: now.UTC(), Category: state.EventQuotaFailure, Action: "refresh_failed", MappingID: id, Result: state.EventFailed, Reason: quota.SanitizeText(snap.Error), Status: string(snap.Status)}
+		next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
+	}
+	return next
 }
 
 func anyAttemptFailed(attempts map[string]quota.QuotaSnapshot) bool {

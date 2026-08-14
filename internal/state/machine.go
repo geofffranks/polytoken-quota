@@ -104,7 +104,9 @@ func compareArrival(newTS time.Time, newSeq uint64, oldTS time.Time, oldSeq uint
 
 // ApplyEvent applies a single validated hook event to the state machine and
 // returns the resulting state, whether the event was accepted, a diagnostic
-// (populated for stale outcomes), and an error.
+// (populated for stale outcomes), and an error. Equal-timestamp later arrivals
+// are accepted idempotent ordering updates; callers may identify them from the
+// diagnostic code and skip downstream target processing.
 //
 // Quota and availability are independent axes: an event mutates only its own
 // axis, so a recovery never clears quota and a reset never clears availability.
@@ -146,7 +148,8 @@ func applyAxisEvent(s State, e hook.Event, a Arrival) (State, bool, Diagnostic, 
 		oldTS, oldSeq = ps.AvailabilityAt, ps.AvailabilityArrival
 	}
 
-	if cmp := compareArrival(e.Timestamp, a.Sequence, oldTS, oldSeq); cmp < 0 {
+	cmp := compareArrival(e.Timestamp, a.Sequence, oldTS, oldSeq)
+	if cmp < 0 {
 		diag := Diagnostic{
 			Code:     "stale",
 			Provider: e.Provider,
@@ -182,6 +185,9 @@ func applyAxisEvent(s State, e hook.Event, a Arrival) (State, bool, Diagnostic, 
 
 	next := s
 	next.Providers = providers
+	if !oldTS.IsZero() && !e.Timestamp.IsZero() && e.Timestamp.Equal(oldTS) && a.Sequence > oldSeq {
+		return next, true, Diagnostic{Code: "no-change", Provider: e.Provider, Summary: "accepted later arrival with unchanged provider state", At: e.Timestamp}, nil
+	}
 	return next, true, Diagnostic{}, nil
 }
 
@@ -254,6 +260,41 @@ func SetProvider(s State, provider string, patch ProviderPatch, at time.Time) (S
 	next := s
 	next.Providers = providers
 	return next, nil
+}
+
+// ManualDisableChanged reports whether applying the requested manual-disable
+// value changes any alias in the batch.
+func ManualDisableChanged(s State, providers []string, disabled bool) bool {
+	for _, provider := range providers {
+		if s.Providers[provider].ManualDisabled != disabled {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearChanged reports whether clearing the selected provider axes changes any
+// tracked provider.
+func ClearChanged(s State, sel Selector) bool {
+	for provider, ps := range s.Providers {
+		if (sel.All || provider == sel.Provider) && (ps.Quota != QuotaNormal || ps.Availability != Available) {
+			return true
+		}
+	}
+	return false
+}
+
+// SetChanged reports whether any requested patch field differs from the current
+// provider state.
+func SetChanged(s State, provider string, patch ProviderPatch) bool {
+	ps := s.Providers[provider]
+	if patch.Quota != nil && ps.Quota != *patch.Quota {
+		return true
+	}
+	if patch.Availability != nil && ps.Availability != *patch.Availability {
+		return true
+	}
+	return false
 }
 
 // ClearProvider resets the provider(s) identified by the selector to the healthy

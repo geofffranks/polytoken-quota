@@ -77,14 +77,12 @@ func TestValidateFullHistoryEnforcesSharedAndOutcomeCounts(t *testing.T) {
 	}
 }
 
-func TestHistorySizingMarshalErrorsFailClosed(t *testing.T) {
+func TestEventHistorySizingMarshalErrorsFailClosed(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "state.json")
 	st := Store{Path: p, Now: func() time.Time { return historyTestTime }}
-	r := validHistoryRecord(t)
 	bad := math.NaN()
-	r.Trigger = Trigger{Kind: TriggerHook, Hook: &HookEvidence{Event: HookQuotaLow, Provider: "codex", Timestamp: historyTestTime, UsagePercent: &bad}}
-	if err := st.Save(State{Providers: map[string]ProviderState{}, Targets: map[string]TargetState{}, ReconcileHistory: ReconcileHistory{Records: []ReconcileRecord{r}}}); err == nil {
-		t.Fatal("Save accepted history containing unsupported JSON value")
+	if err := st.Save(State{Providers: map[string]ProviderState{}, Targets: map[string]TargetState{}, EventHistory: EventHistory{Events: []EventRecord{{Sequence: 1, Revision: 1, Ordinal: 0, At: historyTestTime, RecordedAt: historyTestTime, Category: EventHook, Action: "quota_low", Provider: "codex", Result: EventChanged, UsagePercent: &bad}}}}); err == nil {
+		t.Fatal("Save accepted event history containing unsupported JSON value")
 	}
 }
 
@@ -248,6 +246,46 @@ func TestAggregateRecordBoundsCompactPendingTextToRecordCeiling(t *testing.T) {
 	}
 	if r.Counts.Omitted != r.Counts.Total-len(r.CompactTargets) {
 		t.Fatalf("counts=%+v retained=%d", r.Counts, len(r.CompactTargets))
+	}
+}
+
+func TestEventHistoryAppendIsNewestFirstAndDeepCopied(t *testing.T) {
+	at := historyTestTime
+	e := EventRecord{Sequence: 2, Revision: 2, Ordinal: 0, At: at, RecordedAt: at, Category: EventHook, Action: "quota_reached", Provider: "codex", Result: EventChanged, Reason: "Bearer SECRET account=alice", Changes: []string{"defaults.full"}}
+	h, err := AppendEvent(EventHistory{}, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Sequence = 1
+	e.Changes[0] = "changed"
+	if h.Events[0].Sequence != 2 || h.Events[0].Changes[0] != "defaults.full" {
+		t.Fatalf("append aliases input: %+v", h.Events[0])
+	}
+	second := EventRecord{Sequence: 3, Revision: 3, Ordinal: 0, At: at.Add(time.Second), RecordedAt: at.Add(time.Second), Category: EventRoutingChange, Action: "routing_changed", Provider: "codex", Result: EventChanged}
+	h, err = AppendEvent(h, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Events) != 2 || h.Events[0].Sequence != 3 || h.Events[1].Sequence != 2 {
+		t.Fatalf("events not newest first: %+v", h.Events)
+	}
+	if h.Events[1].Reason == "Bearer SECRET account=alice" {
+		t.Fatal("event reason was not sanitized")
+	}
+}
+
+func TestValidateEventHistoryRejectsNonFiniteAndNonUTCFields(t *testing.T) {
+	bad := math.NaN()
+	e := EventRecord{Sequence: 1, Revision: 1, Ordinal: 0, At: historyTestTime.In(time.FixedZone("offset", 3600)), RecordedAt: historyTestTime, Category: EventHook, Action: "quota_low", Result: EventChanged, UsagePercent: &bad}
+	if err := ValidateEventHistory(EventHistory{Events: []EventRecord{e}}); err == nil {
+		t.Fatal("expected invalid event field rejection")
+	}
+}
+
+func TestValidateEventHistoryRejectsDuplicateSequence(t *testing.T) {
+	e := EventRecord{Sequence: 1, Revision: 1, Ordinal: 0, At: historyTestTime, RecordedAt: historyTestTime, Category: EventHook, Action: "quota_low", Result: EventChanged}
+	if err := ValidateEventHistory(EventHistory{Events: []EventRecord{e, e}}); err == nil {
+		t.Fatal("expected duplicate event sequence rejection")
 	}
 }
 

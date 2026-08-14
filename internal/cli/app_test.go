@@ -670,6 +670,12 @@ func TestExitCodeRouting(t *testing.T) {
 	if got := MutationExitCode(service.Outcome{Accepted: true}); got != ExitOK {
 		t.Fatalf("accepted mutation=%d want %d", got, ExitOK)
 	}
+	if got := MutationExitCode(service.Outcome{Accepted: true, HandledWithoutRevision: true}); got != ExitOK {
+		t.Fatalf("handled no-revision=%d want %d", got, ExitOK)
+	}
+	if got := MutationExitCode(service.Outcome{Accepted: false, DurabilityFailure: true}); got != ExitRejected {
+		t.Fatalf("durability failure=%d want %d", got, ExitRejected)
+	}
 	if got := MutationExitCode(service.Outcome{Accepted: false}); got != ExitRejected {
 		t.Fatalf("rejected mutation=%d want %d", got, ExitRejected)
 	}

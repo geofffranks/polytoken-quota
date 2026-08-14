@@ -224,6 +224,75 @@ type ReconcileRecord struct {
 	CompactTargets  []CompactTarget  `json:",omitempty"`
 	Omitted         RecordOmittedCounts
 }
+
+// EventCategory identifies the source of a meaningful timeline event.
+type EventCategory string
+
+const (
+	EventHook          EventCategory = "hook"
+	EventManual        EventCategory = "manual"
+	EventQuotaFailure  EventCategory = "quota-failure"
+	EventRoutingChange EventCategory = "routing-change"
+)
+
+// EventResult describes whether an event changed state or was intentionally
+// ignored/no-op. It is bounded and safe for human/JSON projections.
+type EventResult string
+
+const (
+	EventChanged  EventResult = "changed"
+	EventIgnored  EventResult = "ignored"
+	EventFailed   EventResult = "failed"
+	EventNoChange EventResult = "no-change"
+)
+
+// EventRecord is the durable, sanitized representation of one meaningful
+// provider or routing event. Reconcile evidence is intentionally bounded and
+// represented as summaries rather than raw source content.
+type EventRecord struct {
+	Sequence        uint64
+	ArrivalSequence uint64 `json:",omitempty"`
+	Revision        uint64
+	Ordinal         int
+	At              time.Time
+	RecordedAt      time.Time
+	Category        EventCategory
+	Action          string
+	Provider        string `json:",omitempty"`
+	MappingID       string `json:",omitempty"`
+	Result          EventResult
+	Reason          string       `json:",omitempty"`
+	BeforeQuota     Quota        `json:",omitempty"`
+	AfterQuota      Quota        `json:",omitempty"`
+	BeforeAvail     Availability `json:",omitempty"`
+	AfterAvail      Availability `json:",omitempty"`
+	BeforeMode      Mode         `json:",omitempty"`
+	AfterMode       Mode         `json:",omitempty"`
+	UsagePercent    *float64     `json:",omitempty"`
+	Used            *float64     `json:",omitempty"`
+	Limit           *float64     `json:",omitempty"`
+	ResetAt         *time.Time   `json:",omitempty"`
+	Status          string       `json:",omitempty"`
+	OldRank         *int         `json:",omitempty"`
+	NewRank         *int         `json:",omitempty"`
+	OldEligible     *bool        `json:",omitempty"`
+	NewEligible     *bool        `json:",omitempty"`
+	OldOffPeak      *bool        `json:",omitempty"`
+	NewOffPeak      *bool        `json:",omitempty"`
+	Explanation     string       `json:",omitempty"`
+	Applied         int          `json:",omitempty"`
+	Pending         int          `json:",omitempty"`
+	Changes         []string     `json:",omitempty"`
+}
+
+// EventHistory is the bounded newest-first meaningful event timeline.
+type EventHistory struct {
+	Events        []EventRecord
+	OmittedEvents int
+}
+
+// ReconcileHistory remains an in-memory compatibility type for callers being
+// migrated to EventHistory. It is not persisted by the schema-5 state store.
 type ReconcileHistory struct {
 	Records               []ReconcileRecord
 	OmittedHistoryRecords int
@@ -610,6 +679,86 @@ func ValidateHistoryRecord(r ReconcileRecord) error {
 		return fmt.Errorf("state: history record exceeds encoded limit")
 	}
 	return nil
+}
+
+func ValidateEventHistory(h EventHistory) error {
+	if h.OmittedEvents < 0 || len(h.Events) > EventHistoryLimit {
+		return fmt.Errorf("state: invalid event history count")
+	}
+	seen := make(map[uint64]bool, len(h.Events))
+	for i, e := range h.Events {
+		if e.Sequence == 0 || seen[e.Sequence] {
+			return fmt.Errorf("state: invalid or duplicate event sequence at %d", i)
+		}
+		seen[e.Sequence] = true
+		if e.Revision == 0 || e.Ordinal < 0 || e.At.IsZero() || e.RecordedAt.IsZero() || e.At.Location() != time.UTC || e.RecordedAt.Location() != time.UTC {
+			return fmt.Errorf("state: invalid event metadata at %d", i)
+		}
+		for name, value := range map[string]*float64{"usage_percent": e.UsagePercent, "used": e.Used, "limit": e.Limit} {
+			if value != nil && (math.IsNaN(*value) || math.IsInf(*value, 0)) {
+				return fmt.Errorf("state: invalid event %s at %d", name, i)
+			}
+		}
+		if e.Result != EventChanged && e.Result != EventIgnored && e.Result != EventFailed && e.Result != EventNoChange {
+			return fmt.Errorf("state: invalid event result %q", e.Result)
+		}
+		if e.Category != EventHook && e.Category != EventManual && e.Category != EventQuotaFailure && e.Category != EventRoutingChange {
+			return fmt.Errorf("state: invalid event category %q", e.Category)
+		}
+	}
+	return nil
+}
+
+func SanitizeEventHistory(h EventHistory) EventHistory {
+	out := EventHistory{OmittedEvents: h.OmittedEvents, Events: make([]EventRecord, len(h.Events))}
+	for i, e := range h.Events {
+		e.Provider = sanitizeIdentifier(e.Provider)
+		e.MappingID = sanitizeIdentifier(e.MappingID)
+		e.Action = sanitizeText(e.Action)
+		e.Reason = sanitizeText(e.Reason)
+		e.Status = sanitizeText(e.Status)
+		e.Explanation = sanitizeText(e.Explanation)
+		if len(e.Changes) > HistoryEditsPerTarget {
+			e.Changes = e.Changes[:HistoryEditsPerTarget]
+		}
+		if e.Changes != nil {
+			changes := make([]string, len(e.Changes))
+			for j, change := range e.Changes {
+				changes[j] = sanitizeText(change)
+			}
+			e.Changes = changes
+		}
+		out.Events[i] = e
+	}
+	return out
+}
+
+func BoundEventHistory(h EventHistory) (EventHistory, error) {
+	if len(h.Events) > EventHistoryLimit {
+		h.OmittedEvents += len(h.Events) - EventHistoryLimit
+		h.Events = h.Events[:EventHistoryLimit]
+	}
+	for {
+		b, err := json.Marshal(h)
+		if err != nil {
+			return EventHistory{}, err
+		}
+		if len(b) <= EventHistoryEncodedBytes {
+			return h, nil
+		}
+		if len(h.Events) == 0 {
+			return h, nil
+		}
+		h.Events = h.Events[:len(h.Events)-1]
+		h.OmittedEvents++
+	}
+}
+
+func AppendEvent(h EventHistory, e EventRecord) (EventHistory, error) {
+	out := EventHistory{OmittedEvents: h.OmittedEvents, Events: make([]EventRecord, 0, len(h.Events)+1)}
+	out.Events = append(out.Events, e)
+	out.Events = append(out.Events, h.Events...)
+	return BoundEventHistory(SanitizeEventHistory(out))
 }
 
 func ValidateReconcileHistory(h ReconcileHistory) error {

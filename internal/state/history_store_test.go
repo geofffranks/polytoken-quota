@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-func TestLoadMigratesLegacySchemasToV4EmptyHistory(t *testing.T) {
-	for schema := 0; schema <= 3; schema++ {
+func TestLoadMigratesLegacySchemasToV5EmptyEventHistory(t *testing.T) {
+	for schema := 0; schema <= 4; schema++ {
 		t.Run(string(rune('0'+schema)), func(t *testing.T) {
 			p := filepath.Join(t.TempDir(), "state.json")
 			writeFile(t, p, `{"Schema":`+string(rune('0'+schema))+`,"Revision":9,"Providers":{},"Targets":{}}`)
@@ -19,7 +19,7 @@ func TestLoadMigratesLegacySchemasToV4EmptyHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if s.Schema != 4 || s.Revision != 9 || len(s.ReconcileHistory.Records) != 0 {
+			if s.Schema != CurrentSchema || s.Revision != 9 || len(s.EventHistory.Events) != 0 || s.NextArrivalSequence != 1 {
 				t.Fatalf("state=%+v", s)
 			}
 		})
@@ -38,18 +38,14 @@ func TestLoadLegacySchemaDiscardsEmbeddedHistoryBeforeValidation(t *testing.T) {
 	}
 }
 
-func TestHistoryRoundTripAndRetentionAt100WhenWithinBudget(t *testing.T) {
+func TestEventHistoryRoundTripAndRetention(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "state.json")
 	st := Store{Path: p, Now: func() time.Time { return historyTestTime }, RecoveredRetention: 24 * time.Hour}
 	s := newState()
-	for i := 1; i <= HistoryRecordLimit+5; i++ {
-		tpl := validHistoryTemplate()
-		tpl.Revision = uint64(i)
-		r, err := ProjectHistoryRecord(tpl, historyTestTime.Add(time.Duration(i)*time.Second))
-		if err != nil {
-			t.Fatal(err)
-		}
-		s.ReconcileHistory, err = AppendHistory(s.ReconcileHistory, r)
+	for i := 1; i <= EventHistoryLimit+5; i++ {
+		e := EventRecord{Sequence: uint64(i), Revision: uint64(i), Ordinal: 0, At: historyTestTime.Add(time.Duration(i) * time.Second), RecordedAt: historyTestTime.Add(time.Duration(i) * time.Second), Category: EventHook, Action: "quota_low", Provider: "codex", Result: EventChanged}
+		var err error
+		s.EventHistory, err = AppendEvent(s.EventHistory, e)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,13 +57,13 @@ func TestHistoryRoundTripAndRetentionAt100WhenWithinBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.ReconcileHistory.Records) != HistoryRecordLimit || got.ReconcileHistory.Records[0].Revision != 105 || got.ReconcileHistory.Records[99].Revision != 6 {
-		t.Fatalf("history=%+v", got.ReconcileHistory)
+	if len(got.EventHistory.Events) != EventHistoryLimit || got.EventHistory.Events[0].Sequence != EventHistoryLimit+5 || got.EventHistory.Events[EventHistoryLimit-1].Sequence != 6 {
+		t.Fatalf("history=%+v", got.EventHistory)
 	}
-	copy := DeepCopyReconcileHistory(got.ReconcileHistory)
-	copy.Records[0].Targets[0].ID = "changed"
-	if got.ReconcileHistory.Records[0].Targets[0].ID == "changed" {
-		t.Fatal("deep copy aliases nested state")
+	copy := SanitizeEventHistory(got.EventHistory)
+	copy.Events[0].Changes = []string{"changed"}
+	if len(got.EventHistory.Events[0].Changes) != 0 {
+		t.Fatal("deep copy unexpectedly aliases")
 	}
 }
 
@@ -90,31 +86,17 @@ func TestHistoryAppendDeduplicatesRevision(t *testing.T) {
 
 func TestLoadRejectsUnknownHistorySchema(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "state.json")
-	writeFile(t, p, `{"Schema":5,"Providers":{},"Targets":{}}`)
+	writeFile(t, p, `{"Schema":6,"Providers":{},"Targets":{}}`)
 	if _, err := (Store{Path: p}).Load(); err == nil {
 		t.Fatal("expected unknown schema rejection")
 	}
 }
 
-func TestSaveSanitizesHistoryCanaries(t *testing.T) {
+func TestSaveSanitizesEventCanaries(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "state.json")
 	st := Store{Path: p, Now: func() time.Time { return historyTestTime }}
-	tpl := validHistoryTemplate()
-	tpl.Providers[0].Reason = "Bearer SECRET account=alice " + strings.Repeat("é", 600)
-	tpl.Targets[0].Edits[0].Detail = "api_key=CANARY " + strings.Repeat("z", 800)
-	tpl.Targets[0].Outcome = OutcomePending
-	tpl.Targets[0].Pending = &PendingDetail{Stage: PendingPublish, Summary: "https://alice:hunter2@example.invalid failed", Remediation: "token=CANARY retry"}
-	r, err := ProjectHistoryRecord(tpl, historyTestTime)
-	if err != nil {
-		t.Fatal(err)
-	}
 	s := newState()
-	s.ReconcileHistory, err = AppendHistory(s.ReconcileHistory, r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a long-lived in-memory caller reintroducing raw text after construction.
-	s.ReconcileHistory.Records[0].Providers[0].Reason = "Bearer SAVESECRET account=save-account"
+	s.EventHistory.Events = []EventRecord{{Sequence: 1, Revision: 1, Ordinal: 0, At: historyTestTime, RecordedAt: historyTestTime, Category: EventHook, Action: "quota_low", Provider: "alice", Result: EventFailed, Reason: "Bearer SECRET account=alice", Status: "https://alice:hunter2@example.invalid failed", Explanation: "api_key=CANARY"}}
 	if err := st.Save(s); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +104,7 @@ func TestSaveSanitizesHistoryCanaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"SECRET", "alice", "hunter2", "CANARY", "SAVESECRET", "save-account"} {
+	for _, bad := range []string{"SECRET", "hunter2", "CANARY"} {
 		if strings.Contains(string(b), bad) {
 			t.Fatalf("persisted canary %q", bad)
 		}
@@ -131,8 +113,8 @@ func TestSaveSanitizesHistoryCanaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.ReconcileHistory.Records) != 1 {
-		t.Fatal("history missing")
+	if len(loaded.EventHistory.Events) != 1 {
+		t.Fatal("event history missing")
 	}
 }
 

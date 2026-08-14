@@ -35,6 +35,48 @@ func loadRaw(t *testing.T, path string) State {
 	return s
 }
 
+func TestEventHistoryMigrationPreservesOperationalState(t *testing.T) {
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	p := filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, p, `{"Schema":4,"Revision":42,"Providers":{"codex":{"Quota":"exhausted","Availability":"available","QuotaArrival":17,"AvailabilityArrival":9}},"Targets":{"global":{"AttemptedRevision":42,"AppliedRevision":41}},"ReconcileHistory":{"Records":[{"Revision":0,"Tier":"future"}]}}`)
+	loaded, err := (Store{Path: p, Now: func() time.Time { return now }}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Schema != CurrentSchema || loaded.Revision != 42 {
+		t.Fatalf("schema/revision=%d/%d", loaded.Schema, loaded.Revision)
+	}
+	if loaded.NextArrivalSequence != 18 {
+		t.Fatalf("next arrival=%d want 18", loaded.NextArrivalSequence)
+	}
+	if loaded.Providers["codex"].Quota != QuotaExhausted || loaded.Targets["global"].AppliedRevision != 41 {
+		t.Fatalf("operational state not preserved: %+v %+v", loaded.Providers["codex"], loaded.Targets["global"])
+	}
+	if len(loaded.EventHistory.Events) != 0 {
+		t.Fatalf("legacy history should not become events: %+v", loaded.EventHistory)
+	}
+}
+
+func TestMigrationInitializesArrivalSequenceForZeroState(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, p, `{"Schema":4,"Providers":{},"Targets":{}}`)
+	loaded, err := (Store{Path: p}).Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.NextArrivalSequence != 1 {
+		t.Fatalf("next arrival=%d want 1", loaded.NextArrivalSequence)
+	}
+}
+
+func TestMigrationArrivalOverflowRejected(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, p, `{"Schema":4,"Providers":{"codex":{"QuotaArrival":18446744073709551615}},"Targets":{}}`)
+	if _, err := (Store{Path: p}).Load(); err == nil {
+		t.Fatal("expected arrival sequence overflow rejection")
+	}
+}
+
 func TestLoadMigratesV1ToV2(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	dir := t.TempDir()
@@ -119,7 +161,7 @@ func TestLoadMissingReturnsFreshV2(t *testing.T) {
 func TestLoadRejectsFutureSchema(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "state.json")
-	for _, schema := range []int{5, 99} {
+	for _, schema := range []int{6, 99} {
 		writeFile(t, p, `{"Schema": `+strconv.Itoa(schema)+`, "Providers": {}, "Targets": {}}`)
 		st := Store{Path: p, Now: time.Now, RecoveredRetention: 24 * time.Hour}
 		if _, err := st.Load(); err == nil {
@@ -160,7 +202,7 @@ func TestStateV2ToV3CreditsMigrationRoundTrip(t *testing.T) {
 	if loaded.Schema != CurrentSchema || got.LastSuccess == nil || got.LastSuccess.ServerAvailableCount != 2 || len(got.LastSuccess.AvailableExpiries) != 2 || got.LastSuccess.AvailableExpiries[1] != nil || got.UsageSummary == nil || *got.UsageSummary.Credits.Balance != balance {
 		t.Fatalf("v3 round trip lost credit state: schema=%d credits=%+v", loaded.Schema, got)
 	}
-	writeFile(t, p, `{"Schema":5,"Providers":{},"Targets":{}}`)
+	writeFile(t, p, `{"Schema":6,"Providers":{},"Targets":{}}`)
 	if _, err := st.Load(); err == nil {
 		t.Fatal("newer schema must be rejected; downgrade is unsupported")
 	}
