@@ -738,6 +738,33 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 
 // ----- Part 7: ineligible placement ----------------------------------------
 
+func TestRankExplainPace(t *testing.T) {
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nopace"}},
+		Obs: []ProviderObs{
+			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},
+			{MappingID: "nopace", Mode: "normal", Snapshot: remSnap("nopace", 0.5, rankNow)},
+		},
+	}
+	r := Rank(in)
+	for _, e := range r.Entries {
+		if !e.Eligible {
+			continue
+		}
+		if e.MappingID == "proj" {
+			if !strings.Contains(e.Explanation, "pace") {
+				t.Fatalf("projecting entry %s explanation %q must reference pace", e.MappingID, e.Explanation)
+			}
+		}
+		if e.MappingID == "nopace" {
+			if strings.Contains(e.Explanation, "pace") {
+				t.Fatalf("non-projecting entry %s explanation %q must not reference pace", e.MappingID, e.Explanation)
+			}
+		}
+	}
+}
+
 func TestRankIneligiblePlacement(t *testing.T) {
 	in := RankingInput{
 		Now:      rankNow,

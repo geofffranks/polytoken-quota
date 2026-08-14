@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling and runtime routing are opt-in. When enabled, the tool ranks configured providers by fresh quota headroom, availability, balance group, weight, and optional off-peak schedules, then applies the resulting order through the normal validated reconciliation flow.
+Quota polling and runtime routing are opt-in. When enabled, the tool ranks configured providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow.
 
 The tool never controls a running Polytoken process, stores provider credentials, or persists raw provider responses, auth headers, or account IDs.
 
@@ -239,10 +239,10 @@ Routing uses a deterministic lexicographic ranking, not a blended score:
 
 1. Providers must be eligible: their mode is `normal` or `reserve`, their snapshot is fresh, and it contains usable remaining quota.
 2. Eligible providers stay grouped by `balance_group`; groups appear in their first configured order and do not interleave.
-3. Within each group, off-peak providers come before peak providers, then higher effective headroom, lower comparable weekly usage, sooner quota reset, higher `weight`, and finally alphabetical provider ID.
-4. If weekly-usage units are missing or incomparable for any provider in a group, that comparison is skipped for the whole group rather than guessed. Ineligible providers remain at the end and are never disabled by routing.
+3. Within each group, providers are ranked by **projection pace** — the ratio of used-fraction to elapsed-fraction of their quota window. Lower pace ranks first (under-utilized providers catch up; over-utilized ones ease back). Providers within 10% absolute pace are treated as tied. Pace is computed from each provider's longest qualifying quota window (period + reset + remaining, minimum one day). Ties break by off-peak before peak, then higher `weight`, then alphabetical provider ID.
+4. If either provider in a pair cannot compute a pace (no qualifying window), the pace comparison is skipped for that pair. Ineligible providers remain at the end and are never disabled by routing.
 
-For example, if `codex` and `zai` are both eligible in the same balance group, `codex` is ranked first during its configured off-peak hours even when it has 40% headroom and `zai` has 80%. Outside those hours, the higher-headroom `zai` ranks first. If both are in the same schedule state and have equal headroom, the provider with lower comparable weekly usage wins; if usage cannot be compared, the reset time, weight, and provider ID decide the tie.
+For example, if `codex` and `zai` are both eligible in the same balance group and `codex` is burning its weekly quota faster than `zai` (higher pace), `zai` ranks first to balance depletion. If both are within 10% on pace, the off-peak provider wins; if both are in the same schedule state, weight and provider ID decide the tie.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 

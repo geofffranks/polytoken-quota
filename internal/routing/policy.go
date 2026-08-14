@@ -318,7 +318,6 @@ type RankingResult struct {
 type rankItem struct {
 	policy  ProviderPolicy
 	offPeak bool
-	rem     *float64 // EffectiveRemaining; for explain display
 	pace    *float64 // projection pace; nil when not computable
 	cluster int      // pace cluster index; -1 when no pace
 	weight  int
@@ -460,7 +459,6 @@ func Rank(in RankingInput) RankingResult {
 			reason = el.Reason
 			item = rankItem{policy: p, weight: p.weight(), offPeak: offPeakAt(p.Schedule, in.Now), cluster: -1}
 			if obs.Snapshot != nil {
-				item.rem = obs.Snapshot.EffectiveRemaining()
 				if pace, ok := computePace(obs.Snapshot, in.Now); ok {
 					item.pace = &pace
 				}
@@ -544,8 +542,8 @@ func (e entry) explain() string {
 	if e.item.offPeak {
 		status = "off-peak"
 	}
-	if e.item.rem != nil {
-		return fmt.Sprintf("%s, %d%% headroom", status, int(math.Round(*e.item.rem*100)))
+	if e.item.pace != nil {
+		return fmt.Sprintf("%s, pace %d%%", status, int(math.Round(*e.item.pace*100)))
 	}
 	return status
 }
