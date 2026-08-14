@@ -45,7 +45,7 @@ func NeuralwattEvidence(_ time.Time) Evidence {
 		Endpoint:    neuralwattQuotaEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "bearer-api-key",
-		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance, usage/limits metadata may be null; blocked/overage states fail closed",
+		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance (kwh_*, current_period_start/current_period_end describe billing term, not monthly quota reset), usage/limits metadata may be null; blocked/overage states fail closed",
 		FixturePath: "contract/testdata/quota/neuralwatt/quota.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
@@ -199,6 +199,7 @@ type neuralwattSubscription struct {
 	KWHIncluded  *float64 `json:"kwh_included"`
 	KWHUsed      *float64 `json:"kwh_used"`
 	KWHRemaining *float64 `json:"kwh_remaining"`
+	PeriodStart  string   `json:"current_period_start"`
 	PeriodEnd    string   `json:"current_period_end"`
 	InOverage    *bool    `json:"in_overage"`
 }
@@ -220,7 +221,7 @@ func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaW
 		return observedAt, windows, unavailable, partial, err
 	}
 	if response.Subscription != nil {
-		windows, unavailable, partial, err := neuralwattSubscriptionWindow(*response.Subscription)
+		windows, unavailable, partial, err := neuralwattSubscriptionWindow(*response.Subscription, checkedAt)
 		if err != nil {
 			return time.Time{}, nil, false, false, err
 		}
@@ -268,7 +269,7 @@ func neuralwattAllowanceWindow(a neuralwattAllowance) ([]QuotaWindow, bool, bool
 	return []QuotaWindow{neuralwattWindow("key_allowance", used, *a.Limit)}, *a.Remaining <= 0, false, nil
 }
 
-func neuralwattSubscriptionWindow(s neuralwattSubscription) ([]QuotaWindow, bool, bool, error) {
+func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]QuotaWindow, bool, bool, error) {
 	if s.InOverage == nil {
 		return nil, false, false, errors.New("neuralwatt: subscription is missing overage state")
 	}
@@ -291,13 +292,18 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription) ([]QuotaWindow, bool
 	}
 	window := neuralwattWindow("subscription_kwh", used, *s.KWHIncluded)
 	partial := false
-	if s.PeriodEnd != "" {
-		reset, err := time.Parse(time.RFC3339, s.PeriodEnd)
+	if s.PeriodStart != "" {
+		start, err := time.Parse(time.RFC3339, s.PeriodStart)
 		if err != nil {
 			partial = true
 		} else {
+			reset, prev := monthlyBounds(now, start.Day(), start.Hour(), start.Minute(), start.Second())
+			period := reset.Sub(prev)
 			window.ResetAt = &reset
+			window.Period = &period
 		}
+	} else {
+		partial = true
 	}
 	return []QuotaWindow{window}, *s.KWHRemaining <= 0, partial, nil
 }
@@ -327,6 +333,50 @@ func neuralwattBalanceWindow(b neuralwattBalance) (*QuotaWindow, bool, bool, err
 func neuralwattWindow(name string, used, limit float64) QuotaWindow {
 	percent := clampRange(used/limit*100, 0, 100)
 	return QuotaWindow{Name: name, Used: &used, Limit: &limit, UsagePercent: &percent}
+}
+
+// clampDayOfMonth returns dom clamped to the last valid day of the given
+// year/month (e.g. day 31 in February → 28 or 29). Mirrors cron semantics.
+func clampDayOfMonth(year int, month time.Month, dom int) int {
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+	if dom > lastDay {
+		return lastDay
+	}
+	return dom
+}
+
+// nextMonthlyAnniversary returns the next occurrence of the given day-of-month
+// (at hour:min:sec UTC) strictly after now. Day-of-month is clamped to the last
+// valid day of the target month.
+func nextMonthlyAnniversary(now time.Time, dom, hour, min, sec int) time.Time {
+	t := now.UTC()
+	year, month := t.Year(), t.Month()
+	for {
+		day := clampDayOfMonth(year, month, dom)
+		candidate := time.Date(year, month, day, hour, min, sec, 0, time.UTC)
+		if candidate.After(now) {
+			return candidate
+		}
+		month++
+		if month > time.December {
+			month = time.January
+			year++
+		}
+	}
+}
+
+// monthlyBounds returns the next monthly reset and the previous one (the current
+// window start), so the caller can compute the window period.
+func monthlyBounds(now time.Time, dom, hour, min, sec int) (reset, prev time.Time) {
+	reset = nextMonthlyAnniversary(now, dom, hour, min, sec)
+	py, pm := reset.Year(), reset.Month()-1
+	if pm < time.January {
+		pm = time.December
+		py--
+	}
+	pd := clampDayOfMonth(py, pm, dom)
+	prev = time.Date(py, pm, pd, hour, min, sec, 0, time.UTC)
+	return reset, prev
 }
 
 func neuralwattValuesAgree(a, b, limit float64) bool {

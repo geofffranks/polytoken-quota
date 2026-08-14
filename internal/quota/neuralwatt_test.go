@@ -119,10 +119,64 @@ func TestNeuralwattBlockedAndOverageFailClosedAsUnavailable(t *testing.T) {
 }
 
 func TestNeuralwattSubscriptionWindowAndNullableReset(t *testing.T) {
-	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_end":"2026-09-01T00:00:00Z","in_overage":false}}`, http.StatusOK, true)
+	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-08-01T00:00:00Z","current_period_end":"2026-09-01T00:00:00Z","in_overage":false}}`, http.StatusOK, true)
 	snap, err := src.Fetch(context.Background())
-	if err != nil || snap.Windows[0].Name != "subscription_kwh" || *snap.Windows[0].Used != 25 || snap.Windows[0].ResetAt == nil {
+	if err != nil || snap.Windows[0].Name != "subscription_kwh" || *snap.Windows[0].Used != 25 {
 		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	// ResetAt derived from current_period_start day-of-month (1st), not the end.
+	wantReset := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if snap.Windows[0].ResetAt == nil || !snap.Windows[0].ResetAt.Equal(wantReset) {
+		t.Fatalf("reset_at = %v, want %v", snap.Windows[0].ResetAt, wantReset)
+	}
+	// Period = one month (Aug 1 → Sep 1 = 31 days).
+	wantPeriod := 31 * 24 * time.Hour
+	if snap.Windows[0].Period == nil || *snap.Windows[0].Period != wantPeriod {
+		t.Fatalf("period = %v, want %v", snap.Windows[0].Period, wantPeriod)
+	}
+}
+
+func TestNeuralwattSubscriptionAnnualBilledMonthlyReset(t *testing.T) {
+	// Annual billing term (365d) but quota resets monthly on the 13th.
+	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":2.353,"kwh_used":0,"kwh_remaining":2.353,"current_period_start":"2026-08-13T21:48:47Z","current_period_end":"2027-08-13T21:48:47Z","in_overage":false}}`, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	w := snap.Windows[0]
+	// ResetAt must be the monthly reset (next 13th), NOT the annual current_period_end.
+	wantReset := time.Date(2026, 9, 13, 21, 48, 47, 0, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
+		t.Fatalf("reset_at = %v, want monthly %v", w.ResetAt, wantReset)
+	}
+	if w.ResetAt != nil && w.ResetAt.Equal(time.Date(2027, 8, 13, 21, 48, 47, 0, time.UTC)) {
+		t.Fatal("reset_at used the annual current_period_end instead of the monthly reset")
+	}
+	// Period = Aug 13 → Sep 13 = 31 days.
+	wantPeriod := 31 * 24 * time.Hour
+	if w.Period == nil || *w.Period != wantPeriod {
+		t.Fatalf("period = %v, want %v", w.Period, wantPeriod)
+	}
+}
+
+func TestNeuralwattSubscriptionDayClamping(t *testing.T) {
+	// Anchor on the 31st; February has 28 days → clamp to 28.
+	body := `{"snapshot_at":"2026-02-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-01-31T00:00:00Z","in_overage":false}}`
+	now := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
+	_, windows, _, _, err := parseNeuralwattQuota([]byte(body), now)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	w := windows[0]
+	// Feb 2026 has 28 days; 31st clamps to the 28th.
+	wantReset := time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
+		t.Fatalf("reset_at = %v, want clamped %v", w.ResetAt, wantReset)
+	}
+	// Period = Jan 31 → Feb 28 = 28 days.
+	wantPeriod := 28 * 24 * time.Hour
+	if w.Period == nil || *w.Period != wantPeriod {
+		t.Fatalf("period = %v, want %v", w.Period, wantPeriod)
 	}
 }
 
