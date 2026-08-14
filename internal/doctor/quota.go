@@ -14,6 +14,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
+	"gopkg.in/yaml.v3"
 )
 
 // QuotaProbe carries the sanitized per-provider quota state for diagnostic
@@ -48,6 +49,15 @@ func DiscoverabilityFindings(rawDesired []byte, desiredProviders map[string]stru
 			Severity:    Info,
 			Message:     fmt.Sprintf("desired.yaml contains ignored legacy config keys: %s", strings.Join(legacy, ", ")),
 			Remediation: "remove legacy keys from desired.yaml after reviewing the upgrade",
+		})
+	}
+
+	if providers := legacyQuotaAdapters(rawDesired); len(providers) > 0 {
+		findings = append(findings, Finding{
+			Code:        "legacy-quota-adapter",
+			Severity:    Info,
+			Message:     fmt.Sprintf("quota blocks contain the ignored legacy `adapter` key (the provider mapping key selects the adapter): %s", strings.Join(providers, ", ")),
+			Remediation: "remove the adapter key from quota blocks in desired.yaml",
 		})
 	}
 
@@ -90,6 +100,78 @@ func legacyConfigKeys(raw []byte) []string {
 		}
 	}
 	return keys
+}
+
+// legacyQuotaAdapters structurally reports provider mapping IDs whose quota
+// block still carries the ignored legacy `adapter` key. It walks the YAML node
+// tree rather than scanning lines so flow-style mappings (`quota: {adapter:
+// codex}`) are caught too. Output is bounded and each provider ID passes
+// through safeIdentifier; unparseable input yields no findings (invalid policy
+// is reported by other diagnostics).
+func legacyQuotaAdapters(raw []byte) []string {
+	if len(raw) > maxDesiredScanBytes {
+		raw = raw[:maxDesiredScanBytes]
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	root := mappingOf(&doc)
+	if root == nil {
+		return nil
+	}
+	providersVal, ok := mappingValue(root, "providers")
+	if !ok || providersVal.Kind != yaml.MappingNode {
+		return nil
+	}
+	var ids []string
+	for i := 0; i+1 < len(providersVal.Content); i += 2 {
+		id := providersVal.Content[i].Value
+		quotaVal, ok := mappingValue(mappingOf(providersVal.Content[i+1]), "quota")
+		if !ok {
+			continue
+		}
+		if _, has := mappingValue(mappingOf(quotaVal), "adapter"); has {
+			ids = append(ids, safeIdentifier(id))
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) > maxDiscoverabilityKeys {
+		ids = ids[:maxDiscoverabilityKeys]
+	}
+	return ids
+}
+
+// mappingOf returns the mapping node n represents, descending a single
+// document wrapper if present. It returns nil for any non-mapping node.
+func mappingOf(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	m := n
+	if m.Kind == yaml.DocumentNode {
+		if len(m.Content) == 0 {
+			return nil
+		}
+		m = m.Content[0]
+	}
+	if m.Kind != yaml.MappingNode {
+		return nil
+	}
+	return m
+}
+
+// mappingValue returns the value node bound to key in mapping m.
+func mappingValue(m *yaml.Node, key string) (*yaml.Node, bool) {
+	if m == nil {
+		return nil, false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1], true
+		}
+	}
+	return nil, false
 }
 
 // QuotaFindings evaluates per-provider quota probes plus a reconcile-pending

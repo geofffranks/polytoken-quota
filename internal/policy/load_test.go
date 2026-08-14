@@ -210,6 +210,35 @@ func TestLoadOperationalBounds(t *testing.T) {
 			t.Fatal("accepted zero backup count")
 		}
 	})
+	t.Run("backup count omitted in partial section defaults to 5", func(t *testing.T) {
+		yaml := "version: 1\nproviders: {a: {models: [codex/m]}}\noperational: {validation_timeout: 60s}"
+		d, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if d.Operational.ValidationTimeout != 60*time.Second {
+			t.Fatalf("validation_timeout=%v want 60s", d.Operational.ValidationTimeout)
+		}
+		if d.Operational.BackupCount != 5 {
+			t.Fatalf("backup_count=%d want default 5", d.Operational.BackupCount)
+		}
+	})
+	t.Run("backup count explicit value honored", func(t *testing.T) {
+		yaml := "version: 1\nproviders: {a: {models: [codex/m]}}\noperational: {backup_count: 3}"
+		d, err := Load(writeTemp(t, yaml))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if d.Operational.BackupCount != 3 {
+			t.Fatalf("backup_count=%d want 3", d.Operational.BackupCount)
+		}
+	})
+	t.Run("negative backup count rejected", func(t *testing.T) {
+		yaml := "version: 1\nproviders: {a: {models: [codex/m]}}\noperational: {backup_count: -1}"
+		if _, err := Load(writeTemp(t, yaml)); err == nil {
+			t.Fatal("accepted negative backup count")
+		}
+	})
 	t.Run("bad duration rejected", func(t *testing.T) {
 		yaml := "version: 1\nproviders: {a: {models: [codex/m]}}\noperational: {lock_wait: not-a-duration}"
 		if _, err := Load(writeTemp(t, yaml)); err == nil {
@@ -237,7 +266,6 @@ providers:
   codex:
     models: [codex/gpt-5]
     quota:
-      adapter: codex
       schedule:
         timezone: Asia/Singapore
         peak:
@@ -273,7 +301,6 @@ providers:
   codex:
     models: [codex/gpt-5]
     quota:
-      adapter: codex
       schedule:
         timezone: UTC
         off_peak:
@@ -297,7 +324,6 @@ providers:
   codex:
     models: [codex/gpt-5]
     quota:
-      adapter: codex
       schedule:
         timezone: UTC
         peak: []
@@ -319,7 +345,6 @@ providers:
   codex:
     models: [codex/m]
     quota:
-      adapter: codex
       freshness_ttl: 45m
       schedule:
         timezone: America/Los_Angeles
@@ -360,6 +385,42 @@ routing:
 	}
 }
 
+// TestLoadRoutingDefaultsEnabled proves a desired.yaml without a routing
+// section loads with routing enabled (the default since config simplification).
+func TestLoadRoutingDefaultsEnabled(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    models: [codex/m]
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !d.Routing.Enabled {
+		t.Fatal("routing should default to enabled when the section is omitted")
+	}
+}
+
+// TestLoadRoutingExplicitDisable proves an explicit routing section still
+// controls enablement, including opting out.
+func TestLoadRoutingExplicitDisable(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    models: [codex/m]
+routing:
+  enabled: false
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if d.Routing.Enabled {
+		t.Fatal("explicit routing.enabled=false should disable routing")
+	}
+}
+
 // TestLoadRoutingQuotaDefaults proves omitted quota fields get their defaults
 // (freshness 30m) and that quota enabled without a schedule keeps Schedule nil.
 func TestLoadRoutingQuotaDefaults(t *testing.T) {
@@ -367,15 +428,14 @@ func TestLoadRoutingQuotaDefaults(t *testing.T) {
 providers:
   codex:
     models: [codex/m]
-    quota:
-      adapter: codex
+    quota: {}
 `
 	d, err := Load(writeTemp(t, yaml))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if d.Routing.Enabled {
-		t.Fatal("routing should default to disabled")
+	if !d.Routing.Enabled {
+		t.Fatal("routing should default to enabled")
 	}
 	q := d.Providers["codex"].Quota
 	if q == nil {
@@ -396,14 +456,14 @@ providers:
 }
 
 // TestLoadRoutingQuotaBackwardCompat proves a desired.yaml without routing or
-// quota sections loads with routing disabled and nil quota (backward compat).
+// quota sections still loads, with routing enabled by default and nil quota.
 func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	d, err := Load("testdata/synthetic_desired.yaml")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if d.Routing.Enabled {
-		t.Fatal("routing should be disabled for legacy fixture")
+	if !d.Routing.Enabled {
+		t.Fatal("routing should be enabled by default for the legacy fixture")
 	}
 	for id, m := range d.Providers {
 		if m.Quota != nil {
@@ -412,10 +472,132 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	}
 }
 
+// TestLoadQuotaAdapterFromMappingKey proves the provider mapping key selects
+// the quota adapter: a quota block needs no adapter field.
+func TestLoadQuotaAdapterFromMappingKey(t *testing.T) {
+	yaml := `version: 1
+providers:
+  zai:
+    models: [zai/glm-4.5]
+    quota: {}
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	q := d.Providers["zai"].Quota
+	if q == nil {
+		t.Fatal("missing zai quota config")
+	}
+	if q.Adapter != "zai" {
+		t.Fatalf("adapter=%q want mapping key %q", q.Adapter, "zai")
+	}
+}
+
+// TestLoadQuotaRejectsUnknownMappingKey proves a quota block under a mapping
+// key that is not a known adapter name fails policy load with the valid names.
+func TestLoadQuotaRejectsUnknownMappingKey(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex2:
+    models: [codex/gpt-5]
+    quota: {}
+`
+	_, err := Load(writeTemp(t, yaml))
+	if err == nil {
+		t.Fatal("expected rejection of unknown adapter mapping key, got nil")
+	}
+	for _, want := range []string{"codex2", "codex", "zai", "anthropic", "neuralwatt"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err.Error(), want)
+		}
+	}
+}
+
+// TestLoadQuotaUnknownKeyWithoutQuotaBlock proves a mapping without a quota
+// block may use any key: only quota-participating mappings must name an
+// adapter.
+func TestLoadQuotaUnknownKeyWithoutQuotaBlock(t *testing.T) {
+	yaml := `version: 1
+providers:
+  legacyrelay:
+    models: [codex/gpt-5]
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if d.Providers["legacyrelay"].Quota != nil {
+		t.Fatal("unexpected quota config for mapping without quota block")
+	}
+}
+
+// TestLoadAnthropicBudgetRequired proves the anthropic mapping key requires
+// monthly_budget_usd and loads with it set.
+func TestLoadAnthropicBudgetRequired(t *testing.T) {
+	base := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/claude]\n"
+	if _, err := Load(writeTemp(t, base+"    quota: {}\n")); err == nil {
+		t.Fatal("expected anthropic without monthly_budget_usd to be rejected")
+	}
+	d, err := Load(writeTemp(t, base+"    quota:\n      monthly_budget_usd: 250\n"))
+	if err != nil {
+		t.Fatalf("Load with budget: %v", err)
+	}
+	q := d.Providers["anthropic"].Quota
+	if q == nil || q.Adapter != "anthropic" || q.MonthlyBudgetUSD != 250 {
+		t.Fatalf("anthropic quota=%+v", q)
+	}
+}
+
+// TestLoadQuotaLegacyAdapterKeyIgnored proves a leftover `adapter` key in a
+// quota block is ignored: it can neither select nor override the adapter
+// derived from the mapping key.
+func TestLoadQuotaLegacyAdapterKeyIgnored(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    models: [codex/m]
+    quota:
+      adapter: zai
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if q := d.Providers["codex"].Quota; q == nil || q.Adapter != "codex" {
+		t.Fatalf("adapter=%+v want mapping key codex despite ignored legacy key", q)
+	}
+}
+
+// TestLoadQuotaPeakWindowCrossingMidnightRejected proves a peak window whose
+// start is not before its end rejects policy load: the desired.yaml grammar
+// cannot express a midnight-crossing peak window.
+func TestLoadQuotaPeakWindowCrossingMidnightRejected(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    models: [codex/m]
+    quota:
+      schedule:
+        timezone: UTC
+        peak:
+          - days: [mon]
+            start: "22:00"
+            end: "06:00"
+`
+	_, err := Load(writeTemp(t, yaml))
+	if err == nil {
+		t.Fatal("expected cross-midnight peak window to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cross midnight") {
+		t.Fatalf("error %q does not mention cross midnight", err.Error())
+	}
+}
+
 func TestLoadRejectsNonFiniteAnthropicBudget(t *testing.T) {
 	for _, value := range []string{".nan", ".inf", "-.inf"} {
 		t.Run(value, func(t *testing.T) {
-			yaml := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/claude]\n    quota:\n      adapter: anthropic\n      monthly_budget_usd: " + value + "\n"
+			yaml := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/claude]\n    quota:\n      monthly_budget_usd: " + value + "\n"
 			if _, err := Load(writeTemp(t, yaml)); err == nil {
 				t.Fatalf("Load accepted non-finite budget %s", value)
 			}
@@ -441,7 +623,7 @@ func TestLoadRoutingQuotaInvalidSchedule(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			yaml := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\n    quota:\n      adapter: codex\n      schedule:\n        " + tc.schedule + "\n"
+			yaml := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\n    quota:\n      schedule:\n        " + tc.schedule + "\n"
 			_, err := Load(writeTemp(t, yaml))
 			if err == nil {
 				t.Fatal("expected schedule rejection, got nil error")
