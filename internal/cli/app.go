@@ -203,7 +203,15 @@ func runStatus(ctx context.Context, args []string, deps Dependencies, stdout, st
 	if jsonOut {
 		encodeJSON(stdout, statusEnvelope(report))
 	} else {
-		writeStatusText(stdout, report, s)
+		writeMergedStatusText(stdout, report, s)
+	}
+	// A failed route projection is a partial report: exit 1 even when the
+	// tables still render. Quota problems exit 2 only without a partial
+	// condition.
+	for _, route := range report.Routes {
+		if route.ProjectionError {
+			return ExitRejected
+		}
 	}
 	return DiagnosticExitCode(StatusCommand, report.Problem)
 }

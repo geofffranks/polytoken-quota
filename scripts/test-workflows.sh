@@ -299,10 +299,14 @@ assert_contains "$readme" -- '--version' 'README documents --version behavior'
 assert_contains "$readme" 'No release is assumed to exist yet' 'README does not claim a release already exists'
 # test_readme_routing_status_contract: quota-exempt mappings stay managed routing
 # participants but are intentionally absent from quota status; routing text names
-# both ownership target and concrete source.
+# The merged status surface: provider table, route table with skip reasons,
+# and the pending-config doctor pointer.
 assert_contains "$readme" 'status.*only mappings with a `quota` block' 'README documents quota-configured status participation'
 assert_contains "$readme" 'without a `quota` block.*remain.*managed routing' 'README documents quota-exempt managed routing participation'
-assert_contains "$readme" 'routing.*target.*source' 'README documents routing target and source columns'
+assert_contains "$readme" 'PROVIDER.*STATUS.*QUOTA.*NEXT RESET' 'README documents merged status provider table'
+assert_contains "$readme" 'ROUTE.*DESIRED.*EFFECTIVE.*REASON' 'README documents merged status route table'
+assert_contains "$readme" 'skipped:.*quota exhausted' 'README documents route skip reasons'
+assert_contains "$readme" 'target\(s\) pending.*polytoken-quota doctor' 'README documents pending-config doctor pointer'
 assert_contains "$readme" -- '--quiet' 'README documents --quiet for scheduled runs'
 assert_contains "$readme" 'check --reconcile --quiet' 'README scheduler examples use --quiet'
 assert_contains "$agents" 'go.mod.*sole authority' 'AGENTS documents go.mod as exact Go authority'

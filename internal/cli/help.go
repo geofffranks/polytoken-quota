@@ -55,7 +55,7 @@ var helpDocs = map[string]helpDoc{
 	},
 	"status": {
 		short: "Show current quota and routing status",
-		long:  "Show current quota, routing, and target status.",
+		long:  "Show provider quota and availability, effective routing with skip reasons, next resets, and pending-config warnings.",
 		usage: []string{"polytoken-quota status [--json]"},
 		flags: []flagDoc{
 			{"--json", "Output JSON"},
@@ -83,28 +83,15 @@ var helpDocs = map[string]helpDoc{
 		},
 	},
 	"routing": {
-		short: "View or modify routing configuration",
-		long:  "View effective routing chains or modify routing configuration.",
+		short: "Modify routing configuration",
+		long:  "Modify routing configuration. View routing state with `polytoken-quota status`.",
 		usage: []string{
-			"polytoken-quota routing [--json]",
 			"polytoken-quota routing <subcommand> [options]",
 		},
-		flags: []flagDoc{
-			{"--json", "Output JSON (bare and explain)"},
-		},
 		subcommands: []subcommandDoc{
-			{"explain", "Show routing readiness and selected desired/effective models"},
 			{"enable", "Enable routing for a provider"},
 			{"disable", "Disable routing for a provider"},
 			{"reset", "Reset routing overrides to defaults"},
-		},
-	},
-	"routing explain": {
-		short: "Show routing readiness and selected desired/effective models",
-		long:  "Show provider readiness as ready or not ready and the selected desired and effective model for each route. Pending targets may not be live; run polytoken-quota doctor to diagnose.",
-		usage: []string{"polytoken-quota routing explain [--json]"},
-		flags: []flagDoc{
-			{"--json", "Output JSON"},
 		},
 	},
 	"routing enable": {

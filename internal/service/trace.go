@@ -21,10 +21,10 @@ type ProviderModeReport struct {
 // ChainSurvivorReport shows the desired vs effective model ordering for one
 // managed chain, including which entries were dropped (disabled) and why.
 type ChainSurvivorReport struct {
-	Name     string   `json:"name"`                     // full, mini, nano, classifier, or definition path
-	Desired  []string `json:"desired"`                  // the desired chain as written
-	Survived []string `json:"survived"`                 // entries that survived filtering
-	Dropped  []string `json:"dropped,omitempty"`        // entries dropped (disabled)
+	Name     string   `json:"name"`              // full, mini, nano, classifier, or definition path
+	Desired  []string `json:"desired"`           // the desired chain as written
+	Survived []string `json:"survived"`          // entries that survived filtering
+	Dropped  []string `json:"dropped,omitempty"` // entries dropped (disabled)
 }
 
 // EditReport is one managed-field change the reconciler produced.

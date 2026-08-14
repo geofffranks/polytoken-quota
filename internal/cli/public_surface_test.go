@@ -59,6 +59,7 @@ var removedCommandInvocations = []string{
 	`\bsync --`,
 	`\bstate set\b`,
 	`\bstate clear\b`,
+	`\brouting explain\b`,
 	"`hook`",
 }
 

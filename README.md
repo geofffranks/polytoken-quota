@@ -183,11 +183,9 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | Command | Description |
 |---------|-------------|
 | `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
-| `status [--json]` | Show quota, availability, mode, reason, usage, reset timing, and freshness for mappings with a `quota` block. |
+| `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, per-provider consolidated status (`disabled`/`unavailable`/`available`/`enabled`), raw per-window quota numbers, next resets, effective routes with skip reasons, and a pending-config warning pointing at `doctor`. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
-| `routing [--json]` | Show effective routing chains for every managed route, with its registered target and concrete source. |
-| `routing explain [--json]` | Show provider readiness and each route's selected desired/effective model. Pending targets may not be live; run `polytoken-quota doctor` to diagnose. |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
@@ -231,8 +229,25 @@ Quota polling and routing are disabled by default. Run a one-shot check manually
 ```sh
 polytoken-quota check --reconcile
 polytoken-quota status
-polytoken-quota routing explain
 ```
+
+`status` is the single read surface for quota and routing state:
+
+```
+routing: enabled    last checked: 2026-08-14 09:12 UTC
+
+PROVIDER    STATUS      QUOTA                     NEXT RESET
+zai         available   5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
+minime      enabled     no data                   —
+
+ROUTE           DESIRED                    EFFECTIVE     REASON
+global          glm-4.6, gpt-5.2, sonnet   glm-4.6       gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable
+work-api        glm-4.6                    glm-4.6
+
+warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor
+```
+
+Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a provider with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`. Quota exhaustion shows in the raw window numbers and the route REASON, not STATUS. The route REASON lists each desired model dropped from the effective chain and why (`manual disable`, `unavailable`, `quota exhausted`). `status --json` emits the same data as one sanitized envelope (raw window numbers, `skipped` arrays, `pending_targets`, `problem`); exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
 
 Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only. In interactive use `check` prints each provider's polling status; pass `--quiet` in cron, launchd, or systemd timers to suppress all output (exit codes still reflect success or failure).
 

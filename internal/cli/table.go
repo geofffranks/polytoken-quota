@@ -91,80 +91,57 @@ func writeTable(w io.Writer, rows [][]tableCell) {
 	}
 }
 
-// formatRFC3339 renders a time as RFC3339 in UTC, or empty when zero.
-func formatRFC3339(t time.Time) string {
-	if t.IsZero() {
-		return ""
+// writeMergedStatusText renders the merged status report: a header line with
+// routing enablement and one global last-checked timestamp, a provider table
+// (consolidated STATUS, raw window numbers, next reset), a route table with
+// synthesized skip reasons, and a pending-config warning. It reads and
+// formats only; it never mutates the report.
+func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) {
+	enabledText, enabledStyle := "enabled", s.green
+	if !r.RoutingEnabled {
+		enabledText, enabledStyle = "disabled", s.red
 	}
-	return t.UTC().Format(time.RFC3339)
-}
+	checked := "never"
+	if !r.LastChecked.IsZero() {
+		checked = r.LastChecked.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	fmt.Fprintf(w, "%s %s    %s %s\n", s.dim("routing:"), enabledStyle(enabledText), s.dim("last checked:"), checked)
 
-// writeStatusText renders a status report as aligned columnar text. It
-// shows only provider quota/availability/mode/reason and quota windows — no
-// routing chains, target tables, or doctor findings.
-func writeStatusText(w io.Writer, r service.StatusReport, s styler) {
-	if r.AsOf.IsZero() {
-		fmt.Fprintln(w, s.dim("status"))
-	} else {
-		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
-	}
-	if r.Revision > 0 {
-		writeTable(w, [][]tableCell{{{text: "revision", style: s.dim}, {text: fmt.Sprint(r.Revision)}}})
-	}
 	if len(r.Providers) > 0 {
 		fmt.Fprintln(w)
 		rows := [][]tableCell{{
-			{text: "provider", style: s.dim}, {text: "quota", style: s.dim}, {text: "availability", style: s.dim},
-			{text: "mode", style: s.dim}, {text: "reason", style: s.dim},
+			{text: "PROVIDER", style: s.dim}, {text: "STATUS", style: s.dim},
+			{text: "QUOTA", style: s.dim}, {text: "NEXT RESET", style: s.dim},
 		}}
 		for _, p := range r.Providers {
-			reason := p.Reason
-			if reason == "" {
-				reason = "normal"
-			}
+			quota, quotaStyle := formatMergedWindows(p.Windows, s)
 			rows = append(rows, []tableCell{
-				{text: p.Provider}, {text: string(p.Quota), style: s.quotaStyler(p.Quota)},
-				{text: string(p.Availability), style: s.availabilityStyler(p.Availability)},
-				{text: string(p.Mode), style: s.modeStyler(p.Mode)}, {text: reason},
+				{text: p.Provider},
+				{text: p.Status, style: s.mergedStatusStyler(p.Status)},
+				{text: quota, style: quotaStyle},
+				{text: formatMergedReset(p.NextResetAt)},
 			})
 		}
 		writeTable(w, rows)
 	}
 
-	for _, q := range r.Quota {
-		fmt.Fprintln(w)
-		fmt.Fprintf(w, "%s %s\n", s.dim("quota"), q.MappingID)
-		if !q.CheckedAt.IsZero() {
-			fmt.Fprintf(w, "  %s %s\n", s.dim("snapshot:"), fmt.Sprintf("status=%s checked_at=%s", q.Status, formatRFC3339(q.CheckedAt)))
-		}
-		for _, win := range q.Windows {
-			fmt.Fprintf(w, "  %s %s: %s\n", s.dim("window"), win.Name, formatWindow(win))
-		}
-		if q.Attempt != nil {
-			if q.Attempt.Error != "" {
-				fmt.Fprintf(w, "  %s status=%s error=%s\n", s.dim("attempt:"), q.Attempt.Status, validate.DefaultSanitize([]byte(q.Attempt.Error)))
-			} else if !q.Attempt.CheckedAt.IsZero() {
-				fmt.Fprintf(w, "  %s status=%s checked_at=%s\n", s.dim("attempt:"), q.Attempt.Status, formatRFC3339(q.Attempt.CheckedAt))
-			}
-		}
-	}
-}
-
-// writeRoutingText renders bare routing (effective chains only) as aligned text.
-func writeRoutingText(w io.Writer, r service.RoutingReport, s styler) {
-	enabledText, enabledStyle := "enabled", s.green
-	if !r.RoutingEnabled {
-		enabledText, enabledStyle = "disabled", s.red
-	}
-	writeTable(w, [][]tableCell{{{text: "routing", style: s.dim}, {text: enabledText, style: enabledStyle}}})
-	if !r.AsOf.IsZero() {
-		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
-	}
-	fmt.Fprintln(w)
 	if len(r.Routes) > 0 {
-		rows := [][]tableCell{{{text: "target", style: s.dim}, {text: "source", style: s.dim}, {text: "route", style: s.dim}, {text: "effective", style: s.dim}}}
+		fmt.Fprintln(w)
+		rows := [][]tableCell{{
+			{text: "ROUTE", style: s.dim}, {text: "DESIRED", style: s.dim},
+			{text: "EFFECTIVE", style: s.dim}, {text: "REASON", style: s.dim},
+		}}
 		for _, route := range r.Routes {
-			rows = append(rows, []tableCell{{text: route.TargetID}, {text: route.SourcePath}, {text: route.Name}, {text: strings.Join(route.Effective, ", ")}})
+			reason := formatSkipReasons(route.Skipped)
+			if route.ProjectionError {
+				reason = "projection unavailable"
+			}
+			rows = append(rows, []tableCell{
+				{text: route.Name},
+				{text: chainText(route.Desired)},
+				{text: chainText(route.Effective)},
+				{text: reason, style: s.dim},
+			})
 		}
 		writeTable(w, rows)
 	}
@@ -172,52 +149,62 @@ func writeRoutingText(w io.Writer, r service.RoutingReport, s styler) {
 	for _, e := range r.Errors {
 		fmt.Fprintf(w, "  %s %s\n", s.red("error:"), e.Summary)
 	}
-}
 
-// writeRoutingExplainText renders compact ranking status and selected route models.
-func writeRoutingExplainText(w io.Writer, r service.RoutingExplainReport, s styler) {
-	enabledText, enabledStyle := "enabled", s.green
-	if !r.RoutingEnabled {
-		enabledText, enabledStyle = "disabled", s.red
-	}
-	writeTable(w, [][]tableCell{{{text: "routing", style: s.dim}, {text: enabledText, style: enabledStyle}}})
-	if !r.AsOf.IsZero() {
-		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
-	}
 	if len(r.PendingTargets) > 0 {
-		fmt.Fprintf(w, "%s\n", s.yellow("warning: "+routingPendingWarning(r.PendingTargets)))
+		fmt.Fprintf(w, "%s\n", s.yellow(fmt.Sprintf(
+			"warning: %d target(s) pending — shown values may not be live; run polytoken-quota doctor",
+			len(r.PendingTargets))))
 	}
-	fmt.Fprintln(w)
-	if len(r.Ranks) > 0 {
-		rows := [][]tableCell{{
-			{text: "provider", style: s.dim}, {text: "status", style: s.dim}, {text: "reason", style: s.dim},
-		}}
-		for _, rank := range r.Ranks {
-			status := rank.Status
-			if status == "" {
-				status = "not ready"
-				if rank.Eligible {
-					status = "ready"
-				}
-			}
-			rows = append(rows, []tableCell{{text: rank.MappingID}, {text: status}, {text: rank.Explanation}})
-		}
-		writeTable(w, rows)
-		fmt.Fprintln(w)
-	}
-	if len(r.Routes) > 0 {
-		rows := [][]tableCell{{
-			{text: "route", style: s.dim}, {text: "desired", style: s.dim}, {text: "effective", style: s.dim},
-		}}
-		for _, route := range r.Routes {
-			rows = append(rows, []tableCell{{text: route.Name}, {text: route.Desired}, {text: route.Effective}})
-		}
-		writeTable(w, rows)
-	}
+}
 
-	for _, e := range r.Errors {
-		fmt.Fprintf(w, "  %s %s\n", s.red("error:"), e.Summary)
+// formatMergedWindows renders one provider's raw quota numbers: "name used/limit"
+// per window joined with ", ", falling back to usage percent, then "no data".
+func formatMergedWindows(windows []service.QuotaWindowReport, s styler) (string, func(string) string) {
+	if len(windows) == 0 {
+		return "no data", s.dim
 	}
+	parts := make([]string, 0, len(windows))
+	for _, win := range windows {
+		switch {
+		case win.Used != nil && win.Limit != nil:
+			parts = append(parts, fmt.Sprintf("%s %g/%g", win.Name, *win.Used, *win.Limit))
+		case win.UsagePercent != nil:
+			parts = append(parts, fmt.Sprintf("%s %g%%", win.Name, *win.UsagePercent))
+		default:
+			parts = append(parts, win.Name)
+		}
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// formatMergedReset renders the earliest upcoming reset, or an em dash when
+// unknown.
+func formatMergedReset(reset *time.Time) string {
+	if reset == nil {
+		return "—"
+	}
+	return reset.UTC().Format("2006-01-02 15:04 UTC")
+}
+
+// chainText renders a model chain, or "none" for an empty chain.
+func chainText(chain []string) string {
+	if len(chain) == 0 {
+		return "none"
+	}
+	return strings.Join(chain, ", ")
+}
+
+// formatSkipReasons renders skipped models as "model skipped: reason" joined
+// with "; ".
+func formatSkipReasons(skipped []service.SkippedModel) string {
+	if len(skipped) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		parts = append(parts, fmt.Sprintf("%s skipped: %s", s.Model, s.Reason))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // writeDoctorText renders the doctor report grouped and sorted by severity.
@@ -304,27 +291,6 @@ func writeMutationText(w io.Writer, o service.Outcome, label string, s styler) {
 		})
 	}
 	writeTable(w, rows)
-}
-
-// formatWindow renders a sanitized window summary (shared with old code).
-func formatWindow(win service.QuotaWindowReport) string {
-	var parts []string
-	if win.Used != nil {
-		parts = append(parts, fmt.Sprintf("used=%g", *win.Used))
-	}
-	if win.Limit != nil {
-		parts = append(parts, fmt.Sprintf("limit=%g", *win.Limit))
-	}
-	if win.UsagePercent != nil {
-		parts = append(parts, fmt.Sprintf("usage=%g%%", *win.UsagePercent))
-	}
-	if win.Remaining != nil {
-		parts = append(parts, fmt.Sprintf("remaining=%d%%", int(*win.Remaining*100)))
-	}
-	if len(parts) == 0 {
-		return "no data"
-	}
-	return strings.Join(parts, " ")
 }
 
 // writeInitText prints the post-init guidance after a successful create or
