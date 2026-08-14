@@ -23,9 +23,9 @@ import (
 // RankingResult for explain/status.
 //
 // Only mappings carrying a Quota config participate in routing. A mapping's
-// observed mode is the worst (most degraded) effective mode across its CodExBar
-// providers — the same aggregation reconcile uses — and its observed snapshot is
-// the most depleted among those providers (fail-closed). When usage history is
+// observed mode comes from the provider mapping's state entry — the same
+// mapping-ID aggregation reconcile uses — and its observed snapshot is selected
+// fail-closed. When usage history is
 // absent or has no usable totals, the usage key is skipped for every group
 // (routing treats absent shares as incomparable).
 func ComputeRanking(desired policy.Desired, observed state.State, now time.Time) (reconcile.RankLookup, routing.RankingResult) {

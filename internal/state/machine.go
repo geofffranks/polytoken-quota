@@ -155,8 +155,8 @@ func EnableProvider(s State, provider string, at time.Time) (State, error) {
 	return SetManualDisabled(s, []string{provider}, false, at)
 }
 
-// SetManualDisabled updates every supplied provider alias as one immutable state
-// transition, preserving all automatic quota and availability observations.
+// SetManualDisabled updates every supplied provider mapping ID as one immutable
+// state transition, preserving all automatic quota and availability observations.
 func SetManualDisabled(s State, providers []string, disabled bool, at time.Time) (State, error) {
 	nextProviders := make(map[string]ProviderState, len(s.Providers)+len(providers))
 	for k, v := range s.Providers {
@@ -164,7 +164,7 @@ func SetManualDisabled(s State, providers []string, disabled bool, at time.Time)
 	}
 	for _, provider := range providers {
 		if provider == "" {
-			return s, errors.New("state: manual routing control requires non-empty provider aliases")
+			return s, errors.New("state: manual routing control requires non-empty provider mapping IDs")
 		}
 		ps := nextProviders[provider]
 		if ps.Quota == "" {

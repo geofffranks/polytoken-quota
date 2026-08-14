@@ -177,6 +177,25 @@ func (e strErr) Error() string { return string(e) }
 // Load reads and decodes the state file. A missing file returns a fresh, empty
 // schema-5 state with initialized maps and counters. Legacy schemas migrate
 // operational fields in memory and discard legacy reconcile history before event
+// pruneObsoleteTriggers drops history records whose trigger kind no longer
+// exists (e.g. legacy "hook" records after hook ingestion was removed), so a
+// schema-4 file loads cleanly under schema 5. Dropped records are accounted in
+// OmittedHistoryRecords.
+func pruneObsoleteTriggers(h ReconcileHistory) ReconcileHistory {
+	kept := make([]ReconcileRecord, 0, len(h.Records))
+	for _, r := range h.Records {
+		switch r.Trigger.Kind {
+		case TriggerInit, TriggerReconcile, TriggerRoutingDisable, TriggerRoutingEnable,
+			TriggerRoutingReset, TriggerQuotaCheck, TriggerSet, TriggerClear:
+			kept = append(kept, r)
+		default:
+			h.OmittedHistoryRecords++
+		}
+	}
+	h.Records = kept
+	return h
+}
+
 // validation. Loading never writes the file.
 func (st Store) Load() (State, error) {
 	data, err := os.ReadFile(st.Path)
@@ -195,7 +214,7 @@ func (st Store) Load() (State, error) {
 	}
 	legacySchema := s.Schema < CurrentSchema
 	if legacySchema {
-		s.ReconcileHistory = ReconcileHistory{}
+		s.ReconcileHistory = pruneObsoleteTriggers(s.ReconcileHistory)
 		s.EventHistory = EventHistory{}
 	}
 	if s.Providers == nil {

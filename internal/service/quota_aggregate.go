@@ -25,15 +25,6 @@ func aggregateMappingState(mappingID string, providers map[string]state.Provider
 	return out
 }
 
-func hasMissingAlias(mappingID string, providers map[string]state.ProviderState) bool {
-	_, ok := providers[mappingID]
-	return !ok
-}
-
-func allAliasesMissing(mappingID string, providers map[string]state.ProviderState) bool {
-	return hasMissingAlias(mappingID, providers)
-}
-
 func aggregateProviderNames(desiredProviders map[string][]string, observed map[string]state.ProviderState) []string {
 	names := make(map[string]bool, len(desiredProviders)+len(observed))
 	for id := range desiredProviders {

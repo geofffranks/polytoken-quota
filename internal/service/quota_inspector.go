@@ -32,12 +32,11 @@ type doctorQuotaInputs struct {
 
 // buildDoctorQuotaProbes builds probes from the preloaded observed state +
 // desired policy + evidence gate. It mirrors the prior quotaDoctorInspector
-// aggregation logic (CodexBar alias grouping, freshness TTL, adapter support)
-// without re-loading state or policy.
+// aggregation logic (mapping IDs, freshness TTL, adapter support) without
+// re-loading state or policy.
 func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 	// Build freshness TTL and adapter lookups from policy, keyed by mapping ID.
-	// QuotaPoller observations use mapping IDs even when a mapping has one or
-	// more CodexBar provider aliases.
+	// QuotaPoller observations are keyed by mapping ID.
 	type qcfg struct {
 		ttl     time.Duration
 		adapter string

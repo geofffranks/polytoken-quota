@@ -16,7 +16,7 @@ import (
 // This file implements the durable desired-policy workflows: Init (a strict
 // create-only starter proposal), guarded Import (polytoken-quota init --force),
 // drift detection, and the Writer that performs exclusive-create and
-// atomic-replace file operations. None of these perform CodExBar writes; init
+// atomic-replace file operations. None of these modify provider systems; init
 // only produces or adopts desired intent and reports drift.
 
 // ErrDesiredExists signals that desired.yaml already exists and a strict
@@ -133,7 +133,7 @@ type offGraphRef struct {
 // polytoken.fallback_models, materializes exact concrete model enumeration
 // verbatim from the source provider mappings (no implicit runtime mapping), and
 // reports any references that do not resolve as Uncovered. It performs no
-// CodExBar writes and is strict create-only: persistence is the caller's job.
+// provider-system writes and is strict create-only: persistence is the caller's job.
 func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 	d, off, err := propose(ctx, r)
 	if err != nil {
@@ -156,7 +156,7 @@ func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 // outside the provider graph) unless force is set. When forced it emits a
 // warning that the temporary live ordering may become durable intent. Managed
 // drift is reported, never silently adopted; unmanaged live content is
-// preserved/ignored. It performs no CodExBar writes.
+// preserved/ignored. It performs no provider-system writes.
 func Import(ctx context.Context, r SourceReader, s state.State, force bool) (Desired, ImportReport, error) {
 	d, off, err := propose(ctx, r)
 	if err != nil {

@@ -194,10 +194,9 @@ type State struct {
 	NextEventSequence   uint64
 	NextArrivalSequence uint64
 
-	// ReconcileHistory is retained temporarily as an in-memory compatibility
-	// field for existing callers; Store.Load/Save never treats it as durable
-	// history in schema 5.
-	ReconcileHistory ReconcileHistory `json:"-"`
+	// ReconcileHistory is the additive schema-v4 bounded record of qualifying
+	// reconciles, newest revision first.
+	ReconcileHistory ReconcileHistory
 }
 
 // RoutingHistory records the last good global provider ranking computed by the

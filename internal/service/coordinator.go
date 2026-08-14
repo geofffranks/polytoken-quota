@@ -137,14 +137,14 @@ func (c *Coordinator) Clear(ctx context.Context, sel state.Selector) Outcome {
 	return c.transact(ctx, txClear, transactionInput{Selector: sel})
 }
 
-// Disable marks every CodexBar alias owned by one exact mapping ID as manually
+// Disable marks the provider mapping with one exact mapping ID as manually
 // disabled, then reconciles all targets and publishes the accepted state.
 func (c *Coordinator) Disable(ctx context.Context, mappingID string) Outcome {
 	return c.transact(ctx, txDisable, transactionInput{Provider: mappingID})
 }
 
-// Enable clears the manual disable on every CodexBar alias owned by one exact
-// mapping ID while preserving each alias's automatic provider state.
+// Enable clears the manual disable on the provider mapping with one exact
+// mapping ID while preserving its automatic provider state.
 func (c *Coordinator) Enable(ctx context.Context, mappingID string) Outcome {
 	return c.transact(ctx, txEnable, transactionInput{Provider: mappingID})
 }
@@ -294,41 +294,6 @@ func trackedProviders(s state.State) []string {
 	sort.Strings(out)
 	return out
 }
-
-func appendRoutingEvents(next state.State, desired policy.Desired, prior state.State, now time.Time) state.State {
-	_, ranking := ComputeRanking(desired, next, now)
-	providers := make(map[string]state.ProviderState, len(next.Providers))
-	for k, v := range next.Providers {
-		providers[k] = v
-	}
-	for _, entry := range ranking.Entries {
-		mapping := desired.Providers[policy.MappingID(entry.MappingID)]
-		decision := state.RoutingDecision{Rank: entry.Rank, Eligible: entry.Eligible, OffPeak: entry.OffPeak, Explanation: entry.Explanation, EvaluatedAt: now.UTC()}
-		changed := false
-		for _, alias := range mapping.CodexBarProviders {
-			ps := providers[alias]
-			old := ps.Routing.Decision
-			if old == nil || old.Rank != decision.Rank || old.Eligible != decision.Eligible || old.OffPeak != decision.OffPeak || old.Explanation != decision.Explanation {
-				changed = true
-			}
-			ps.Routing.Decision = &decision
-			ps.Routing.LastRank = entry.Rank
-			ps.Routing.LastDecisionAt = now.UTC()
-			ps.Routing.LastAppliedRevision = next.Revision
-			providers[alias] = ps
-		}
-		if changed {
-			e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: now.UTC(), RecordedAt: now.UTC(), Category: state.EventRoutingChange, Action: "routing_changed", MappingID: entry.MappingID, Result: state.EventChanged, Reason: entry.Explanation, NewRank: eventIntPtr(entry.Rank), NewEligible: eventBoolPtr(entry.Eligible), NewOffPeak: eventBoolPtr(entry.OffPeak), Explanation: entry.Explanation}
-			next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
-		}
-	}
-	next.Providers = providers
-	return next
-}
-
-func eventIntPtr(v int) *int    { return &v }
-func eventBoolPtr(v bool) *bool { return &v }
-
 func appendManualEvent(next, prior state.State, kind transactionKind, in transactionInput, now time.Time) state.State {
 	action := ""
 	switch kind {
@@ -426,10 +391,10 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	}
 	changed := true
 	if kind == txDisable {
-		changed = state.ManualDisableChanged(observed, mapping.CodexBarProviders, true)
+		changed = state.ManualDisableChanged(observed, []string{in.Provider}, true)
 	}
 	if kind == txEnable {
-		changed = state.ManualDisableChanged(observed, mapping.CodexBarProviders, false)
+		changed = state.ManualDisableChanged(observed, []string{in.Provider}, false)
 	}
 	if kind == txReset {
 		changed = state.ManualDisableChanged(observed, trackedProviders(observed), false)

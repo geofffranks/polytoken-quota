@@ -252,7 +252,7 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	}}
 	q := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
 	findings := q
-	if len(findings) < 1 || findings[0].Code != "quota-adapter-unsupported" {
+	if len(findings) != 2 || findings[0].Code != "quota-adapter-unsupported" || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("absent evidence findings = %+v", findings)
 	}
 	// Expired and incomplete records must remain unsupported rather than being replaced.
@@ -260,14 +260,14 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	expired.ReviewBy = now.Add(-time.Hour)
 	reg.Register(expired)
 	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
-	if len(findings) < 1 || !strings.Contains(findings[0].Message, "expired") {
+	if len(findings) != 2 || !strings.Contains(findings[0].Message, "expired") || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("expired evidence findings = %+v", findings)
 	}
 	incomplete := quota.CodexEvidence(now)
 	incomplete.Endpoint = ""
 	reg.Register(incomplete)
 	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
-	if len(findings) < 1 || !strings.Contains(findings[0].Message, "incomplete") {
+	if len(findings) != 2 || !strings.Contains(findings[0].Message, "incomplete") || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("incomplete evidence findings = %+v", findings)
 	}
 }
@@ -304,7 +304,7 @@ func TestQuotaDoctorIncludesQuotaMappingWithoutProvider(t *testing.T) {
 		"empty": {Quota: &policy.QuotaConfig{Adapter: "unknown"}},
 	}}
 	findings := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, quota.NewEvidenceRegistry())
-	if len(findings) < 1 {
+	if len(findings) != 2 {
 		t.Fatalf("empty-provider mapping findings = %+v", findings)
 	}
 	for _, finding := range findings {

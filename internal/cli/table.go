@@ -336,8 +336,6 @@ func writeInitText(w io.Writer, forced bool) {
 		fmt.Fprintln(w, "desired.yaml created.")
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "This tool performs no automatic CodexBar edit; register it manually in")
-	fmt.Fprintln(w, "CodexBar settings.")
-	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Review the generated policy, then run: polytoken-quota reconcile")
 	fmt.Fprintln(w, "To refresh an existing policy later, run: polytoken-quota init --force")
 }

@@ -56,9 +56,6 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 		next = applyRoutingMetadata(next, desired, c.now())
 	}
 	next = appendQuotaEvents(next, attempts, c.now())
-	if desired.Routing.Enabled {
-		next = appendRoutingEvents(next, desired, observed, c.now())
-	}
 	problem := anyAttemptFailed(attempts)
 
 	var outcomes []TargetOutcome

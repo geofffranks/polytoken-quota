@@ -38,7 +38,7 @@ func (l diagnosticPathLoader) DesiredPath() string                 { return l.pa
 func TestDoctorPolicyLoadFailureDoesNotReportObservedProvidersAsOrphaned(t *testing.T) {
 	snapshot := DiagnosticSnapshot{
 		policyErr: errors.New("desired.yaml failed validation"),
-		observed: state.State{Providers: map[string]state.ProviderState{"observed-provider": {}}},
+		observed:  state.State{Providers: map[string]state.ProviderState{"observed-provider": {}}},
 	}
 
 	desiredProviders := desiredProviderIDs(snapshot)
@@ -49,6 +49,32 @@ func TestDoctorPolicyLoadFailureDoesNotReportObservedProvidersAsOrphaned(t *test
 		if finding.Code == "orphaned-provider-state" {
 			t.Fatalf("policy-load failure produced orphan finding: %+v", finding)
 		}
+	}
+}
+
+func TestCoordinatorDoctorEmptyPolicyReportsObservedProviderAsOrphaned(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.desired.Providers = map[policy.MappingID]policy.Mapping{}
+	d.observed.Providers = map[string]state.ProviderState{"observed": {}}
+	desiredPath := filepath.Join(t.TempDir(), "desired.yaml")
+	if err := os.WriteFile(desiredPath, []byte("version: 1\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loader := diagnosticPathLoader{deps: d, path: desiredPath}
+	c := &Coordinator{Policy: loader, State: d, Targets: d, Clock: d}
+
+	report := c.Doctor(context.Background(), false)
+	if desired := desiredProviderIDs(DiagnosticSnapshot{desired: d.desired, observed: d.observed}); desired == nil {
+		t.Fatal("successful empty policy returned nil mapping set")
+	}
+	found := false
+	for _, finding := range report.Findings {
+		if finding.Code == "orphaned-provider-state" && strings.Contains(finding.Message, "observed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing orphaned observed provider finding: %+v", report.Findings)
 	}
 }
 

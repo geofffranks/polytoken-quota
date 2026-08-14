@@ -1,5 +1,5 @@
 // Package policy defines the durable desired-state policy for the polytoken-quota
-// reconciler: the CodExBar→Polytoken provider mappings with their exact managed
+// reconciler: the provider mappings keyed by mapping ID, their exact managed
 // model enumeration, the registered targets and desired chains, and bounded
 // operational settings.
 //
