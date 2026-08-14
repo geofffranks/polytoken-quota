@@ -388,21 +388,19 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }
 
-// transactManual resolves exact mapping IDs, applies their owned aliases as one
-// manual transition, and reconciles all targets with the Set/Clear coarse trace.
+// transactManual resolves exact mapping IDs, applies one manual transition, and
+// reconciles all targets with the Set/Clear coarse trace.
 func (c *Coordinator) transactManual(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind) Outcome {
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	var mapping policy.Mapping
 	if kind != txReset {
 		if in.Provider == "" {
 			return Outcome{Accepted: false, Error: errors.New("service: manual provider command requires a mapping ID")}
 		}
-		var ok bool
-		mapping, ok = desired.Providers[policy.MappingID(in.Provider)]
+		_, ok := desired.Providers[policy.MappingID(in.Provider)]
 		if !ok {
 			return Outcome{Accepted: false, Error: fmt.Errorf("service: mapping %q is not configured", sanitizeFailure(in.Provider))}
 		}
@@ -413,10 +411,10 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	switch kind {
 	case txDisable:
 		c.step("manual-disable")
-		next, err = state.SetManualDisabled(observed, mapping.CodexBarProviders, true, c.now())
+		next, err = state.SetManualDisabled(observed, []string{in.Provider}, true, c.now())
 	case txEnable:
 		c.step("manual-enable")
-		next, err = state.SetManualDisabled(observed, mapping.CodexBarProviders, false, c.now())
+		next, err = state.SetManualDisabled(observed, []string{in.Provider}, false, c.now())
 	case txReset:
 		c.step("manual-reset")
 		next, err = state.ResetManualDisables(observed, c.now())

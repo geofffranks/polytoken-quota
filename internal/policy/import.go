@@ -37,14 +37,11 @@ type SourceConfig struct {
 	Classifier Chain
 }
 
-// SourceMapping is one provider mapping read from source config: a set of
-// CodExBar provider IDs bound to a set of Polytoken provider IDs, plus the exact
-// concrete base models managed by that binding and their baseline enabled state.
+// SourceMapping is one provider mapping read from source config, plus the exact
+// concrete base models managed by that mapping and their baseline enabled state.
 type SourceMapping struct {
-	ID                 string
-	CodexBarProviders  []string
-	PolytokenProviders []string
-	Models             map[string]ModelBaseline
+	ID     string
+	Models map[string]ModelBaseline
 }
 
 // SourceDefinition is one discovered definition file with its live managed model
@@ -206,10 +203,6 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 	if err := buildProviders(&d, global.Config.Providers, owner); err != nil {
 		return Desired{}, nil, err
 	}
-	if err := validateMappingIdentities(d); err != nil {
-		return Desired{}, nil, err
-	}
-
 	var offGraph []offGraphRef
 	gt, goff := buildTarget(global, owner)
 	d.Global = gt
@@ -243,9 +236,7 @@ func buildProviders(d *Desired, providers []SourceMapping, owner map[string]Mapp
 			return fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			CodexBarProviders:  append([]string(nil), sm.CodexBarProviders...),
-			PolytokenProviders: append([]string(nil), sm.PolytokenProviders...),
-			Models:             map[string]ModelBaseline{},
+			Models: map[string]ModelBaseline{},
 		}
 		bases := make([]string, 0, len(sm.Models))
 		for base := range sm.Models {
@@ -505,10 +496,7 @@ func syncDir(dir string) error {
 func marshalDesired(d Desired) ([]byte, error) {
 	doc := outDoc{Version: d.Version, Providers: map[string]outMapping{}}
 	for id, m := range d.Providers {
-		om := outMapping{
-			CodexBarProviders:  m.CodexBarProviders,
-			PolytokenProviders: m.PolytokenProviders,
-		}
+		om := outMapping{}
 		bases := make([]string, 0, len(m.Models))
 		for base := range m.Models {
 			bases = append(bases, base)
@@ -583,9 +571,7 @@ type outDoc struct {
 }
 
 type outMapping struct {
-	CodexBarProviders  []string   `yaml:"codexbar_providers,omitempty"`
-	PolytokenProviders []string   `yaml:"polytoken_providers,omitempty"`
-	Models             []modelOut `yaml:"models"`
+	Models []modelOut `yaml:"models"`
 }
 
 type outTarget struct {

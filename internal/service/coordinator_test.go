@@ -45,7 +45,7 @@ func (missingPolicyLoader) LoadPolicy() (policy.Desired, error) {
 func (missingPolicyLoader) DesiredExists() bool { return false }
 
 func (testSourceReader) Global(context.Context) (policy.SourceSet, error) {
-	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", CodexBarProviders: []string{"codex"}, PolytokenProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
+	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
 }
 func (testSourceReader) Projects(context.Context) ([]policy.SourceSet, error) { return nil, nil }
 
@@ -137,8 +137,7 @@ func (s *coordinatorSpy) LoadPolicy() (policy.Desired, error) {
 	}
 	return policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex-mapping": {
-			CodexBarProviders: []string{"codex"},
-			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 		},
 	}}, nil
 }
@@ -421,12 +420,11 @@ func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
 	}
 }
 
-func TestRoutingMappingControlsAllAliases(t *testing.T) {
+func TestRoutingMappingControlsMappingID(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex-pool": {
-			CodexBarProviders: []string{"codex-primary", "codex-secondary"},
-			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 		},
 	}}
 
@@ -434,13 +432,8 @@ func TestRoutingMappingControlsAllAliases(t *testing.T) {
 	if !out.Accepted || spy.StateSaves != 1 || spy.Publishes != 1 || count(spy.Trace, "lock") != 1 || count(spy.Trace, "reconcile") != 1 {
 		t.Fatalf("out=%+v trace=%v saves=%d publishes=%d", out, spy.Trace, spy.StateSaves, spy.Publishes)
 	}
-	for _, alias := range []string{"codex-primary", "codex-secondary"} {
-		if !spy.LastSaved.Providers[alias].ManualDisabled {
-			t.Fatalf("alias %q not disabled in saved state: %+v", alias, spy.LastSaved)
-		}
-	}
-	if _, exists := spy.LastSaved.Providers["codex-pool"]; exists {
-		t.Fatalf("mapping ID persisted as provider alias: %+v", spy.LastSaved.Providers)
+	if !spy.LastSaved.Providers["codex-pool"].ManualDisabled {
+		t.Fatalf("mapping ID not disabled in saved state: %+v", spy.LastSaved)
 	}
 }
 
@@ -448,27 +441,22 @@ func TestRoutingEnablePreservesAutomaticExclusion(t *testing.T) {
 	observedAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
-		"codex-pool": {CodexBarProviders: []string{"codex-primary", "codex-secondary"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}},
+		"codex-pool": {Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}},
 	}}
 	spy.recovered = state.State{Revision: 7, Providers: map[string]state.ProviderState{
-		"codex-primary":   {Quota: state.QuotaExhausted, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 11},
-		"codex-secondary": {Quota: state.QuotaNormal, Availability: state.Unavailable, ManualDisabled: true, AvailabilityAt: observedAt, AvailabilityArrival: 12},
+		"codex-pool": {Quota: state.QuotaExhausted, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 11},
 	}, Targets: map[string]state.TargetState{}}
 
 	out := spy.Coordinator.Enable(context.Background(), "codex-pool")
 	if !out.Accepted {
 		t.Fatalf("out=%+v", out)
 	}
-	primary := spy.LastSaved.Providers["codex-primary"]
-	secondary := spy.LastSaved.Providers["codex-secondary"]
-	if primary.ManualDisabled || primary.Quota != state.QuotaExhausted || !primary.QuotaAt.Equal(observedAt) || primary.QuotaArrival != 11 {
-		t.Fatalf("primary automatic exclusion changed: %+v", primary)
+	provider := spy.LastSaved.Providers["codex-pool"]
+	if provider.ManualDisabled || provider.Quota != state.QuotaExhausted || !provider.QuotaAt.Equal(observedAt) || provider.QuotaArrival != 11 {
+		t.Fatalf("automatic exclusion changed: %+v", provider)
 	}
-	if secondary.ManualDisabled || secondary.Availability != state.Unavailable || !secondary.AvailabilityAt.Equal(observedAt) || secondary.AvailabilityArrival != 12 {
-		t.Fatalf("secondary automatic exclusion changed: %+v", secondary)
-	}
-	if state.EffectiveMode(primary) != state.ModeDisabled || state.EffectiveMode(secondary) != state.ModeDisabled {
-		t.Fatalf("enable incorrectly restored eligibility: primary=%s secondary=%s", state.EffectiveMode(primary), state.EffectiveMode(secondary))
+	if state.EffectiveMode(provider) != state.ModeDisabled {
+		t.Fatalf("enable incorrectly restored eligibility: mode=%s", state.EffectiveMode(provider))
 	}
 }
 
@@ -500,9 +488,7 @@ func TestRoutingControlRejectsNonMappingIDs(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 			spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 				"codex-pool": {
-					CodexBarProviders:  []string{"codex-primary"},
-					PolytokenProviders: []string{"polytoken-codex"},
-					Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+					Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 				},
 			}}
 			before := state.State{Revision: 9, Providers: map[string]state.ProviderState{"codex-primary": {Quota: state.QuotaLow, Availability: state.Available}}, Targets: map[string]state.TargetState{}}
@@ -545,7 +531,7 @@ func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
 	if !out.Accepted || out.Error == nil || out.PendingCount() != 1 || spy.StateSaves != 1 {
 		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
 	}
-	if !spy.LastSaved.Providers["codex"].ManualDisabled {
+	if !spy.LastSaved.Providers["codex-mapping"].ManualDisabled {
 		t.Fatalf("saved state lost manual disable: %+v", spy.LastSaved)
 	}
 	pending := spy.LastSaved.Targets["manual-resolution"]
@@ -786,7 +772,7 @@ func newRecoverableInitFixture(t *testing.T, desired []byte, loadErr error) reco
 }
 
 func validInitDesired() []byte {
-	return []byte("version: 1\nproviders:\n  codex:\n    codexbar_providers: [codex]\n    models: [codex/gpt]\n")
+	return []byte("version: 1\nproviders:\n  codex:\n    models: [codex/gpt]\n")
 }
 
 func snapshotInitFiles(t *testing.T, paths ...string) map[string][]byte {

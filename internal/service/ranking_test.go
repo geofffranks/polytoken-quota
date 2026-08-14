@@ -25,7 +25,7 @@ import (
 var rankNow = time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
 
 // qmap builds a Desired with the given mappings, each carrying a Quota config.
-// CodexBarProviders uses the mapping ID itself (1:1) so state keys line up.
+// Provider state uses the mapping ID itself (1:1) so state keys line up.
 func qmap(routingEnabled bool, mappings ...rankMapping) policy.Desired {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{}}
 	if routingEnabled {
@@ -33,9 +33,7 @@ func qmap(routingEnabled bool, mappings ...rankMapping) policy.Desired {
 	}
 	for _, mm := range mappings {
 		m := policy.Mapping{
-			CodexBarProviders:  []string{mm.id},
-			PolytokenProviders: []string{mm.id},
-			Models:             map[string]policy.ModelBaseline{},
+			Models: map[string]policy.ModelBaseline{},
 		}
 		for _, base := range mm.bases {
 			m.Models[base] = policy.ModelBaseline{Enabled: true}
@@ -74,17 +72,15 @@ func pstate(snap *quota.QuotaSnapshot) state.ProviderState {
 	}
 }
 
-func TestQuotaStatusAggregatesCodexBarProvidersUnderMappingID(t *testing.T) {
+func TestQuotaStatusUsesMappingID(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	usedA, limitA := 10.0, 100.0
 	usedB, limitB := 80.0, 100.0
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"codex-a", "codex-b"}, Quota: &policy.QuotaConfig{FreshnessTTL: time.Hour}},
+		"openai": {Quota: &policy.QuotaConfig{FreshnessTTL: time.Hour}},
 	}}
-	attempt := &quota.QuotaSnapshot{MappingID: "codex-a", Status: quota.SourceFailed, Error: "failed"}
+	attempt := &quota.QuotaSnapshot{MappingID: "openai", Status: quota.SourceFailed, Error: "failed"}
 	observed := state.State{Revision: 3, Providers: map[string]state.ProviderState{
-		"codex-a":   {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &usedA, Limit: &limitA}}}, QuotaAttempt: attempt},
-		"codex-b":   {Availability: state.Unavailable, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &usedB, Limit: &limitB}}}},
+		"openai":    {Availability: state.Unavailable, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &usedB, Limit: &limitB}}}, QuotaAttempt: attempt},
 		"unmanaged": {QuotaAttempt: &quota.QuotaSnapshot{MappingID: "unmanaged", Status: quota.SourceFailed}},
 	}}
 	coord := &Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}, Clock: fixedClock{t: now}}
@@ -125,107 +121,22 @@ func TestQuotaStatusSanitizesPersistedAttemptErrorBeforeJSON(t *testing.T) {
 	}
 }
 
-func TestQuotaStatusAggregatedAliasesRemainAvailableWhenAllAvailable(t *testing.T) {
+func TestMappingNilSnapshotFailsClosed(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"codex-a", "codex-b"}},
+		"openai": {Quota: &policy.QuotaConfig{FreshnessTTL: time.Hour}},
 	}}
 	observed := state.State{Providers: map[string]state.ProviderState{
-		"codex-a": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourceFresh}},
-		"codex-b": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourceFresh}},
-	}}
-	report := (&Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}}).QuotaStatus(context.Background())
-	if got := report.Providers[0].Availability; got != quota.QuotaAvailable {
-		t.Fatalf("availability=%s, want available", got)
-	}
-}
-
-func TestQuotaStatusAggregatedAliasesMissingObservationUnavailable(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"codex-a", "codex-b"}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
-	}}
-	observed := state.State{Providers: map[string]state.ProviderState{
-		"codex-a": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourceFresh}},
-	}}
-	report := (&Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}}).QuotaStatus(context.Background())
-	if got := report.Providers[0].Availability; got != quota.QuotaUnavailable || !report.Problem {
-		t.Fatalf("availability/problem=%s/%v, want unavailable/true", got, report.Problem)
-	}
-}
-
-func TestQuotaStatusAggregatedAliasesUnknownOrNoSignalFailClosed(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"usable", "unsafe"}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
-	}}
-	for name, unsafe := range map[string]*quota.QuotaSnapshot{
-		"unknown availability":   {CheckedAt: now, Availability: quota.QuotaUnknown, Status: quota.SourceFresh},
-		"no effective remaining": {CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourcePartial, Windows: []quota.QuotaWindow{{Name: "unreported"}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			observed := state.State{Providers: map[string]state.ProviderState{
-				"usable": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourceFresh, Windows: []quota.QuotaWindow{{UsagePercent: ptrFloat(10)}}}},
-				"unsafe": {Availability: state.Available, QuotaSnapshot: unsafe},
-			}}
-			report := (&Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}}).QuotaStatus(context.Background())
-			if got := report.Providers[0].Availability; got != quota.QuotaUnavailable || !report.Problem {
-				t.Fatalf("availability/problem=%s/%v, want unavailable/true", got, report.Problem)
-			}
-			_, ranking := ComputeRanking(desired, observed, now)
-			entry, _ := rankEntry(ranking, "openai")
-			if entry.Eligible {
-				t.Fatalf("mixed unsafe aliases must be ineligible: %+v", entry)
-			}
-		})
-	}
-}
-
-func TestConfiguredAliasNilSnapshotFailsClosedDespiteLegacyMappingState(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"usable", "missing-snapshot"}, Quota: &policy.QuotaConfig{FreshnessTTL: time.Hour}},
-	}}
-	used, limit := 10.0, 100.0
-	observed := state.State{Providers: map[string]state.ProviderState{
-		"usable":           {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-		"missing-snapshot": {Availability: state.Available},
-		"openai":           {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
+		"openai": {Availability: state.Available},
 	}}
 	_, ranking := ComputeRanking(desired, observed, now)
 	entry, ok := rankEntry(ranking, "openai")
 	if !ok || entry.Eligible {
-		t.Fatalf("unsafe alias must make mapping ineligible: ok=%v entry=%+v", ok, entry)
+		t.Fatalf("missing snapshot must make mapping ineligible: ok=%v entry=%+v", ok, entry)
 	}
 	report := (&Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}}).QuotaStatus(context.Background())
 	if len(report.Providers) == 0 || report.Providers[0].Availability != quota.QuotaUnavailable || !report.Problem {
-		t.Fatalf("unsafe alias must make status unavailable/problem: %+v", report)
-	}
-	if hasMissingAlias([]string{"usable", "missing-snapshot"}, observed.Providers) {
-		t.Fatal("present nil-snapshot alias must not be treated as missing")
-	}
-}
-
-func TestQuotaStatusMixedMissingAndUnsafeAliasFailsClosed(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"unsafe", "missing"}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
-	}}
-	for name, unsafe := range map[string]*quota.QuotaSnapshot{
-		"nil snapshot":         nil,
-		"unknown availability": {CheckedAt: now, Availability: quota.QuotaUnknown, Status: quota.SourceFresh},
-		"no usable remaining":  {CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourcePartial, Windows: []quota.QuotaWindow{{Name: "unreported"}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			observed := state.State{Providers: map[string]state.ProviderState{
-				"unsafe": {Availability: state.Available, QuotaSnapshot: unsafe},
-				"openai": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Availability: quota.QuotaAvailable, Status: quota.SourceFresh, Windows: []quota.QuotaWindow{{UsagePercent: ptrFloat(10)}}}},
-			}}
-			report := (&Coordinator{State: staticStateStore{state: observed}, Policy: staticPolicyLoader{desired: desired}}).QuotaStatus(context.Background())
-			if len(report.Providers) != 1 || report.Providers[0].Availability != quota.QuotaUnavailable || !report.Problem {
-				t.Fatalf("mixed missing/unsafe aliases must remain unavailable/problem: %+v", report)
-			}
-		})
+		t.Fatalf("missing snapshot must make status unavailable/problem: %+v", report)
 	}
 }
 
@@ -336,8 +247,7 @@ func TestComputeRankingMapsObs(t *testing.T) {
 	t.Run("missing configured alias is ineligible", func(t *testing.T) {
 		d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 			"m1": {
-				CodexBarProviders: []string{"codex-a", "codex-b"},
-				Quota:             &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1},
+				Quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1},
 			},
 		}}
 		s := state.State{Providers: map[string]state.ProviderState{"codex-a": pstate(qsnap(10, 100))}}

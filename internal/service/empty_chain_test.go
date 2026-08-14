@@ -30,14 +30,10 @@ import (
 func emptyChainDesired() (policy.Desired, state.State, policy.Target) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
-			CodexBarProviders:  []string{"codex"},
-			PolytokenProviders: []string{"codex"},
-			Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 		},
 		"zai": {
-			CodexBarProviders:  []string{"zai"},
-			PolytokenProviders: []string{"zai"},
-			Models:             map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
 		},
 	}}
 	target := policy.Target{
@@ -141,8 +137,6 @@ func TestEmptyChainFailurePreservesByteIdenticalLKG(t *testing.T) {
 func TestPermanentDisableSurvivesHealthyReconcile(t *testing.T) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
-			CodexBarProviders:  []string{"codex"},
-			PolytokenProviders: []string{"codex"},
 			Models: map[string]policy.ModelBaseline{
 				"codex/off":  {Enabled: false, HadEnabledKey: true},
 				"codex/on":   {Enabled: true, HadEnabledKey: false},

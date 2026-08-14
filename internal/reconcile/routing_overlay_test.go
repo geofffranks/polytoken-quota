@@ -31,9 +31,7 @@ func routingFixture(enabled bool, entries []string, groups map[string]string) (p
 		m, ok := d.Providers[mid]
 		if !ok {
 			m = policy.Mapping{
-				CodexBarProviders:  []string{string(mid)},
-				PolytokenProviders: []string{string(mid)},
-				Models:             map[string]policy.ModelBaseline{},
+				Models: map[string]policy.ModelBaseline{},
 			}
 		}
 		if _, dup := m.Models[ref.Base]; !dup {
@@ -279,9 +277,7 @@ func snapshotDesired(d policy.Desired) policy.Desired {
 	cp := policy.Desired{Version: d.Version, Routing: d.Routing, Providers: map[policy.MappingID]policy.Mapping{}}
 	for id, m := range d.Providers {
 		mm := policy.Mapping{
-			CodexBarProviders:  append([]string(nil), m.CodexBarProviders...),
-			PolytokenProviders: append([]string(nil), m.PolytokenProviders...),
-			Models:             map[string]policy.ModelBaseline{},
+			Models: map[string]policy.ModelBaseline{},
 		}
 		for k, v := range m.Models {
 			mm.Models[k] = v

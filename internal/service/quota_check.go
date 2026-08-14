@@ -85,12 +85,10 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	return Outcome{Accepted: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports}
 }
 
-// applyQuotaObservations folds the polled attempts into the next state. For each
-// polled mapping, every CodExBar provider it backs receives the attempt as its
-// QuotaAttempt; a successful (non-failed) attempt also replaces the
-// last-good QuotaSnapshot. A failed attempt NEVER overwrites the existing
-// QuotaSnapshot, preserving last-good. Each provider gets its own snapshot copy
-// so the pointers never alias.
+// applyQuotaObservations folds the polled attempts into the next state. Each
+// polled mapping receives the attempt as its QuotaAttempt; a successful
+// (non-failed) attempt also replaces the last-good QuotaSnapshot. A failed
+// attempt NEVER overwrites the existing QuotaSnapshot, preserving last-good.
 func applyQuotaObservations(next state.State, desired policy.Desired, attempts map[string]quota.QuotaSnapshot) state.State {
 	// Allocate a fresh Providers map (mirroring state.SetProvider) so the prior
 	// state's map is never aliased: the caller passes the recovered observed
@@ -107,22 +105,20 @@ func applyQuotaObservations(next state.State, desired policy.Desired, attempts m
 		if !ok {
 			continue
 		}
-		for _, cb := range m.CodexBarProviders {
-			ps := fresh[cb]
-			attempt := snap
-			ps.QuotaAttempt = &attempt
-			if snap.Status != quota.SourceFailed {
-				good := snap
-				ps.QuotaSnapshot = &good
-			}
-			if snap.UsageSummary != nil {
-				ps.ResetCredits = quota.MergeCodexUsageSummary(ps.ResetCredits, snap.UsageSummary)
-			}
-			if snap.ResetCredits != nil {
-				ps.ResetCredits = quota.MergeResetCreditObservation(ps.ResetCredits, *snap.ResetCredits)
-			}
-			fresh[cb] = ps
+		ps := fresh[string(id)]
+		attempt := snap
+		ps.QuotaAttempt = &attempt
+		if snap.Status != quota.SourceFailed {
+			good := snap
+			ps.QuotaSnapshot = &good
 		}
+		if snap.UsageSummary != nil {
+			ps.ResetCredits = quota.MergeCodexUsageSummary(ps.ResetCredits, snap.UsageSummary)
+		}
+		if snap.ResetCredits != nil {
+			ps.ResetCredits = quota.MergeResetCreditObservation(ps.ResetCredits, *snap.ResetCredits)
+		}
+		fresh[string(id)] = ps
 	}
 	next.Providers = fresh
 	return next
@@ -191,14 +187,11 @@ func applyRoutingMetadata(next state.State, desired policy.Desired, now time.Tim
 			continue
 		}
 		order = append(order, entry.MappingID)
-		m := desired.Providers[policy.MappingID(entry.MappingID)]
-		for _, cb := range m.CodexBarProviders {
-			ps := providers[cb]
-			ps.Routing.LastRank = entry.Rank
-			ps.Routing.LastDecisionAt = now
-			ps.Routing.LastAppliedRevision = next.Revision
-			providers[cb] = ps
-		}
+		ps := providers[entry.MappingID]
+		ps.Routing.LastRank = entry.Rank
+		ps.Routing.LastDecisionAt = now
+		ps.Routing.LastAppliedRevision = next.Revision
+		providers[entry.MappingID] = ps
 	}
 	next.Providers = providers
 	next.RoutingHistory = &state.RoutingHistory{LastGoodGlobalRank: order, ComputedAt: now}

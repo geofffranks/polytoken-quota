@@ -71,7 +71,7 @@ func ProjectProviders(desired policy.Desired, observed state.State) []state.Prov
 		id := policy.MappingID(idStr)
 		m := desired.Providers[id]
 		mode := reconcile.MappingMode(desired, observed, id)
-		reason := providerModeReason(m, mode, observed)
+		reason := providerModeReason(idStr, m, mode, observed)
 		out = append(out, state.ProviderDetail{
 			MappingID: idStr,
 			Mode:      mode,
@@ -83,14 +83,10 @@ func ProjectProviders(desired policy.Desired, observed state.State) []state.Prov
 
 // providerModeReason produces a short, sanitized explanation for a mapping's
 // effective mode.
-func providerModeReason(m policy.Mapping, mode state.Mode, observed state.State) string {
+func providerModeReason(id string, m policy.Mapping, mode state.Mode, observed state.State) string {
 	switch mode {
 	case state.ModeDisabled:
-		for _, cb := range m.CodexBarProviders {
-			ps, ok := observed.Providers[cb]
-			if !ok {
-				continue
-			}
+		if ps, ok := observed.Providers[id]; ok {
 			if ps.ManualDisabled {
 				return "manually disabled"
 			}

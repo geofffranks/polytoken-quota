@@ -1,7 +1,6 @@
 package policy
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,9 +55,6 @@ func TestLoadSyntheticFixture(t *testing.T) {
 	if !ok {
 		t.Fatal("missing codex mapping")
 	}
-	if !sliceEq(codex.CodexBarProviders, "codex") || !sliceEq(codex.PolytokenProviders, "codex") {
-		t.Fatalf("codex providers cb=%v pt=%v", codex.CodexBarProviders, codex.PolytokenProviders)
-	}
 	for _, base := range []string{"codex/gpt-5.6-sol", "codex/gpt-5.6-luna"} {
 		mb, ok := codex.Models[base]
 		if !ok {
@@ -69,9 +65,6 @@ func TestLoadSyntheticFixture(t *testing.T) {
 		}
 	}
 	zai := d.Providers["zai"]
-	if !sliceEq(zai.CodexBarProviders, "z.ai") || !sliceEq(zai.PolytokenProviders, "zai") {
-		t.Fatalf("zai providers cb=%v pt=%v", zai.CodexBarProviders, zai.PolytokenProviders)
-	}
 	if _, ok := zai.Models["zai/glm-5.2"]; !ok {
 		t.Fatal("missing zai/glm-5.2")
 	}
@@ -143,7 +136,7 @@ func TestValidateChainRejectsMalformedSuffix(t *testing.T) {
 // cases plus version, intra-mapping duplicate, and non-concrete (glob) names.
 func TestLoadRequiresConcreteUnambiguousModels(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
-		{"empty enumeration", "version: 1\nproviders: {codex: {codexbar_providers: [codex], models: []}}", "models"},
+		{"empty enumeration", "version: 1\nproviders: {codex: {models: []}}", "models"},
 		{"conflict", "version: 1\nproviders: {a: {models: [codex/m]}, b: {models: [codex/m]}}", "conflicting"},
 		{"unresolved chain", "version: 1\nglobal: {full: [unknown/model]}", "unresolved"},
 		{"duplicate within mapping", "version: 1\nproviders: {a: {models: [codex/m, codex/m]}}", "duplicate"},
@@ -161,82 +154,11 @@ func TestLoadRequiresConcreteUnambiguousModels(t *testing.T) {
 	}
 }
 
-// TestLoadRejectsAmbiguousProviders proves two mappings claiming the same CodExBar
-// (or Polytoken) provider are rejected as ambiguous.
-func TestLoadRejectsAmbiguousProviders(t *testing.T) {
-	for _, tc := range []struct{ name, yaml, want string }{
-		{"codexbar shared", "version: 1\nproviders:\n  a: {codexbar_providers: [codex], models: [codex/m1]}\n  b: {codexbar_providers: [codex], models: [codex/m2]}", "ambiguous"},
-		{"polytoken shared", "version: 1\nproviders:\n  a: {polytoken_providers: [codex], models: [codex/m1]}\n  b: {polytoken_providers: [codex], models: [codex/m2]}", "ambiguous"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(writeTemp(t, tc.yaml))
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err=%v want %q", err, tc.want)
-			}
-		})
-	}
-}
-
-func TestPolicyRejectsCrossMappingIDAliasCollision(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		yaml string
-	}{
-		{
-			name: "codexbar alias",
-			yaml: "version: 1\nproviders:\n  alpha: {codexbar_providers: [shared], models: [alpha/m]}\n  shared: {codexbar_providers: [own], models: [shared/m]}",
-		},
-		{
-			name: "polytoken alias",
-			yaml: "version: 1\nproviders:\n  alpha: {polytoken_providers: [shared], models: [alpha/m]}\n  shared: {polytoken_providers: [own], models: [shared/m]}",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(writeTemp(t, tc.yaml))
-			if err == nil || !strings.Contains(err.Error(), `mapping "shared"`) || !strings.Contains(err.Error(), `mapping "alpha"`) {
-				t.Fatalf("err=%v want deterministic cross-mapping identity collision", err)
-			}
-		})
-	}
-
-	for _, tc := range []struct {
-		name     string
-		mappings []SourceMapping
-	}{
-		{
-			name: "codexbar import",
-			mappings: []SourceMapping{
-				{ID: "alpha", CodexBarProviders: []string{"shared"}, Models: map[string]ModelBaseline{"alpha/m": {Enabled: true}}},
-				{ID: "shared", CodexBarProviders: []string{"own"}, Models: map[string]ModelBaseline{"shared/m": {Enabled: true}}},
-			},
-		},
-		{
-			name: "polytoken import",
-			mappings: []SourceMapping{
-				{ID: "alpha", PolytokenProviders: []string{"shared"}, Models: map[string]ModelBaseline{"alpha/m": {Enabled: true}}},
-				{ID: "shared", PolytokenProviders: []string{"own"}, Models: map[string]ModelBaseline{"shared/m": {Enabled: true}}},
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			reader := staticReader{global: SourceSet{Config: SourceConfig{Providers: tc.mappings}}}
-			if _, _, err := Init(context.Background(), reader); err == nil || !strings.Contains(err.Error(), `mapping "shared"`) {
-				t.Fatalf("import err=%v want cross-mapping identity collision", err)
-			}
-		})
-	}
-
-	ownAlias := "version: 1\nproviders:\n  alpha: {codexbar_providers: [alpha], polytoken_providers: [alpha], models: [alpha/m]}"
-	if _, err := Load(writeTemp(t, ownAlias)); err != nil {
-		t.Fatalf("mapping ID equal to its own aliases rejected: %v", err)
-	}
-}
-
 // TestLoadBaselineEnabledState proves the optional baseline enabled state and the
 // HadEnabledKey origin tracking: a bare name defaults to enabled with no key,
 // while an explicit enabled:false records HadEnabledKey true.
 func TestLoadBaselineEnabledState(t *testing.T) {
-	yaml := "version: 1\nproviders:\n  a:\n    codexbar_providers: [codex]\n    models:\n      - codex/on\n      - codex/off: {enabled: false}\n"
+	yaml := "version: 1\nproviders:\n  a:\n    models:\n      - codex/on\n      - codex/off: {enabled: false}\n"
 	d, err := Load(writeTemp(t, yaml))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -268,21 +190,6 @@ func TestResolveModel(t *testing.T) {
 	// Unknown base rejected.
 	if _, err := d.ResolveModel("minime/gemma"); err == nil {
 		t.Fatal("accepted unknown model")
-	}
-}
-
-// TestResolveCodexBar proves event-provider resolution: known CodExBar IDs resolve
-// to their mapping, unknown IDs are rejected.
-func TestResolveCodexBar(t *testing.T) {
-	d := loadedFixture(t)
-	if id, err := d.ResolveCodexBar("codex"); err != nil || id != "codex" {
-		t.Fatalf("ResolveCodexBar(codex)=%q err=%v", id, err)
-	}
-	if id, err := d.ResolveCodexBar("z.ai"); err != nil || id != "zai" {
-		t.Fatalf("ResolveCodexBar(z.ai)=%q err=%v", id, err)
-	}
-	if _, err := d.ResolveCodexBar("unknown"); err == nil {
-		t.Fatal("accepted unknown codexbar provider")
 	}
 }
 
@@ -327,8 +234,6 @@ func TestLoadPeakScheduleForSingaporeBusinessHours(t *testing.T) {
 	yaml := `version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models: [codex/gpt-5]
     quota:
       adapter: codex
@@ -365,8 +270,6 @@ func TestLoadRejectsLegacyOffPeakScheduleKey(t *testing.T) {
 	yaml := `version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models: [codex/gpt-5]
     quota:
       adapter: codex
@@ -391,8 +294,6 @@ func TestLoadRejectsBothPeakAndOffPeakScheduleKeys(t *testing.T) {
 	yaml := `version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models: [codex/gpt-5]
     quota:
       adapter: codex
@@ -415,8 +316,6 @@ func TestLoadRoutingQuota(t *testing.T) {
 	yaml := `version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models: [codex/m]
     quota:
       adapter: codex
@@ -466,7 +365,6 @@ func TestLoadRoutingQuotaDefaults(t *testing.T) {
 	yaml := `version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
     models: [codex/m]
     quota:
       adapter: codex
@@ -516,7 +414,7 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 func TestLoadRejectsNonFiniteAnthropicBudget(t *testing.T) {
 	for _, value := range []string{".nan", ".inf", "-.inf"} {
 		t.Run(value, func(t *testing.T) {
-			yaml := "version: 1\nproviders:\n  anthropic:\n    codexbar_providers: [anthropic]\n    models: [anthropic/claude]\n    quota:\n      adapter: anthropic\n      monthly_budget_usd: " + value + "\n"
+			yaml := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/claude]\n    quota:\n      adapter: anthropic\n      monthly_budget_usd: " + value + "\n"
 			if _, err := Load(writeTemp(t, yaml)); err == nil {
 				t.Fatalf("Load accepted non-finite budget %s", value)
 			}
@@ -542,7 +440,7 @@ func TestLoadRoutingQuotaInvalidSchedule(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			yaml := "version: 1\nproviders:\n  codex:\n    codexbar_providers: [codex]\n    models: [codex/m]\n    quota:\n      adapter: codex\n      schedule:\n        " + tc.schedule + "\n"
+			yaml := "version: 1\nproviders:\n  codex:\n    models: [codex/m]\n    quota:\n      adapter: codex\n      schedule:\n        " + tc.schedule + "\n"
 			_, err := Load(writeTemp(t, yaml))
 			if err == nil {
 				t.Fatal("expected schedule rejection, got nil error")

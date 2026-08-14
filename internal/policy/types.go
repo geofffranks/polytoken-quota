@@ -3,9 +3,8 @@
 // model enumeration, the registered targets and desired chains, and bounded
 // operational settings.
 //
-// Load parses desired.yaml into a validated Desired. ResolveModel and
-// ResolveCodexBar answer graph queries deterministically — exact match only, never
-// similarity-based guessing. These types are the in-memory representation consumed
+// Load parses desired.yaml into a validated Desired. ResolveModel answers graph
+// queries deterministically — exact match only, never similarity-based guessing. These types are the in-memory representation consumed
 // by reconcile, import, and the coordinator.
 package policy
 
@@ -31,15 +30,12 @@ type ModelBaseline struct {
 	HadEnabledKey bool `yaml:"had_enabled_key"`
 }
 
-// Mapping binds one or more CodExBar provider IDs to one or more Polytoken
-// provider IDs and enumerates the exact concrete base models managed by that
-// binding. The model map is keyed by concrete base model name (e.g.
-// "codex/gpt-5.6-sol"). CodExBar and Polytoken provider namespaces are separate;
-// both lists are explicit so reconciliation is deterministic and offline.
+// Mapping enumerates the exact concrete base models managed by a provider
+// mapping. The model map is keyed by concrete base model name (e.g.
+// "codex/gpt-5.6-sol"). The mapping's provider identity is its top-level
+// Desired.Providers key.
 type Mapping struct {
-	CodexBarProviders  []string
-	PolytokenProviders []string
-	Models             map[string]ModelBaseline
+	Models map[string]ModelBaseline
 
 	// Quota is the optional per-provider quota/routing configuration. It is nil
 	// when the mapping's desired.yaml entry omits a quota section (routing

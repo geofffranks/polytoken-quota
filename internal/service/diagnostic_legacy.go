@@ -38,7 +38,7 @@ func projectLegacyQuota(desired policy.Desired, observed state.State, asOf time.
 		if mapping.Quota == nil {
 			continue
 		}
-		configured[string(id)] = append([]string(nil), mapping.CodexBarProviders...)
+		configured[string(id)] = []string{string(id)}
 		freshness[string(id)] = mapping.Quota.FreshnessTTL
 	}
 	names := make([]string, 0, len(configured))
@@ -50,21 +50,8 @@ func projectLegacyQuota(desired policy.Desired, observed state.State, asOf time.
 	problem := false
 	for _, name := range names {
 		ps := observed.Providers[name]
-		if aliases, ok := configured[name]; ok {
-			if len(aliases) > 0 {
-				ps = aggregateMappingState(aliases, observed.Providers)
-				if hasMissingAlias(aliases, observed.Providers) {
-					if allAliasesMissing(aliases, observed.Providers) {
-						if legacy, exists := observed.Providers[name]; exists {
-							ps = legacy
-						}
-					} else if legacy, exists := observed.Providers[name]; exists {
-						ps.Routing = legacy.Routing
-					}
-				} else if legacy, exists := observed.Providers[name]; exists {
-					ps.Routing = legacy.Routing
-				}
-			}
+		if _, ok := configured[name]; ok {
+			ps = aggregateMappingState(name, observed.Providers)
 		}
 		entry := QuotaSnapshotReport{MappingID: name}
 		if ps.Availability == state.Unavailable {

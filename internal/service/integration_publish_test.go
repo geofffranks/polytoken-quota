@@ -109,14 +109,10 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 		Version: 1,
 		Providers: map[policy.MappingID]policy.Mapping{
 			"codex": {
-				CodexBarProviders:  []string{"codex"},
-				PolytokenProviders: []string{"codex"},
-				Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 			},
 			"zai": {
-				CodexBarProviders:  []string{"zai"},
-				PolytokenProviders: []string{"zai"},
-				Models:             map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
 			},
 		},
 		Global: policy.Target{

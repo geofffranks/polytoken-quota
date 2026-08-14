@@ -160,31 +160,10 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 }
 
 func mappingProviderState(id string, mapping policy.Mapping, observed map[string]state.ProviderState) state.ProviderState {
-	if len(mapping.CodexBarProviders) == 0 {
+	if mapping.Quota == nil {
 		return observed[id]
 	}
-	ps := aggregateMappingState(mapping.CodexBarProviders, observed)
-	ps.ResetCredits = selectResetCreditState(mapping.CodexBarProviders, observed)
-	return ps
-}
-
-func selectResetCreditState(aliases []string, providers map[string]state.ProviderState) quota.ResetCreditState {
-	var selected quota.ResetCreditState
-	var selectedAt time.Time
-	var selectedAlias string
-	for _, alias := range aliases {
-		candidate, ok := providers[alias]
-		if !ok {
-			continue
-		}
-		at := resetCreditStateAt(candidate.ResetCredits)
-		if selectedAlias == "" || at.After(selectedAt) || (at.Equal(selectedAt) && alias < selectedAlias) {
-			selected = candidate.ResetCredits
-			selectedAt = at
-			selectedAlias = alias
-		}
-	}
-	return selected
+	return aggregateMappingState(id, observed)
 }
 
 func resetCreditStateAt(s quota.ResetCreditState) time.Time {

@@ -139,7 +139,7 @@ func readManagedConfig(path string) (SourceConfig, error) {
 			}
 			models[name] = mb
 		}
-		out.Providers = append(out.Providers, SourceMapping{ID: id, CodexBarProviders: []string{id}, PolytokenProviders: []string{id}, Models: models})
+		out.Providers = append(out.Providers, SourceMapping{ID: id, Models: models})
 	}
 	return out, nil
 }

@@ -7,14 +7,10 @@
 version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models:
       - codex/gpt-5.6-sol
       - codex/gpt-5.6-luna
   zai:
-    codexbar_providers: [z.ai]
-    polytoken_providers: [zai]
     models:
       - zai/glm-5.2
 global:
