@@ -35,6 +35,23 @@ func (l diagnosticPathLoader) LoadPolicy() (policy.Desired, error) { return l.de
 func (l diagnosticPathLoader) DesiredExists() bool                 { return l.deps.DesiredExists() }
 func (l diagnosticPathLoader) DesiredPath() string                 { return l.path }
 
+func TestDoctorPolicyLoadFailureDoesNotReportObservedProvidersAsOrphaned(t *testing.T) {
+	snapshot := DiagnosticSnapshot{
+		policyErr: errors.New("desired.yaml failed validation"),
+		observed: state.State{Providers: map[string]state.ProviderState{"observed-provider": {}}},
+	}
+
+	desiredProviders := desiredProviderIDs(snapshot)
+	if desiredProviders != nil {
+		t.Fatalf("desired providers=%v, want nil when policy loading fails", desiredProviders)
+	}
+	for _, finding := range doctor.DiscoverabilityFindings(nil, desiredProviders, snapshot.ObservedState().Providers) {
+		if finding.Code == "orphaned-provider-state" {
+			t.Fatalf("policy-load failure produced orphan finding: %+v", finding)
+		}
+	}
+}
+
 func TestCoordinatorDoctorDiscoverabilityFindings(t *testing.T) {
 	d, _ := diagnosticFixture(t, true)
 	d.observed.Providers["orphaned"] = state.ProviderState{}

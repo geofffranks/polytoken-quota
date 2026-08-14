@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
-	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/target"
@@ -142,7 +141,7 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	deps := doctor.Dependencies{
 		Observed:         snapshot.ObservedState(),
 		DesiredRaw:       snapshot.DesiredRaw(),
-		DesiredProviders: desiredProviderIDs(snapshot.DesiredPolicy()),
+		DesiredProviders: desiredProviderIDs(snapshot),
 		Now:              func() time.Time { return asOf },
 	}
 
@@ -187,7 +186,11 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	return report
 }
 
-func desiredProviderIDs(desired policy.Desired) map[string]struct{} {
+func desiredProviderIDs(snapshot DiagnosticSnapshot) map[string]struct{} {
+	if snapshot.PolicyError() != nil {
+		return nil
+	}
+	desired := snapshot.DesiredPolicy()
 	ids := make(map[string]struct{}, len(desired.Providers))
 	for id := range desired.Providers {
 		ids[string(id)] = struct{}{}
