@@ -32,6 +32,6 @@ fi
 cd "$(dirname "$0")/.."
 
 # Run the whole contract package: the real-binary cases plus the static
-# staging/quota/CodexBar contract checks, so "the contract suite passed" means
-# all of it ran.
+# staging/quota contract checks, so "the contract suite passed" means all of
+# it ran.
 exec go test ./contract -v -count=1 -timeout 300s

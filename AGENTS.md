@@ -1,7 +1,7 @@
 # AGENTS.md — polytoken-quota reconciler
 
-Short-lived Go CLI (`polytoken-quota`) that consumes the CodexBar hook contract,
-maintains durable independent quota/availability state, and safely reconciles only
+Short-lived Go CLI (`polytoken-quota`) that maintains durable independent
+quota/availability state and safely reconciles only
 explicitly managed Polytoken model fields across a global target and registered
 project targets.
 
@@ -19,9 +19,8 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
   `linux/amd64`, `linux/arm64`
 - **Polytoken contract binary:** resolved from `PATH` (currently
   `0.6.6`), overridable via `POLYTOKEN_BINARY`.
-  Publication is gated on passing its complete-root contract tests. Version policy:
-  minimum-current — keep the supported binary at the latest stable release.
-- **CodexBar minimum:** `0.44.0` (hook contract).
+  Version policy: minimum-current — keep the supported binary at the latest stable
+  release.
 
 ## Install / release convention
 
