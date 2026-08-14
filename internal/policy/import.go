@@ -16,7 +16,7 @@ import (
 // This file implements the durable desired-policy workflows: Init (a strict
 // create-only starter proposal), guarded Import (polytoken-quota init --force),
 // drift detection, and the Writer that performs exclusive-create and
-// atomic-replace file operations. None of these perform CodExBar writes; init
+// atomic-replace file operations. None of these modify provider systems; init
 // only produces or adopts desired intent and reports drift.
 
 // ErrDesiredExists signals that desired.yaml already exists and a strict
@@ -37,14 +37,11 @@ type SourceConfig struct {
 	Classifier Chain
 }
 
-// SourceMapping is one provider mapping read from source config: a set of
-// CodExBar provider IDs bound to a set of Polytoken provider IDs, plus the exact
-// concrete base models managed by that binding and their baseline enabled state.
+// SourceMapping is one provider mapping read from source config, plus the exact
+// concrete base models managed by that mapping and their baseline enabled state.
 type SourceMapping struct {
-	ID                 string
-	CodexBarProviders  []string
-	PolytokenProviders []string
-	Models             map[string]ModelBaseline
+	ID     string
+	Models map[string]ModelBaseline
 }
 
 // SourceDefinition is one discovered definition file with its live managed model
@@ -136,7 +133,7 @@ type offGraphRef struct {
 // polytoken.fallback_models, materializes exact concrete model enumeration
 // verbatim from the source provider mappings (no implicit runtime mapping), and
 // reports any references that do not resolve as Uncovered. It performs no
-// CodExBar writes and is strict create-only: persistence is the caller's job.
+// provider-system writes and is strict create-only: persistence is the caller's job.
 func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 	d, off, err := propose(ctx, r)
 	if err != nil {
@@ -159,7 +156,7 @@ func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 // outside the provider graph) unless force is set. When forced it emits a
 // warning that the temporary live ordering may become durable intent. Managed
 // drift is reported, never silently adopted; unmanaged live content is
-// preserved/ignored. It performs no CodExBar writes.
+// preserved/ignored. It performs no provider-system writes.
 func Import(ctx context.Context, r SourceReader, s state.State, force bool) (Desired, ImportReport, error) {
 	d, off, err := propose(ctx, r)
 	if err != nil {
@@ -206,10 +203,6 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 	if err := buildProviders(&d, global.Config.Providers, owner); err != nil {
 		return Desired{}, nil, err
 	}
-	if err := validateMappingIdentities(d); err != nil {
-		return Desired{}, nil, err
-	}
-
 	var offGraph []offGraphRef
 	gt, goff := buildTarget(global, owner)
 	d.Global = gt
@@ -243,9 +236,7 @@ func buildProviders(d *Desired, providers []SourceMapping, owner map[string]Mapp
 			return fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			CodexBarProviders:  append([]string(nil), sm.CodexBarProviders...),
-			PolytokenProviders: append([]string(nil), sm.PolytokenProviders...),
-			Models:             map[string]ModelBaseline{},
+			Models: map[string]ModelBaseline{},
 		}
 		bases := make([]string, 0, len(sm.Models))
 		for base := range sm.Models {
@@ -505,10 +496,7 @@ func syncDir(dir string) error {
 func marshalDesired(d Desired) ([]byte, error) {
 	doc := outDoc{Version: d.Version, Providers: map[string]outMapping{}}
 	for id, m := range d.Providers {
-		om := outMapping{
-			CodexBarProviders:  m.CodexBarProviders,
-			PolytokenProviders: m.PolytokenProviders,
-		}
+		om := outMapping{}
 		bases := make([]string, 0, len(m.Models))
 		for base := range m.Models {
 			bases = append(bases, base)
@@ -583,9 +571,7 @@ type outDoc struct {
 }
 
 type outMapping struct {
-	CodexBarProviders  []string   `yaml:"codexbar_providers,omitempty"`
-	PolytokenProviders []string   `yaml:"polytoken_providers,omitempty"`
-	Models             []modelOut `yaml:"models"`
+	Models []modelOut `yaml:"models"`
 }
 
 type outTarget struct {

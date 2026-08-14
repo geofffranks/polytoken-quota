@@ -222,6 +222,60 @@ func pendingFinding(t *testing.T, r Report) Finding {
 
 // --- tests ------------------------------------------------------------------
 
+func TestLegacyAndOrphanedDiscoverabilityFindings(t *testing.T) {
+	t.Run("legacy and orphaned", func(t *testing.T) {
+		observed := state.State{Providers: map[string]state.ProviderState{
+			"configured":               {},
+			"orphaned":                 {},
+			"orphaned\napi_key=CANARY": {},
+		}}
+		r := Run(context.Background(), Dependencies{
+			DesiredRaw:       []byte("version: 1\ncodexbar_providers:\n  CANARY-account: {}\npolytoken_providers: {}\n"),
+			DesiredProviders: map[string]struct{}{"configured": {}},
+			Observed:         observed,
+		})
+
+		var legacy, orphaned *Finding
+		for i := range r.Findings {
+			switch r.Findings[i].Code {
+			case "legacy-config-keys":
+				legacy = &r.Findings[i]
+			case "orphaned-provider-state":
+				orphaned = &r.Findings[i]
+			}
+		}
+		if legacy == nil || orphaned == nil {
+			t.Fatalf("missing discoverability findings: %+v", r.Findings)
+		}
+		for _, f := range []*Finding{legacy, orphaned} {
+			if f.Severity != Info {
+				t.Errorf("finding %s severity=%q, want %q", f.Code, f.Severity, Info)
+			}
+		}
+		for _, want := range []string{"codexbar_providers", "polytoken_providers"} {
+			if !strings.Contains(legacy.Message, want) {
+				t.Errorf("legacy message missing key %q: %s", want, legacy.Message)
+			}
+		}
+		if !strings.Contains(orphaned.Message, "orphaned") || strings.Contains(orphaned.Message, "CANARY") || strings.Contains(orphaned.Message, "api_key") {
+			t.Errorf("orphaned message was not bounded and sanitized: %s", orphaned.Message)
+		}
+	})
+
+	t.Run("clean config and state", func(t *testing.T) {
+		r := Run(context.Background(), Dependencies{
+			DesiredRaw:       []byte("version: 1\\nproviders: {}\\n"),
+			DesiredProviders: map[string]struct{}{"configured": {}},
+			Observed:         state.State{Providers: map[string]state.ProviderState{"configured": {}}},
+		})
+		for _, f := range r.Findings {
+			if f.Code == "legacy-config-keys" || f.Code == "orphaned-provider-state" {
+				t.Fatalf("unexpected discoverability finding: %+v", f)
+			}
+		}
+	})
+}
+
 // TestDoctorFindingsAndPersistedErrorFields proves Run emits a finding for every
 // static/live/pending condition and that the persisted pending target error
 // carries the required detail fields.

@@ -17,10 +17,10 @@ package service
 // This test wires the REAL Coordinator (real Lock, real policy loader, real
 // state store, real target registry, real reconcile.Builder, real staging
 // Builder, real validate Runner backed by a fake CommandRunner that always
-// succeeds) to the REAL Publisher via the PublisherAdapter, then drives a valid
-// hook event through the full path: load state → recover → accept event →
-// render → stage → validate → publish (with real hash computation) → commit
-// state. It asserts at least one target successfully publishes (live files are
+// succeeds) to the REAL Publisher via the PublisherAdapter, then drives a
+// reconcile through the full path: load state → recover → render → stage →
+// validate → publish (with real hash computation) → commit state. It asserts at
+// least one target successfully publishes (live files are
 // written with the reconciled content, the state revision advances, and no
 // target is pending).
 
@@ -32,7 +32,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
@@ -77,12 +76,12 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 	clock := func() time.Time { return time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC) }
 	store := state.Store{Path: statePath, Now: clock, RecoveredRetention: 24 * time.Hour}
 
-	// Seed persisted observed state at revision 1 with codex healthy, so the
-	// event (codex quota_reached) is accepted and advances to revision 2.
+	// Seed persisted observed state at revision 1 with codex exhausted, so
+	// reconcile promotes the healthy alternative and advances to revision 2.
 	prior := state.State{
 		Schema:    1,
 		Revision:  1,
-		Providers: map[string]state.ProviderState{},
+		Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaExhausted, Availability: state.Available}},
 		Targets:   map[string]state.TargetState{},
 	}
 	if err := store.Save(prior); err != nil {
@@ -110,14 +109,10 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 		Version: 1,
 		Providers: map[policy.MappingID]policy.Mapping{
 			"codex": {
-				CodexBarProviders:  []string{"codex"},
-				PolytokenProviders: []string{"codex"},
-				Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 			},
 			"zai": {
-				CodexBarProviders:  []string{"zai"},
-				PolytokenProviders: []string{"zai"},
-				Models:             map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
 			},
 		},
 		Global: policy.Target{
@@ -144,18 +139,11 @@ func TestCoordinatorPublisherIntegrationPublishesRealTarget(t *testing.T) {
 		Clock:        fixedClock{t: clock()},
 	}
 
-	// Drive a valid hook event: codex quota_reached degrades codex, so the
-	// reconciler reorders the chain to put zai/glm first.
-	ev := hook.Event{
-		Type:      hook.QuotaReached,
-		Provider:  "codex",
-		Timestamp: clock().Add(time.Second),
-	}
-	out := coord.HandleEvent(context.Background(), ev)
-
-	// The event must be accepted.
+	// Reconcile with codex exhausted; the reconciler reorders the chain to
+	// put zai/glm first.
+	out := coord.Reconcile(context.Background(), false, false, false)
 	if !out.Accepted {
-		t.Fatalf("event not accepted: %+v err=%v", out, out.Error)
+		t.Fatalf("reconcile not accepted: %+v err=%v", out, out.Error)
 	}
 	// The revision must advance from 1 to 2 (C2: persisted state was loaded, not
 	// reset to 0).

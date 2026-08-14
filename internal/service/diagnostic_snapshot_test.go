@@ -114,12 +114,10 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 		Routing: policy.RoutingConfig{Enabled: routingEnabled},
 		Providers: map[policy.MappingID]policy.Mapping{
 			"alpha": {
-				CodexBarProviders: []string{"codex-a"}, PolytokenProviders: []string{"alpha"},
 				Models: map[string]policy.ModelBaseline{"alpha/full": {Enabled: true}},
 				Quota:  &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour, BalanceGroup: "g", Weight: 1, Schedule: &schedule},
 			},
 			"beta": {
-				CodexBarProviders: []string{"codex-b"}, PolytokenProviders: []string{"beta"},
 				Models: map[string]policy.ModelBaseline{"beta/full": {Enabled: true}},
 				Quota:  &policy.QuotaConfig{Adapter: "anthropic", FreshnessTTL: time.Hour, BalanceGroup: "g", Weight: 1, MonthlyBudgetUSD: 500},
 			},
@@ -136,10 +134,10 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 		Projects: []policy.Target{{ID: "project-b", Root: root, Full: policy.Chain{"alpha/full"}}},
 	}
 	observed := state.State{Revision: 7, Providers: map[string]state.ProviderState{
-		"codex-a": {
+		"alpha": {
 			Quota: state.QuotaLow, Availability: state.Available,
 			QuotaSnapshot: &quota.QuotaSnapshot{
-				MappingID: "codex-a", CheckedAt: observedAt, Availability: quota.QuotaAvailable, Status: quota.SourceFresh,
+				MappingID: "alpha", CheckedAt: observedAt, Availability: quota.QuotaAvailable, Status: quota.SourceFresh,
 				Windows: []quota.QuotaWindow{
 					{Name: "past", UsagePercent: &pct, ResetAt: &past},
 					{Name: "equal", Used: &used, Limit: &limit, ResetAt: &equal},
@@ -147,12 +145,12 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 					{Name: "later", UsagePercent: &pct, ResetAt: &later},
 				},
 			},
-			QuotaAttempt: &quota.QuotaSnapshot{MappingID: "codex-a", CheckedAt: failedAt, Status: quota.SourceFailed, Error: "Bearer CANARY-ATTEMPT-SECRET"},
+			QuotaAttempt: &quota.QuotaSnapshot{MappingID: "alpha", CheckedAt: failedAt, Status: quota.SourceFailed, Error: "Bearer CANARY-ATTEMPT-SECRET"},
 			ResetCredits: resetState,
 		},
-		"codex-b": {
+		"beta": {
 			Quota: state.QuotaNormal, Availability: state.Available,
-			QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "codex-b", CheckedAt: observedAt, Availability: quota.QuotaAvailable, Status: quota.SourceFresh, Windows: []quota.QuotaWindow{{Name: "budget", Used: &spendUsed, Limit: &spendLimit, ResetAt: &later}}},
+			QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "beta", CheckedAt: observedAt, Availability: quota.QuotaAvailable, Status: quota.SourceFresh, Windows: []quota.QuotaWindow{{Name: "budget", Used: &spendUsed, Limit: &spendLimit, ResetAt: &later}}},
 		},
 	}}
 	resolved, err := NewTargetRegistry().ResolveTargets(desired)
@@ -252,7 +250,6 @@ func TestStatusProviderProjection(t *testing.T) {
 func TestQuotaExemptMappingStatusAndRouteSafety(t *testing.T) {
 	d, _ := diagnosticFixture(t, true)
 	d.desired.Providers["minime"] = policy.Mapping{
-		CodexBarProviders: []string{"minime"}, PolytokenProviders: []string{"minime"},
 		Models: map[string]policy.ModelBaseline{"minime/qwen": {Enabled: true}},
 	}
 	d.desired.Global.Classifier = policy.Chain{"alpha/full", "minime/qwen", "beta/full"}
@@ -306,7 +303,7 @@ func TestStatusResetAfterAsOfOnly(t *testing.T) {
 	if len(got.Windows) != 4 || !got.Windows[0].ResetAt.Equal(diagnosticAsOf.Add(-time.Minute)) || !got.Windows[1].ResetAt.Equal(diagnosticAsOf) {
 		t.Fatalf("raw reset timestamps were filtered or rewritten: %+v", got.Windows)
 	}
-	persisted := d.observed.Providers["codex-a"].ResetCredits.LastSuccess.AvailableExpiries
+	persisted := d.observed.Providers["alpha"].ResetCredits.LastSuccess.AvailableExpiries
 	if len(persisted) != 4 || persisted[0] == nil || !persisted[0].Equal(diagnosticAsOf.Add(-time.Minute)) || persisted[1] == nil || !persisted[1].Equal(diagnosticAsOf) {
 		t.Fatalf("report-time reset-credit filtering mutated durable state: %+v", persisted)
 	}
@@ -358,9 +355,9 @@ func TestStatusIgnoresRouteLocalErrors(t *testing.T) {
 
 func TestStatusPreservesManualDisabled(t *testing.T) {
 	d, _ := diagnosticFixture(t, true)
-	disabled := d.observed.Providers["codex-a"]
+	disabled := d.observed.Providers["alpha"]
 	disabled.ManualDisabled = true
-	d.observed.Providers["codex-a"] = disabled
+	d.observed.Providers["alpha"] = disabled
 	report := diagnosticCoordinator(d).Status(context.Background(), false)
 	if report.Error != "" {
 		t.Fatalf("status error=%q", report.Error)

@@ -44,10 +44,8 @@ var fixtureDefinitions = map[string]SourceDefinition{
 // globalMapping is the single concrete provider mapping shared by the fixtures.
 func globalMapping(enabled bool) SourceMapping {
 	return SourceMapping{
-		ID:                 "codex",
-		CodexBarProviders:  []string{"codex"},
-		PolytokenProviders: []string{"codex"},
-		Models:             map[string]ModelBaseline{"codex/gpt-5.6-sol": {Enabled: enabled}},
+		ID:     "codex",
+		Models: map[string]ModelBaseline{"codex/gpt-5.6-sol": {Enabled: enabled}},
 	}
 }
 
@@ -371,9 +369,7 @@ func TestWriterCreateAtomicCreatesExclusiveWithMode0600(t *testing.T) {
 		Version: supportedVersion,
 		Providers: map[MappingID]Mapping{
 			"codex": {
-				CodexBarProviders:  []string{"codex"},
-				PolytokenProviders: []string{"codex"},
-				Models:             map[string]ModelBaseline{"codex/gpt-5.6-sol": {Enabled: true}},
+				Models: map[string]ModelBaseline{"codex/gpt-5.6-sol": {Enabled: true}},
 			},
 		},
 		Operational: defaultOperational,

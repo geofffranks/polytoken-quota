@@ -115,8 +115,8 @@ func TestQuotaPollerIsolationOneFailureDoesNotBlockAnother(t *testing.T) {
 	}
 	desired := policy.Desired{
 		Providers: map[policy.MappingID]policy.Mapping{
-			"codex": {CodexBarProviders: []string{"codex"}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
-			"zai":   {CodexBarProviders: []string{"zai"}, Quota: &policy.QuotaConfig{Adapter: "zai"}},
+			"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
+			"zai":   {Quota: &policy.QuotaConfig{Adapter: "zai"}},
 		},
 	}
 
@@ -158,7 +158,7 @@ func TestQuotaPollerExpiredOrAbsentEvidenceNeverCallsTransport(t *testing.T) {
 			}
 			transport := &fakeTransport{called: map[string]int{}}
 			poller := &QuotaPollerImpl{Client: &quota.BoundedClient{Transport: transport}, Credentials: literalCreds{}, Evidence: reg, Now: func() time.Time { return now }}
-			desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{"codex": {CodexBarProviders: []string{"codex"}, Quota: &policy.QuotaConfig{Adapter: "codex"}}}}
+			desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}}}}
 			out, err := poller.Poll(context.Background(), desired, "", now)
 			if err != nil {
 				t.Fatal(err)
@@ -196,7 +196,7 @@ func TestQuotaPollerUnknownAdapterFailsClosed(t *testing.T) {
 	}
 	desired := policy.Desired{
 		Providers: map[policy.MappingID]policy.Mapping{
-			"weird": {CodexBarProviders: []string{"weird"}, Quota: &policy.QuotaConfig{Adapter: "unknown-vendor"}},
+			"weird": {Quota: &policy.QuotaConfig{Adapter: "unknown-vendor"}},
 		},
 	}
 	out, err := poller.Poll(context.Background(), desired, "", time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC))
@@ -252,7 +252,7 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	}}
 	q := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
 	findings := q
-	if len(findings) != 1 || findings[0].Code != "quota-adapter-unsupported" {
+	if len(findings) != 2 || findings[0].Code != "quota-adapter-unsupported" || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("absent evidence findings = %+v", findings)
 	}
 	// Expired and incomplete records must remain unsupported rather than being replaced.
@@ -260,27 +260,26 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	expired.ReviewBy = now.Add(-time.Hour)
 	reg.Register(expired)
 	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
-	if len(findings) != 1 || !strings.Contains(findings[0].Message, "expired") {
+	if len(findings) != 2 || !strings.Contains(findings[0].Message, "expired") || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("expired evidence findings = %+v", findings)
 	}
 	incomplete := quota.CodexEvidence(now)
 	incomplete.Endpoint = ""
 	reg.Register(incomplete)
 	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
-	if len(findings) != 1 || !strings.Contains(findings[0].Message, "incomplete") {
+	if len(findings) != 2 || !strings.Contains(findings[0].Message, "incomplete") || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("incomplete evidence findings = %+v", findings)
 	}
 }
 
-func TestQuotaDoctorAggregatesCodexBarProvidersUnderMappingID(t *testing.T) {
+func TestQuotaDoctorUsesMappingID(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"codex-a", "codex-b"}, Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
+		"openai": {Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
 	}}
 	used, limit := 10.0, 100.0
 	observed := state.State{Providers: map[string]state.ProviderState{
-		"codex-a":   {QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "codex-a", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-		"codex-b":   {QuotaAttempt: &quota.QuotaSnapshot{MappingID: "codex-b", Status: quota.SourceFailed, Error: "poll failed"}, QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "codex-b", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
+		"openai":    {QuotaAttempt: &quota.QuotaSnapshot{MappingID: "openai", Status: quota.SourceFailed, Error: "poll failed"}, QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "openai", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
 		"unmanaged": {QuotaAttempt: &quota.QuotaSnapshot{MappingID: "unmanaged", Status: quota.SourceFailed, Error: "other failed"}},
 	}}
 	reg := quota.NewEvidenceRegistry()
@@ -292,95 +291,26 @@ func TestQuotaDoctorAggregatesCodexBarProvidersUnderMappingID(t *testing.T) {
 	seen := map[string]bool{}
 	for _, finding := range findings {
 		seen[finding.TargetID] = true
-		if finding.TargetID == "codex-a" || finding.TargetID == "codex-b" {
-			t.Fatalf("covered provider leaked as finding target: %+v", finding)
-		}
+
 	}
 	if !seen["openai"] || !seen["unmanaged"] {
 		t.Fatalf("finding targets=%v, want openai and unmanaged", seen)
 	}
 }
 
-func TestQuotaDoctorAggregatedAliasesUnknownAvailabilityFailClosed(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	used, limit := 10.0, 100.0
-	observed := state.State{Providers: map[string]state.ProviderState{
-		"usable": {QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "usable", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-		"unsafe": {QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "unsafe", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaUnknown}},
-		"openai": {QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "openai", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-	}}
-	aggregated := aggregateMappingState([]string{"usable", "unsafe"}, observed.Providers)
-	findings := doctor.QuotaFindings([]doctor.QuotaProbe{{Provider: "openai", HasQuotaConfig: true, FreshnessTTL: time.Hour, Snapshot: aggregated.QuotaSnapshot, Supported: true}}, false, now)
-	found := false
-	for _, finding := range findings {
-		if finding.TargetID == "openai" && finding.Severity == doctor.Warning {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("mixed unknown alias should produce warning for mapping: %+v", findings)
-	}
-}
-
-func TestQuotaDoctorConfiguredAliasNilSnapshotFailsClosedDespiteLegacyMappingState(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	used, limit := 10.0, 100.0
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"usable", "missing-snapshot"}, Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
-	}}
-	observed := state.State{Providers: map[string]state.ProviderState{
-		"usable":           {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-		"missing-snapshot": {Availability: state.Available},
-		"openai":           {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-	}}
-	reg := quota.NewEvidenceRegistry()
-	reg.Register(quota.CodexEvidence(now))
-	findings := doctorQuotaFindings(t, observed, desired, now, reg)
-	for _, finding := range findings {
-		if finding.TargetID == "openai" && finding.Severity == doctor.Warning {
-			return
-		}
-	}
-	t.Fatalf("unsafe alias should produce actionable warning: %+v", findings)
-}
-
-func TestQuotaDoctorMixedMissingAndUnsafeAliasFailsClosed(t *testing.T) {
-	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
-	used, limit := 10.0, 100.0
-	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
-		"openai": {CodexBarProviders: []string{"unsafe", "missing"}, Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
-	}}
-	for name, unsafe := range map[string]*quota.QuotaSnapshot{
-		"nil snapshot":         nil,
-		"unknown availability": {MappingID: "unsafe", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaUnknown},
-		"no usable remaining":  {MappingID: "unsafe", CheckedAt: now, Status: quota.SourcePartial, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Name: "unreported"}}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			observed := state.State{Providers: map[string]state.ProviderState{
-				"unsafe": {Availability: state.Available, QuotaSnapshot: unsafe},
-				"openai": {Availability: state.Available, QuotaSnapshot: &quota.QuotaSnapshot{MappingID: "openai", CheckedAt: now, Status: quota.SourceFresh, Availability: quota.QuotaAvailable, Windows: []quota.QuotaWindow{{Used: &used, Limit: &limit}}}},
-			}}
-			reg := quota.NewEvidenceRegistry()
-			reg.Register(quota.CodexEvidence(now))
-			findings := doctorQuotaFindings(t, observed, desired, now, reg)
-			for _, finding := range findings {
-				if finding.TargetID == "openai" && finding.Severity == doctor.Warning {
-					return
-				}
-			}
-			t.Fatalf("mixed missing/unsafe aliases should produce actionable warning: %+v", findings)
-		})
-	}
-}
-
-func TestQuotaDoctorIncludesQuotaMappingWithoutCodexBarProvider(t *testing.T) {
+func TestQuotaDoctorIncludesQuotaMappingWithoutProvider(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
 		"empty": {Quota: &policy.QuotaConfig{Adapter: "unknown"}},
 	}}
 	findings := doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, quota.NewEvidenceRegistry())
-	if len(findings) != 1 || findings[0].TargetID != "empty" {
+	if len(findings) != 2 {
 		t.Fatalf("empty-provider mapping findings = %+v", findings)
+	}
+	for _, finding := range findings {
+		if finding.TargetID != "empty" {
+			t.Fatalf("empty-provider finding target=%q: %+v", finding.TargetID, findings)
+		}
 	}
 }
 
@@ -389,8 +319,7 @@ func TestQuotaDoctorUsesMappingIDWhenCodexBarProviderDiffers(t *testing.T) {
 	mappingID := policy.MappingID("mapping-id")
 	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
 		mappingID: {
-			CodexBarProviders: []string{"codex-provider"},
-			Quota:             &policy.QuotaConfig{Adapter: "codex"},
+			Quota: &policy.QuotaConfig{Adapter: "codex"},
 		},
 	}}
 	observed := state.State{Providers: map[string]state.ProviderState{
@@ -401,11 +330,13 @@ func TestQuotaDoctorUsesMappingIDWhenCodexBarProviderDiffers(t *testing.T) {
 	reg := quota.NewEvidenceRegistry()
 	reg.Register(quota.CodexEvidence(now))
 	findings := doctorQuotaFindings(t, observed, desired, now, reg)
-	if len(findings) != 1 {
-		t.Fatalf("mapping/provider mismatch findings = %+v, want one finding", findings)
+	if len(findings) != 2 {
+		t.Fatalf("mapping/provider findings = %+v, want partial snapshot and failed attempt", findings)
 	}
-	if findings[0].TargetID != string(mappingID) {
-		t.Fatalf("finding target=%q, want mapping ID %q", findings[0].TargetID, mappingID)
+	for _, finding := range findings {
+		if finding.TargetID != string(mappingID) {
+			t.Fatalf("finding target=%q, want mapping ID %q", finding.TargetID, mappingID)
+		}
 	}
 }
 
@@ -426,8 +357,8 @@ func TestQuotaPollerProviderFilter(t *testing.T) {
 	}
 	desired := policy.Desired{
 		Providers: map[policy.MappingID]policy.Mapping{
-			"codex": {CodexBarProviders: []string{"codex"}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
-			"zai":   {CodexBarProviders: []string{"zai"}, Quota: &policy.QuotaConfig{Adapter: "zai"}},
+			"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
+			"zai":   {Quota: &policy.QuotaConfig{Adapter: "zai"}},
 		},
 	}
 	out, err := poller.Poll(context.Background(), desired, "zai", time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC))

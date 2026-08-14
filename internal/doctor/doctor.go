@@ -106,6 +106,12 @@ type Dependencies struct {
 	Targets   TargetInspector
 	Validator LiveValidator
 	Publisher PublishInspector
+	// DesiredRaw is the bounded raw desired.yaml content used only to discover
+	// ignored legacy keys. It is never emitted in a finding.
+	DesiredRaw []byte
+	// DesiredProviders contains the configured mapping IDs from desired.yaml.
+	// It is used only to identify state rows that no longer have a mapping.
+	DesiredProviders map[string]struct{}
 	// Observed is the preloaded observed state. Pending targets are surfaced as
 	// actionable findings; recovered history is aged by RecoveredRetention.
 	Observed state.State
@@ -142,6 +148,8 @@ func Run(ctx context.Context, deps Dependencies) Report {
 	if deps.Publisher != nil {
 		findings = append(findings, deps.Publisher.Findings(ctx)...)
 	}
+
+	findings = append(findings, DiscoverabilityFindings(deps.DesiredRaw, deps.DesiredProviders, deps.Observed.Providers)...)
 
 	// Surface every persisted pending target error as an actionable finding.
 	ids := make([]string, 0, len(deps.Observed.Targets))

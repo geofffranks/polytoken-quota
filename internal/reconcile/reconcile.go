@@ -103,28 +103,17 @@ func modeRank(m state.Mode) int {
 	}
 }
 
-// MappingMode derives a mapping's effective mode from the observed state of its
-// CodExBar providers (the state machine keys providers by their CodExBar ID). A
-// provider absent from the observed state is healthy. When a mapping covers several
-// providers, the most-degraded mode wins, so a degraded provider never leaves its
-// models over-promoted.
+// MappingMode derives a mapping's effective mode from the observed state keyed
+// by the mapping ID. A provider absent from the observed state is healthy.
 func MappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mode {
-	m, ok := d.Providers[id]
-	if !ok {
+	if _, ok := d.Providers[id]; !ok {
 		return state.ModeNormal
 	}
-	worst := state.ModeNormal
-	for _, cb := range m.CodexBarProviders {
-		ps, seen := s.Providers[cb]
-		if !seen {
-			continue
-		}
-		mode := state.EffectiveMode(ps)
-		if modeRank(mode) > modeRank(worst) {
-			worst = mode
-		}
+	ps, seen := s.Providers[string(id)]
+	if !seen {
+		return state.ModeNormal
 	}
-	return worst
+	return state.EffectiveMode(ps)
 }
 
 // RankLookup maps a provider mapping ID to its global rank (0 = best). A mapping

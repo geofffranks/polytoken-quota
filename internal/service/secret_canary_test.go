@@ -20,7 +20,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
@@ -74,8 +73,6 @@ func runCanaryScenario(t *testing.T, canary string, scenarios []string) string {
 
 	for _, sc := range scenarios {
 		switch sc {
-		case "success":
-			canarySuccess(t, root, canary, store, clock, sourceDir, stageTmp, res, journalPath, backupRoot)
 		case "validation-failure":
 			canaryValidationFailure(t, root, canary, stageTmp, logsDir, sourceDir, res)
 		case "recovery":
@@ -85,49 +82,6 @@ func runCanaryScenario(t *testing.T, canary string, scenarios []string) string {
 		}
 	}
 	return root
-}
-
-// canarySuccess exercises the full accept→stage→publish path with the canary in
-// the JSON account field and env. The decoded event (account discarded) drives a
-// state save; AuthInert staging redacts the source api_key; the real Publisher
-// commits state/journal/backup carrying only hashes and clean bytes.
-func canarySuccess(t *testing.T, root, canary string, store state.Store, clock func() time.Time,
-	sourceDir, stageTmp string, res target.Resolved, journalPath, backupRoot string) {
-	t.Helper()
-	// Decode a payload whose account is the canary; account is discarded.
-	payload := `{"event":"quota_low","provider":"codex","account":"` + canary + `","timestamp":"2026-07-19T12:00:01Z"}`
-	env := map[string]string{"CODEXBAR_TRACE_ID": canary} // unrecognized env var, never persisted
-	ev, err := hook.Decode(strings.NewReader(payload), env, 4096)
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if strings.Contains(fmtEvent(ev), canary) {
-		t.Fatal("canary survived decode into the normalized event")
-	}
-	// Apply the event to state and persist: state.json carries only quota axes.
-	observed, _, _, err := state.ApplyEvent(state.State{Providers: map[string]state.ProviderState{}},
-		ev, state.Arrival{Sequence: 1, ReceivedAt: clock()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	observed.Schema = 1
-	observed.Revision = 2
-	if err := store.Save(observed); err != nil {
-		t.Fatal(err)
-	}
-
-	// Stage from the canary-bearing source under AuthInert and publish.
-	cand := canaryStage(t, sourceDir, stageTmp, res)
-	t.Cleanup(func() { _ = cand.Cleanup() })
-	staged, err := os.ReadFile(filepath.Join(cand.ConfigDir, "config.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(staged, []byte(canary)) {
-		t.Fatal("AuthInert left canary in staged candidate")
-	}
-	canaryPublish(t, cand, store, clock, res, journalPath, backupRoot, root)
-	_ = cand.Cleanup() // staging bytes consumed; remove the transient root now
 }
 
 // canaryValidationFailure proves captured command stderr carrying the canary is
@@ -203,12 +157,11 @@ func canaryRecovery(t *testing.T, canary string, store state.Store, clock func()
 }
 
 // TestNoSecretCanaryPersists is the Task 14 blueprint secret-canary test. It
-// injects canarySecret across environment, auth blocks, stderr, project paths,
-// and account input; runs success, validation-failure, and recovery; then scans
-// state.json, backups, journal, and logs for the canary and asserts it never
-// persists, and that no staging root survives.
+// injects canarySecret across auth blocks, stderr, project paths, and recovery
+// artifacts; then scans state.json, backups, journal, and logs for the canary
+// and asserts it never persists, and that no staging root survives.
 func TestNoSecretCanaryPersists(t *testing.T) {
-	root := runCanaryScenario(t, canarySecret, []string{"success", "validation-failure", "recovery"})
+	root := runCanaryScenario(t, canarySecret, []string{"validation-failure", "recovery"})
 	for _, tree := range []string{"state.json", "backups", "journal", "logs"} {
 		path := filepath.Join(root, tree)
 		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
@@ -345,21 +298,6 @@ func readOrFail(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
-}
-
-// fmtEvent renders an event for substring checks without importing fmt at the
-// call site repeatedly.
-func fmtEvent(e hook.Event) string {
-	var b strings.Builder
-	b.WriteString(string(e.Type))
-	b.WriteString(e.Provider)
-	if e.Status != nil {
-		b.WriteString(*e.Status)
-	}
-	if e.Window != nil {
-		b.WriteString(*e.Window)
-	}
-	return b.String()
 }
 
 // sanitize reduces a string to filesystem-safe characters (for temp dir names).

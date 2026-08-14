@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"gopkg.in/yaml.v3"
 )
@@ -55,11 +53,8 @@ func loadBytes(data []byte) (Desired, error) {
 	d := Desired{Version: w.Version, Providers: map[MappingID]Mapping{}}
 
 	// Build provider mappings. modelOwner maps a base model to the single mapping
-	// that owns it; the codexbar/polytoken owners detect ambiguity across mappings.
-	// Iterating sorted keys keeps error ordering deterministic.
+	// that owns it. Iterating sorted keys keeps error ordering deterministic.
 	modelOwner := map[string]MappingID{}
-	codexbarOwner := map[string]MappingID{}
-	polytokenOwner := map[string]MappingID{}
 	ids := make([]string, 0, len(w.Providers))
 	for id := range w.Providers {
 		ids = append(ids, string(id))
@@ -73,9 +68,7 @@ func loadBytes(data []byte) (Desired, error) {
 			return Desired{}, fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			CodexBarProviders:  append([]string(nil), mw.CodexBarProviders...),
-			PolytokenProviders: append([]string(nil), mw.PolytokenProviders...),
-			Models:             map[string]ModelBaseline{},
+			Models: map[string]ModelBaseline{},
 		}
 		for _, entry := range mw.Models {
 			base := entry.name
@@ -113,22 +106,7 @@ func loadBytes(data []byte) (Desired, error) {
 			}
 			modelOwner[base] = id
 		}
-		for _, cb := range m.CodexBarProviders {
-			if other, ok := codexbarOwner[cb]; ok && other != id {
-				return Desired{}, fmt.Errorf("policy: codexbar provider %q is ambiguous across mappings %q and %q", cb, other, id)
-			}
-			codexbarOwner[cb] = id
-		}
-		for _, pt := range m.PolytokenProviders {
-			if other, ok := polytokenOwner[pt]; ok && other != id {
-				return Desired{}, fmt.Errorf("policy: polytoken provider %q is ambiguous across mappings %q and %q", pt, other, id)
-			}
-			polytokenOwner[pt] = id
-		}
 		d.Providers[id] = m
-	}
-	if err := validateMappingIdentities(d); err != nil {
-		return Desired{}, err
 	}
 
 	op, err := operationalFromWire(w.Operational)
@@ -153,28 +131,6 @@ func loadBytes(data []byte) (Desired, error) {
 	return d, nil
 }
 
-// validateMappingIdentities keeps routing-control mapping IDs unambiguous with
-// aliases owned by other mappings. Equality with a mapping's own aliases is valid.
-func validateMappingIdentities(d Desired) error {
-	ids := make([]string, 0, len(d.Providers))
-	for id := range d.Providers {
-		ids = append(ids, string(id))
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		for _, ownerID := range ids {
-			if ownerID == id {
-				continue
-			}
-			owner := d.Providers[MappingID(ownerID)]
-			if slices.Contains(owner.CodexBarProviders, id) || slices.Contains(owner.PolytokenProviders, id) {
-				return fmt.Errorf("policy: mapping %q conflicts with an alias owned by mapping %q", quota.SanitizeText(id), quota.SanitizeText(ownerID))
-			}
-		}
-	}
-	return nil
-}
-
 // ResolveModel resolves a base model name to exactly one provider mapping by exact
 // match. It returns an error for unknown models and never matches by similarity.
 // (Load already rejects conflicting ownership, so at most one mapping owns a base.)
@@ -194,31 +150,6 @@ func (d Desired) ResolveModel(base string) (MappingID, error) {
 		return found, nil
 	default:
 		return "", fmt.Errorf("policy: model %q is ambiguous across mappings", base)
-	}
-}
-
-// ResolveCodexBar resolves a CodExBar event provider ID to its mapping. It is the
-// event-time counterpart to ResolveModel: an event whose provider is not bound by
-// any mapping is rejected. Like ResolveModel it performs exact match only.
-func (d Desired) ResolveCodexBar(id string) (MappingID, error) {
-	var found MappingID
-	count := 0
-	for mid, m := range d.Providers {
-		for _, cb := range m.CodexBarProviders {
-			if cb == id {
-				found = mid
-				count++
-				break
-			}
-		}
-	}
-	switch count {
-	case 0:
-		return "", fmt.Errorf("policy: unknown codexbar provider %q", id)
-	case 1:
-		return found, nil
-	default:
-		return "", fmt.Errorf("policy: codexbar provider %q is ambiguous across mappings", id)
 	}
 }
 
@@ -367,10 +298,8 @@ type docWire struct {
 }
 
 type mappingWire struct {
-	CodexBarProviders  []string    `yaml:"codexbar_providers"`
-	PolytokenProviders []string    `yaml:"polytoken_providers"`
-	Models             []modelWire `yaml:"models"`
-	Quota              *quotaWire  `yaml:"quota"`
+	Models []modelWire `yaml:"models"`
+	Quota  *quotaWire  `yaml:"quota"`
 }
 
 // modelWire is one entry in a mapping's models sequence. It accepts a bare name

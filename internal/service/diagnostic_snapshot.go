@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
+	"os"
 	"sort"
 	"time"
 
@@ -57,6 +59,9 @@ type DiagnosticSnapshot struct {
 	// desired carries the raw desired policy loaded exactly once, so downstream
 	// consumers can build quota probes without a duplicate load.
 	desired policy.Desired
+	// desiredRaw is a bounded copy of desired.yaml used only for doctor
+	// discoverability checks. It is not exposed in diagnostic views.
+	desiredRaw []byte
 	// policyErr and policyMissing classify the single policy load so doctor can
 	// surface a configuration finding without another filesystem probe.
 	policyErr     error
@@ -86,6 +91,9 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 		return snapshot
 	}
 	snapshot.desired = desired
+	if path, ok := policyDesiredPath(c.Policy); ok {
+		snapshot.desiredRaw = readBoundedFile(path, 1<<20)
+	}
 	if c.State == nil {
 		snapshot.fatalError = "load state failed"
 		return snapshot
@@ -248,6 +256,26 @@ func (s DiagnosticSnapshot) ObservedState() state.State {
 // probes without a duplicate policy load.
 func (s DiagnosticSnapshot) DesiredPolicy() policy.Desired {
 	return s.desired
+}
+
+func (s DiagnosticSnapshot) DesiredRaw() []byte {
+	return append([]byte(nil), s.desiredRaw...)
+}
+
+func readBoundedFile(path string, limit int64) []byte {
+	if path == "" || limit <= 0 {
+		return nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit))
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // AsOf returns the single clock sample used by every time-sensitive projection.

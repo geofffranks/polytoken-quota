@@ -110,7 +110,7 @@ func (c *Coordinator) QuotaStatus(_ context.Context) QuotaStatusReport {
 		if desired, err := c.Policy.LoadPolicy(); err == nil {
 			for id, m := range desired.Providers {
 				if m.Quota != nil {
-					configured[string(id)] = m.CodexBarProviders
+					configured[string(id)] = []string{string(id)}
 					if m.Quota.FreshnessTTL > 0 {
 						freshness[string(id)] = m.Quota.FreshnessTTL
 					}
@@ -125,27 +125,8 @@ func (c *Coordinator) QuotaStatus(_ context.Context) QuotaStatusReport {
 	now := c.now()
 	for _, name := range names {
 		ps := observed.Providers[name]
-		if aliases, ok := configured[name]; ok {
-			if len(aliases) == 0 {
-				ps = observed.Providers[name]
-			} else {
-				ps = aggregateMappingState(aliases, observed.Providers)
-				if hasMissingAlias(aliases, observed.Providers) {
-					if allAliasesMissing(aliases, observed.Providers) {
-						if legacy, exists := observed.Providers[name]; exists {
-							// Preserve compatibility when no configured alias has any
-							// observation to aggregate.
-							ps = legacy
-						}
-					} else if legacy, exists := observed.Providers[name]; exists {
-						// Present aliases own quota safety; legacy state may only
-						// contribute non-safety metadata in a mixed view.
-						ps.Routing = legacy.Routing
-					}
-				} else if legacy, exists := observed.Providers[name]; exists {
-					ps.Routing = legacy.Routing
-				}
-			}
+		if _, ok := configured[name]; ok {
+			ps = aggregateMappingState(name, observed.Providers)
 		}
 		entry := QuotaSnapshotReport{MappingID: name}
 		if ps.Availability == state.Unavailable {

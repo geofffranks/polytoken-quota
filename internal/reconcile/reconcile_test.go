@@ -16,11 +16,21 @@ import (
 
 // --- shared test helpers -----------------------------------------------------
 
+func TestMappingModeUsesMappingID(t *testing.T) {
+	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
+		"mapping": {},
+	}}
+	var observed state.State
+	setMode(&observed, "mapping", state.ModeDisabled)
+	if got := MappingMode(desired, observed, "mapping"); got != state.ModeDisabled {
+		t.Fatalf("MappingMode=%v, want %v", got, state.ModeDisabled)
+	}
+}
+
 // fixture builds a Desired whose mappings are keyed by the provider prefix of each
 // entry's base model (so "codex/gpt-5.6-sol" -> mapping "codex"), a single target
 // with one managed definition "agent.md" carrying the given chain, and an empty
-// state at revision 7. Each mapping's CodexBarProviders equals its MappingID so
-// setMode keys line up with the state the reconciler inspects.
+// state at revision 7. Mapping IDs line up with the state keys the reconciler inspects.
 func fixture(entries ...string) (policy.Desired, state.State, policy.Target) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{}}
 	for _, e := range entries {
@@ -46,9 +56,7 @@ func addMapping(d *policy.Desired, base string) {
 	m, ok := d.Providers[mid]
 	if !ok {
 		m = policy.Mapping{
-			CodexBarProviders:  []string{string(mid)},
-			PolytokenProviders: []string{string(mid)},
-			Models:             map[string]policy.ModelBaseline{},
+			Models: map[string]policy.ModelBaseline{},
 		}
 	}
 	if _, dup := m.Models[base]; !dup {
@@ -333,8 +341,6 @@ func TestStablePartitionPreservesRelativeOrder(t *testing.T) {
 func TestBaselineIntentionalDisable(t *testing.T) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
-			CodexBarProviders:  []string{"codex"},
-			PolytokenProviders: []string{"codex"},
 			Models: map[string]policy.ModelBaseline{
 				"codex/intentional": {Enabled: false, HadEnabledKey: true},
 				"codex/healthy":     {Enabled: true, HadEnabledKey: false},
@@ -558,8 +564,6 @@ func TestEmptyDefinitionChainFailsNamingFile(t *testing.T) {
 func TestEnabledEditsWithoutChains(t *testing.T) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
-			CodexBarProviders:  []string{"codex"},
-			PolytokenProviders: []string{"codex"},
 			Models: map[string]policy.ModelBaseline{
 				"codex/m": {Enabled: true, HadEnabledKey: false},
 			},

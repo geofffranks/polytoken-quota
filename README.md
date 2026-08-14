@@ -74,7 +74,7 @@ All `polytoken-quota` configuration lives in:
 
 The file is versioned YAML and is created by `polytoken-quota init`. It has four main sections:
 
-- `providers` maps provider IDs and enumerates the exact concrete models managed by each mapping.
+- `providers.<id>` is the provider mapping identity and enumerates the exact concrete models managed by that mapping.
 - `global` defines the global Polytoken root, default chains (`full`, `mini`, `nano`, `classifier`), and the definition files whose `polytoken.model` or `polytoken.fallback_models` fields are managed.
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
 - `operational` controls validation timeout, lock wait, recovered-error retention, and backup count. If omitted, defaults are 30s, 10s, 168h, and 5 backups.
@@ -87,8 +87,6 @@ A complete minimal shape is:
 version: 1
 providers:
   codex:
-    codexbar_providers: [codex]
-    polytoken_providers: [codex]
     models:
       - codex/gpt-5
     quota:
@@ -103,8 +101,6 @@ providers:
             start: "14:00"
             end: "18:00"
   zai:
-    codexbar_providers: [zai]
-    polytoken_providers: [zai]
     models:
       - zai/glm-4.5
     quota:

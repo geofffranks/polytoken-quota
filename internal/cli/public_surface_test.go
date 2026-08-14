@@ -63,11 +63,8 @@ var removedCommandInvocations = []string{
 }
 
 // publicSurfaceExcludedDirs are the internal/ packages excluded from the
-// removed-command invocation scan: internal/hook/ is the retained hook decoder
-// package whose domain vocabulary legitimately uses "hook".
-var publicSurfaceExcludedDirs = map[string]bool{
-	"hook": true,
-}
+// removed-command invocation scan.
+var publicSurfaceExcludedDirs = map[string]bool{}
 
 func publicSurfaceRoot(t *testing.T) string {
 	t.Helper()
@@ -165,9 +162,7 @@ func indexLineComment(line string) int {
 // TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory guards AC.11: no non-test
 // source under internal/ carries the running-session restart/reload advisory or
 // removed-command invocations, and the usage text lists only the current command
-// set (no obsolete hook/sync/quota/state commands). The hook decoder package
-// (internal/hook/) is excluded because it retains legitimate hook-domain
-// coverage.
+// set (no obsolete hook/sync/quota/state commands).
 func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
 	internalDir := publicSurfaceRoot(t)
 

@@ -24,7 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
@@ -46,7 +45,7 @@ func (missingPolicyLoader) LoadPolicy() (policy.Desired, error) {
 func (missingPolicyLoader) DesiredExists() bool { return false }
 
 func (testSourceReader) Global(context.Context) (policy.SourceSet, error) {
-	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", CodexBarProviders: []string{"codex"}, PolytokenProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
+	return policy.SourceSet{ID: "global", Global: true, Config: policy.SourceConfig{Providers: []policy.SourceMapping{{ID: "codex", Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}, Definitions: []policy.SourceDefinition{{Path: "model.md", Model: "codex/gpt"}}}, nil
 }
 func (testSourceReader) Projects(context.Context) ([]policy.SourceSet, error) { return nil, nil }
 
@@ -138,8 +137,7 @@ func (s *coordinatorSpy) LoadPolicy() (policy.Desired, error) {
 	}
 	return policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex-mapping": {
-			CodexBarProviders: []string{"codex"},
-			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 		},
 	}}, nil
 }
@@ -232,10 +230,6 @@ func (s *coordinatorSpy) Snapshot() map[string]string {
 }
 
 // --- helpers ---
-func event(t hook.Type, seq int) hook.Event {
-	return hook.Event{Type: t, Provider: "codex", Timestamp: time.Date(2026, 7, 19, 12, 0, seq, 0, time.UTC)}
-}
-
 func count(trace []string, needle string) int {
 	n := 0
 	for _, s := range trace {
@@ -247,125 +241,6 @@ func count(trace []string, needle string) int {
 }
 
 // --- tests (binding, from the Task 12 blueprint) ----------------------------
-
-func TestCoordinatorHookRoutingEventsHonorRoutingEnabled(t *testing.T) {
-	for _, enabled := range []bool{false, true} {
-		spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-		spy.desired = policy.Desired{Version: 1, Routing: policy.RoutingConfig{Enabled: enabled}, Providers: map[policy.MappingID]policy.Mapping{"codex-mapping": {CodexBarProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}
-		out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
-		if !out.Accepted {
-			t.Fatalf("enabled=%v out=%+v", enabled, out)
-		}
-		for _, record := range spy.LastSaved.EventHistory.Events {
-			if record.Category == state.EventRoutingChange && !enabled {
-				t.Fatalf("routing event recorded while disabled: %+v", record)
-			}
-		}
-	}
-}
-
-func TestCoordinatorHookRecordsMeaningfulEvent(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
-	if !out.Accepted || out.Revision != 2 {
-		t.Fatalf("out=%+v", out)
-	}
-	if len(spy.LastSaved.EventHistory.Events) == 0 {
-		t.Fatal("missing event history")
-	}
-	e := spy.LastSaved.EventHistory.Events[0]
-	if e.Action != string(hook.QuotaReached) || e.Provider != "codex" || e.Result != state.EventChanged {
-		t.Fatalf("event=%+v", e)
-	}
-}
-
-func TestCoordinatorEqualTimestampLaterArrivalIsNoChange(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	stamp := time.Date(2026, 7, 19, 12, 0, 5, 0, time.UTC)
-	spy.recovered = state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaAt: stamp, QuotaArrival: 9}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 10}
-	out := spy.Coordinator.HandleEvent(context.Background(), hook.Event{Type: hook.QuotaReached, Provider: "codex", Timestamp: stamp})
-	if !out.Accepted || out.Revision != 6 {
-		t.Fatalf("out=%+v", out)
-	}
-	if spy.Publishes != 0 || spy.ValidationIntents != 0 {
-		t.Fatalf("no-change touched targets: %d/%d", spy.Publishes, spy.ValidationIntents)
-	}
-	if len(spy.LastSaved.EventHistory.Events) == 0 || spy.LastSaved.EventHistory.Events[0].Result != state.EventNoChange {
-		t.Fatalf("events=%+v", spy.LastSaved.EventHistory)
-	}
-}
-
-func TestCoordinatorManualNoOpDoesNotReviseOrPublish(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	spy.recovered = state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 1}
-	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
-	if !out.Accepted || !out.HandledWithoutRevision || out.Revision != 5 {
-		t.Fatalf("out=%+v", out)
-	}
-	if spy.Publishes != 0 || spy.ValidationIntents != 0 || spy.StateSaves != 0 {
-		t.Fatalf("no-op mutated: %+v", spy)
-	}
-}
-
-func TestCoordinatorStaleHookHandledWithoutTargetCalls(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	prior := state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaAt: time.Date(2026, 7, 19, 12, 0, 5, 0, time.UTC), QuotaArrival: 9}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 10}
-	spy.recovered = prior
-	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaLow, 2))
-	if !out.Accepted || !out.HandledWithoutRevision || out.Revision != 5 {
-		t.Fatalf("out=%+v", out)
-	}
-	if spy.Publishes != 0 || spy.ValidationIntents != 0 {
-		t.Fatalf("stale hook touched targets: publishes=%d validations=%d", spy.Publishes, spy.ValidationIntents)
-	}
-	if len(spy.LastSaved.EventHistory.Events) != 1 || spy.LastSaved.EventHistory.Events[0].Result != state.EventIgnored {
-		t.Fatalf("saved=%+v", spy.LastSaved.EventHistory)
-	}
-	if spy.LastSaved.NextArrivalSequence != 11 {
-		t.Fatalf("arrival sequence=%d", spy.LastSaved.NextArrivalSequence)
-	}
-}
-
-func TestCoordinatorManualDisableRecordsEvent(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
-	if !out.Accepted {
-		t.Fatalf("out=%+v", out)
-	}
-	if len(spy.LastSaved.EventHistory.Events) == 0 {
-		t.Fatal("missing manual event")
-	}
-	e := spy.LastSaved.EventHistory.Events[0]
-	if e.Category != state.EventManual || e.Action != "routing-disable" || e.MappingID != "codex-mapping" || e.Result != state.EventChanged {
-		t.Fatalf("event=%+v", e)
-	}
-}
-
-func TestCoordinatorOrderAndPartialSuccess(t *testing.T) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey, "project", "invalid")
-	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
-	want := []string{
-		"lock", "load-state", "recover",
-		"load-policy", "load-sources",
-		"render:global", "stage:global", "validate:global", "publish:global",
-		"render:project", "stage:project", "validate:project", "record-pending:project",
-		"save-state", "unlock",
-	}
-	if !reflect.DeepEqual(spy.Trace, want) {
-		t.Fatalf("trace mismatch:\ngot =%v\nwant=%v", spy.Trace, want)
-	}
-	if !out.Accepted || out.Revision != 2 || out.PendingCount() != 1 {
-		t.Fatalf("outcome: %+v", out)
-	}
-}
-
-func TestRejectedInputDoesNotMutate(t *testing.T) {
-	spy := newCoordinatorSpy()
-	out := spy.Coordinator.HandleEvent(context.Background(), hook.Event{})
-	if out.Accepted || spy.StateSaves != 0 || spy.Publishes != 0 {
-		t.Fatalf("out=%+v saves=%d publishes=%d", out, spy.StateSaves, spy.Publishes)
-	}
-}
 
 func TestDryRunIsNonMutating(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
@@ -545,12 +420,11 @@ func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
 	}
 }
 
-func TestRoutingMappingControlsAllAliases(t *testing.T) {
+func TestRoutingMappingControlsMappingID(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex-pool": {
-			CodexBarProviders: []string{"codex-primary", "codex-secondary"},
-			Models:            map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+			Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 		},
 	}}
 
@@ -558,13 +432,8 @@ func TestRoutingMappingControlsAllAliases(t *testing.T) {
 	if !out.Accepted || spy.StateSaves != 1 || spy.Publishes != 1 || count(spy.Trace, "lock") != 1 || count(spy.Trace, "reconcile") != 1 {
 		t.Fatalf("out=%+v trace=%v saves=%d publishes=%d", out, spy.Trace, spy.StateSaves, spy.Publishes)
 	}
-	for _, alias := range []string{"codex-primary", "codex-secondary"} {
-		if !spy.LastSaved.Providers[alias].ManualDisabled {
-			t.Fatalf("alias %q not disabled in saved state: %+v", alias, spy.LastSaved)
-		}
-	}
-	if _, exists := spy.LastSaved.Providers["codex-pool"]; exists {
-		t.Fatalf("mapping ID persisted as provider alias: %+v", spy.LastSaved.Providers)
+	if !spy.LastSaved.Providers["codex-pool"].ManualDisabled {
+		t.Fatalf("mapping ID not disabled in saved state: %+v", spy.LastSaved)
 	}
 }
 
@@ -572,27 +441,22 @@ func TestRoutingEnablePreservesAutomaticExclusion(t *testing.T) {
 	observedAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 	spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
-		"codex-pool": {CodexBarProviders: []string{"codex-primary", "codex-secondary"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}},
+		"codex-pool": {Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}},
 	}}
 	spy.recovered = state.State{Revision: 7, Providers: map[string]state.ProviderState{
-		"codex-primary":   {Quota: state.QuotaExhausted, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 11},
-		"codex-secondary": {Quota: state.QuotaNormal, Availability: state.Unavailable, ManualDisabled: true, AvailabilityAt: observedAt, AvailabilityArrival: 12},
+		"codex-pool": {Quota: state.QuotaExhausted, Availability: state.Available, ManualDisabled: true, QuotaAt: observedAt, QuotaArrival: 11},
 	}, Targets: map[string]state.TargetState{}}
 
 	out := spy.Coordinator.Enable(context.Background(), "codex-pool")
 	if !out.Accepted {
 		t.Fatalf("out=%+v", out)
 	}
-	primary := spy.LastSaved.Providers["codex-primary"]
-	secondary := spy.LastSaved.Providers["codex-secondary"]
-	if primary.ManualDisabled || primary.Quota != state.QuotaExhausted || !primary.QuotaAt.Equal(observedAt) || primary.QuotaArrival != 11 {
-		t.Fatalf("primary automatic exclusion changed: %+v", primary)
+	provider := spy.LastSaved.Providers["codex-pool"]
+	if provider.ManualDisabled || provider.Quota != state.QuotaExhausted || !provider.QuotaAt.Equal(observedAt) || provider.QuotaArrival != 11 {
+		t.Fatalf("automatic exclusion changed: %+v", provider)
 	}
-	if secondary.ManualDisabled || secondary.Availability != state.Unavailable || !secondary.AvailabilityAt.Equal(observedAt) || secondary.AvailabilityArrival != 12 {
-		t.Fatalf("secondary automatic exclusion changed: %+v", secondary)
-	}
-	if state.EffectiveMode(primary) != state.ModeDisabled || state.EffectiveMode(secondary) != state.ModeDisabled {
-		t.Fatalf("enable incorrectly restored eligibility: primary=%s secondary=%s", state.EffectiveMode(primary), state.EffectiveMode(secondary))
+	if state.EffectiveMode(provider) != state.ModeDisabled {
+		t.Fatalf("enable incorrectly restored eligibility: mode=%s", state.EffectiveMode(provider))
 	}
 }
 
@@ -624,9 +488,7 @@ func TestRoutingControlRejectsNonMappingIDs(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 			spy.desired = policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 				"codex-pool": {
-					CodexBarProviders:  []string{"codex-primary"},
-					PolytokenProviders: []string{"polytoken-codex"},
-					Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+					Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 				},
 			}}
 			before := state.State{Revision: 9, Providers: map[string]state.ProviderState{"codex-primary": {Quota: state.QuotaLow, Availability: state.Available}}, Targets: map[string]state.TargetState{}}
@@ -669,7 +531,7 @@ func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
 	if !out.Accepted || out.Error == nil || out.PendingCount() != 1 || spy.StateSaves != 1 {
 		t.Fatalf("out=%+v saves=%d", out, spy.StateSaves)
 	}
-	if !spy.LastSaved.Providers["codex"].ManualDisabled {
+	if !spy.LastSaved.Providers["codex-mapping"].ManualDisabled {
 		t.Fatalf("saved state lost manual disable: %+v", spy.LastSaved)
 	}
 	pending := spy.LastSaved.Targets["manual-resolution"]
@@ -678,8 +540,8 @@ func TestManualDisablePersistsWhenTargetResolutionFails(t *testing.T) {
 	}
 }
 
-// TestAllMutatorsUseSingleTransactSeam proves Init, HandleEvent, Reconcile,
-// Set, and Clear each acquire exactly one lock and release it exactly once,
+// TestAllMutatorsUseSingleTransactSeam proves Init, Reconcile, Set, and Clear
+// each acquire exactly one lock and release it exactly once,
 // confirming they share the one Coordinator.transact path.
 func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 	low := state.QuotaLow
@@ -689,7 +551,6 @@ func TestAllMutatorsUseSingleTransactSeam(t *testing.T) {
 		call func(*Coordinator) Outcome
 	}{
 		{"init", func(c *Coordinator) Outcome { return c.InitWithOptions(ctx, InitOptions{Force: true}) }},
-		{"event", func(c *Coordinator) Outcome { return c.HandleEvent(ctx, event(hook.QuotaLow, 3)) }},
 		{"reconcile", func(c *Coordinator) Outcome { return c.Reconcile(ctx, false, false, false) }},
 		{"set", func(c *Coordinator) Outcome { return c.Set(ctx, "codex", state.ProviderPatch{Quota: &low}) }},
 		{"clear", func(c *Coordinator) Outcome { return c.Clear(ctx, state.Selector{All: true}) }},
@@ -911,7 +772,7 @@ func newRecoverableInitFixture(t *testing.T, desired []byte, loadErr error) reco
 }
 
 func validInitDesired() []byte {
-	return []byte("version: 1\nproviders:\n  codex:\n    codexbar_providers: [codex]\n    models: [codex/gpt]\n")
+	return []byte("version: 1\nproviders:\n  codex:\n    models: [codex/gpt]\n")
 }
 
 func snapshotInitFiles(t *testing.T, paths ...string) map[string][]byte {
@@ -929,22 +790,4 @@ func snapshotInitFiles(t *testing.T, paths ...string) map[string][]byte {
 		out[path] = bytes.Clone(data)
 	}
 	return out
-}
-
-// BenchmarkHookReconcile measures the Coordinator's per-hook transaction cost
-// (lock, recover, accept, reconcile, stage, validate, publish, commit) with a
-// single registered target, using the in-process spy so the benchmark isolates
-// orchestration overhead from real filesystem and Polytoken subprocess latency.
-func BenchmarkHookReconcile(b *testing.B) {
-	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
-	spy.Coordinator.tracer = nil // no trace recording during the benchmark
-	ev := event(hook.QuotaLow, 1)
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		out := spy.Coordinator.HandleEvent(context.Background(), ev)
-		if !out.Accepted {
-			b.Fatalf("not accepted: %+v", out)
-		}
-	}
 }

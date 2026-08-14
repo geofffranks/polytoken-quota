@@ -32,53 +32,34 @@ type doctorQuotaInputs struct {
 
 // buildDoctorQuotaProbes builds probes from the preloaded observed state +
 // desired policy + evidence gate. It mirrors the prior quotaDoctorInspector
-// aggregation logic (CodexBar alias grouping, freshness TTL, adapter support)
-// without re-loading state or policy.
+// aggregation logic (mapping IDs, freshness TTL, adapter support) without
+// re-loading state or policy.
 func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 	// Build freshness TTL and adapter lookups from policy, keyed by mapping ID.
-	// QuotaPoller observations use mapping IDs even when a mapping has one or
-	// more CodexBar provider aliases.
+	// QuotaPoller observations are keyed by mapping ID.
 	type qcfg struct {
 		ttl     time.Duration
 		adapter string
 	}
 	configs := map[string]qcfg{}
-	aliases := make(map[string][]string)
-	if len(in.desired.Providers) > 0 {
-		aliases = make(map[string][]string, len(in.desired.Providers))
-		for mappingID, m := range in.desired.Providers {
-			if m.Quota == nil {
-				continue
-			}
-			id := string(mappingID)
-			configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter}
-			aliases[id] = m.CodexBarProviders
+	configured := make(map[string][]string, len(in.desired.Providers))
+	for mappingID, m := range in.desired.Providers {
+		if m.Quota == nil {
+			continue
 		}
+		id := string(mappingID)
+		configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter}
+		configured[id] = []string{id}
 	}
-	sorted := aggregateProviderNames(aliases, in.observed.Providers)
+	sorted := aggregateProviderNames(configured, in.observed.Providers)
 	sort.Strings(sorted)
 
 	probes := make([]doctor.QuotaProbe, 0, len(sorted))
 	for _, name := range sorted {
 		ps := in.observed.Providers[name]
-		cfg, configured := configs[name]
-		if backing, ok := aliases[name]; ok && len(backing) > 0 {
-			ps = aggregateMappingState(backing, in.observed.Providers)
-			if hasMissingAlias(backing, in.observed.Providers) {
-				if allAliasesMissing(backing, in.observed.Providers) {
-					if legacy, exists := in.observed.Providers[name]; exists {
-						// Preserve compatibility when no configured alias has any
-						// observation to aggregate.
-						ps = legacy
-					}
-				} else if legacy, exists := in.observed.Providers[name]; exists {
-					// Present aliases own quota safety; legacy state may only
-					// contribute non-safety metadata in a mixed view.
-					ps.Routing = legacy.Routing
-				}
-			} else if legacy, exists := in.observed.Providers[name]; exists {
-				ps.Routing = legacy.Routing
-			}
+		cfg, configuredMapping := configs[name]
+		if configuredMapping {
+			ps = aggregateMappingState(name, in.observed.Providers)
 		}
 		if ps.Availability == state.Unavailable && ps.QuotaSnapshot == nil {
 			ps.QuotaSnapshot = &quota.QuotaSnapshot{MappingID: name, Availability: quota.QuotaUnknown, Status: quota.SourcePartial}
@@ -86,7 +67,7 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 		support := adapterSupport(cfg.adapter, in.now, in.evidence)
 		probes = append(probes, doctor.QuotaProbe{
 			Provider:       name,
-			HasQuotaConfig: configured,
+			HasQuotaConfig: configuredMapping,
 			FreshnessTTL:   cfg.ttl,
 			Snapshot:       ps.QuotaSnapshot,
 			Attempt:        ps.QuotaAttempt,

@@ -23,9 +23,9 @@ import (
 // RankingResult for explain/status.
 //
 // Only mappings carrying a Quota config participate in routing. A mapping's
-// observed mode is the worst (most degraded) effective mode across its CodExBar
-// providers — the same aggregation reconcile uses — and its observed snapshot is
-// the most depleted among those providers (fail-closed). When usage history is
+// observed mode comes from the provider mapping's state entry — the same
+// mapping-ID aggregation reconcile uses — and its observed snapshot is selected
+// fail-closed. When usage history is
 // absent or has no usable totals, the usage key is skipped for every group
 // (routing treats absent shares as incomparable).
 func ComputeRanking(desired policy.Desired, observed state.State, now time.Time) (reconcile.RankLookup, routing.RankingResult) {
@@ -49,7 +49,7 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 			FreshnessTTL: m.Quota.FreshnessTTL,
 			Weight:       m.Quota.Weight,
 		})
-		mode, snap := aggregateMappingObs(m.CodexBarProviders, observed.Providers)
+		mode, snap := aggregateMappingObs(idStr, observed.Providers)
 		obs = append(obs, routing.ProviderObs{
 			MappingID: idStr,
 			Mode:      string(mode),
@@ -72,46 +72,21 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 	return lookup, result
 }
 
-// aggregateMappingObs derives one mapping's observed mode and snapshot from the
-// CodExBar providers that back it. The mode is the worst (most degraded)
-// effective mode; the snapshot is the most depleted among the providers that
-// carry one (minimum effective remaining; nil-remaining is treated as least
-// depleted since it carries no depletion signal). Ties break by earliest
-// CheckedAt then CodExBar provider ID, both deterministic.
-func aggregateMappingObs(codexBarProviders []string, providers map[string]state.ProviderState) (state.Mode, *quota.QuotaSnapshot) {
-	worst := state.ModeNormal
-	var chosen *quota.QuotaSnapshot
-	var chosenCB string
-	for _, cb := range codexBarProviders {
-		ps, ok := providers[cb]
-		if !ok {
-			// A configured alias without an observation makes this mapping
-			// unrankable; disabled is the existing fail-closed ranking mode.
-			worst = state.ModeDisabled
-			continue
-		}
-		if mode := state.EffectiveMode(ps); modeSeverity(mode) > modeSeverity(worst) {
-			worst = mode
-		}
-		if ps.QuotaSnapshot == nil {
-			// A configured alias present without a usable snapshot is unsafe even
-			// when another alias has usable headroom.
-			worst = state.ModeDisabled
-			continue
-		}
-		// An unsafe alias must not be discarded by most-depleted selection: the
-		// aggregate is fail-closed even when another alias has usable headroom.
-		if ps.QuotaSnapshot.Availability == quota.QuotaUnknown || ps.QuotaSnapshot.EffectiveRemaining() == nil {
-			worst = state.ModeDisabled
-		}
-		if chosen == nil || moreDepleted(ps.QuotaSnapshot, chosen) ||
-			(equalDepletion(ps.QuotaSnapshot, chosen) && (ps.QuotaSnapshot.CheckedAt.Before(chosen.CheckedAt) ||
-				(ps.QuotaSnapshot.CheckedAt.Equal(chosen.CheckedAt) && cb < chosenCB))) {
-			chosen = ps.QuotaSnapshot
-			chosenCB = cb
-		}
+// aggregateMappingObs derives one mapping's observed mode and snapshot from its
+// single mapping-ID state entry. Missing or unsafe observations are fail-closed.
+func aggregateMappingObs(mappingID string, providers map[string]state.ProviderState) (state.Mode, *quota.QuotaSnapshot) {
+	ps, ok := providers[mappingID]
+	if !ok {
+		return state.ModeDisabled, nil
 	}
-	return worst, chosen
+	mode := state.EffectiveMode(ps)
+	if ps.QuotaSnapshot == nil {
+		return state.ModeDisabled, nil
+	}
+	if ps.QuotaSnapshot.Availability == quota.QuotaUnknown || ps.QuotaSnapshot.EffectiveRemaining() == nil {
+		mode = state.ModeDisabled
+	}
+	return mode, ps.QuotaSnapshot
 }
 
 // modeSeverity orders modes from least to most degraded, matching reconcile's

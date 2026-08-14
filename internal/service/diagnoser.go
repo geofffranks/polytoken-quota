@@ -139,8 +139,10 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	asOf := snapshot.AsOf()
 
 	deps := doctor.Dependencies{
-		Observed: snapshot.ObservedState(),
-		Now:      func() time.Time { return asOf },
+		Observed:         snapshot.ObservedState(),
+		DesiredRaw:       snapshot.DesiredRaw(),
+		DesiredProviders: desiredProviderIDs(snapshot),
+		Now:              func() time.Time { return asOf },
 	}
 
 	// Configuration findings come from the preloaded snapshot's captured load
@@ -182,6 +184,18 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	}
 
 	return report
+}
+
+func desiredProviderIDs(snapshot DiagnosticSnapshot) map[string]struct{} {
+	if snapshot.PolicyError() != nil {
+		return nil
+	}
+	desired := snapshot.DesiredPolicy()
+	ids := make(map[string]struct{}, len(desired.Providers))
+	for id := range desired.Providers {
+		ids[string(id)] = struct{}{}
+	}
+	return ids
 }
 
 // preloadedPolicyInspector surfaces a policy-schema finding from the snapshot's

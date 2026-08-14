@@ -8,9 +8,12 @@ package doctor
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // QuotaProbe carries the sanitized per-provider quota state for diagnostic
@@ -26,6 +29,67 @@ type QuotaProbe struct {
 	Attempt        *quota.QuotaSnapshot
 	Supported      bool
 	SupportReason  string
+}
+
+const (
+	maxDiscoverabilityKeys = 32
+	maxDesiredScanBytes    = 1 << 20
+)
+
+// DiscoverabilityFindings reports ignored legacy desired.yaml keys and observed
+// provider rows that no longer correspond to configured mapping IDs. It is
+// read-only and emits only bounded, identifier-sanitized key names.
+func DiscoverabilityFindings(rawDesired []byte, desiredProviders map[string]struct{}, observedProviders map[string]state.ProviderState) []Finding {
+	var findings []Finding
+	legacy := legacyConfigKeys(rawDesired)
+	if len(legacy) > 0 {
+		findings = append(findings, Finding{
+			Code:        "legacy-config-keys",
+			Severity:    Info,
+			Message:     fmt.Sprintf("desired.yaml contains ignored legacy config keys: %s", strings.Join(legacy, ", ")),
+			Remediation: "remove legacy keys from desired.yaml after reviewing the upgrade",
+		})
+	}
+
+	if desiredProviders != nil {
+		orphaned := make([]string, 0)
+		for key := range observedProviders {
+			if _, ok := desiredProviders[key]; !ok {
+				orphaned = append(orphaned, safeIdentifier(key))
+			}
+		}
+		sort.Strings(orphaned)
+		if len(orphaned) > maxDiscoverabilityKeys {
+			orphaned = orphaned[:maxDiscoverabilityKeys]
+		}
+		if len(orphaned) > 0 {
+			findings = append(findings, Finding{
+				Code:        "orphaned-provider-state",
+				Severity:    Info,
+				Message:     fmt.Sprintf("state.json contains provider state with no configured mapping: %s", strings.Join(orphaned, ", ")),
+				Remediation: "review and remove orphaned provider state during operator-driven cleanup",
+			})
+		}
+	}
+	return findings
+}
+
+func legacyConfigKeys(raw []byte) []string {
+	if len(raw) > maxDesiredScanBytes {
+		raw = raw[:maxDesiredScanBytes]
+	}
+	text := string(raw)
+	keys := make([]string, 0, 2)
+	for _, key := range []string{"codexbar_providers", "polytoken_providers"} {
+		for _, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, key+":") {
+				keys = append(keys, key)
+				break
+			}
+		}
+	}
+	return keys
 }
 
 // QuotaFindings evaluates per-provider quota probes plus a reconcile-pending

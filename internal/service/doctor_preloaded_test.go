@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -21,6 +24,87 @@ func doctorSnapshotFixture(t *testing.T) (*diagnosticDeps, *Coordinator) {
 	t.Helper()
 	d, _ := diagnosticFixture(t, true)
 	return d, diagnosticCoordinator(d)
+}
+
+type diagnosticPathLoader struct {
+	deps *diagnosticDeps
+	path string
+}
+
+func (l diagnosticPathLoader) LoadPolicy() (policy.Desired, error) { return l.deps.LoadPolicy() }
+func (l diagnosticPathLoader) DesiredExists() bool                 { return l.deps.DesiredExists() }
+func (l diagnosticPathLoader) DesiredPath() string                 { return l.path }
+
+func TestDoctorPolicyLoadFailureDoesNotReportObservedProvidersAsOrphaned(t *testing.T) {
+	snapshot := DiagnosticSnapshot{
+		policyErr: errors.New("desired.yaml failed validation"),
+		observed:  state.State{Providers: map[string]state.ProviderState{"observed-provider": {}}},
+	}
+
+	desiredProviders := desiredProviderIDs(snapshot)
+	if desiredProviders != nil {
+		t.Fatalf("desired providers=%v, want nil when policy loading fails", desiredProviders)
+	}
+	for _, finding := range doctor.DiscoverabilityFindings(nil, desiredProviders, snapshot.ObservedState().Providers) {
+		if finding.Code == "orphaned-provider-state" {
+			t.Fatalf("policy-load failure produced orphan finding: %+v", finding)
+		}
+	}
+}
+
+func TestCoordinatorDoctorEmptyPolicyReportsObservedProviderAsOrphaned(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.desired.Providers = map[policy.MappingID]policy.Mapping{}
+	d.observed.Providers = map[string]state.ProviderState{"observed": {}}
+	desiredPath := filepath.Join(t.TempDir(), "desired.yaml")
+	if err := os.WriteFile(desiredPath, []byte("version: 1\nproviders: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loader := diagnosticPathLoader{deps: d, path: desiredPath}
+	c := &Coordinator{Policy: loader, State: d, Targets: d, Clock: d}
+
+	report := c.Doctor(context.Background(), false)
+	if desired := desiredProviderIDs(DiagnosticSnapshot{desired: d.desired, observed: d.observed}); desired == nil {
+		t.Fatal("successful empty policy returned nil mapping set")
+	}
+	found := false
+	for _, finding := range report.Findings {
+		if finding.Code == "orphaned-provider-state" && strings.Contains(finding.Message, "observed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing orphaned observed provider finding: %+v", report.Findings)
+	}
+}
+
+func TestCoordinatorDoctorDiscoverabilityFindings(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.observed.Providers["orphaned"] = state.ProviderState{}
+	desiredPath := filepath.Join(t.TempDir(), "desired.yaml")
+	raw := []byte("version: 1\ncodexbar_providers:\n  ignored: {}\npolytoken_providers: {}\n")
+	if err := os.WriteFile(desiredPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loader := diagnosticPathLoader{deps: d, path: desiredPath}
+	c := &Coordinator{Policy: loader, State: d, Targets: d, Clock: d}
+
+	report := c.Doctor(context.Background(), false)
+	codes := map[string]bool{}
+	for _, finding := range report.Findings {
+		codes[finding.Code] = true
+		if finding.Code == "legacy-config-keys" || finding.Code == "orphaned-provider-state" {
+			if finding.Severity != doctor.Info {
+				t.Errorf("finding %s severity=%q, want %q", finding.Code, finding.Severity, doctor.Info)
+			}
+		}
+	}
+	if !codes["legacy-config-keys"] || !codes["orphaned-provider-state"] {
+		t.Fatalf("missing discoverability findings: %+v", report.Findings)
+	}
+	if d.policyLoads != 1 {
+		t.Fatalf("policy loads=%d, want 1", d.policyLoads)
+	}
 }
 
 // TestDoctorReadsPolicyExactlyOnce proves Doctor classifies every policy load
@@ -124,7 +208,7 @@ func TestDoctorProblemOnlyProjection(t *testing.T) {
 		if f.Code == "manual-disabled" {
 			t.Errorf("doctor must not report manual-disabled rows: %s", f.Message)
 		}
-		if f.Severity == doctor.Info && !slices.Contains([]string{"quota-partial"}, f.Code) {
+		if f.Severity == doctor.Info && !slices.Contains([]string{"quota-partial", "orphaned-provider-state"}, f.Code) {
 			// Info findings that are not quota-partial are suspicious in a
 			// problem-only doctor. Recovered history is separate.
 			t.Errorf("unexpected info finding in problem-only doctor: %s %s", f.Code, f.Message)

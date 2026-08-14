@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/hook"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
@@ -79,14 +78,10 @@ func TestPublishPreservesRealSecrets(t *testing.T) {
 		Version: 1,
 		Providers: map[policy.MappingID]policy.Mapping{
 			"codex": {
-				CodexBarProviders:  []string{"codex"},
-				PolytokenProviders: []string{"codex"},
-				Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 			},
 			"zai": {
-				CodexBarProviders:  []string{"zai"},
-				PolytokenProviders: []string{"zai"},
-				Models:             map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
+				Models: map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
 			},
 		},
 		Global: policy.Target{
@@ -109,15 +104,10 @@ func TestPublishPreservesRealSecrets(t *testing.T) {
 		Clock:        fixedClock{t: clock()},
 	}
 
-	// Drive a hook event that triggers a full reconcile+publish.
-	ev := hook.Event{
-		Type:      hook.QuotaReached,
-		Provider:  "codex",
-		Timestamp: clock().Add(time.Second),
-	}
-	out := coord.HandleEvent(context.Background(), ev)
+	// Drive a full reconcile+publish with the existing healthy state.
+	out := coord.Reconcile(context.Background(), false, false, false)
 	if !out.Accepted {
-		t.Fatalf("event not accepted: %+v err=%v", out, out.Error)
+		t.Fatalf("reconcile not accepted: %+v err=%v", out, out.Error)
 	}
 	if out.PendingCount() != 0 {
 		for _, tgt := range out.Targets {

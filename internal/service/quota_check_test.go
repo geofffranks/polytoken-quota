@@ -67,16 +67,12 @@ func quotaDesired() policy.Desired {
 		Version: 1,
 		Providers: map[policy.MappingID]policy.Mapping{
 			"codex": {
-				CodexBarProviders:  []string{"codex"},
-				PolytokenProviders: []string{"codex"},
-				Quota:              &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: 30 * time.Minute},
-				Models:             map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
+				Quota:  &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: 30 * time.Minute},
+				Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}},
 			},
 			"zai": {
-				CodexBarProviders:  []string{"zai"},
-				PolytokenProviders: []string{"zai"},
-				Quota:              &policy.QuotaConfig{Adapter: "zai", FreshnessTTL: 30 * time.Minute},
-				Models:             map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
+				Quota:  &policy.QuotaConfig{Adapter: "zai", FreshnessTTL: 30 * time.Minute},
+				Models: map[string]policy.ModelBaseline{"zai/glm": {Enabled: true}},
 			},
 		},
 	}
