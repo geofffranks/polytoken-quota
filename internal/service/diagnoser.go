@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/target"
@@ -139,8 +140,10 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	asOf := snapshot.AsOf()
 
 	deps := doctor.Dependencies{
-		Observed: snapshot.ObservedState(),
-		Now:      func() time.Time { return asOf },
+		Observed:         snapshot.ObservedState(),
+		DesiredRaw:       snapshot.DesiredRaw(),
+		DesiredProviders: desiredProviderIDs(snapshot.DesiredPolicy()),
+		Now:              func() time.Time { return asOf },
 	}
 
 	// Configuration findings come from the preloaded snapshot's captured load
@@ -182,6 +185,14 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 	}
 
 	return report
+}
+
+func desiredProviderIDs(desired policy.Desired) map[string]struct{} {
+	ids := make(map[string]struct{}, len(desired.Providers))
+	for id := range desired.Providers {
+		ids[string(id)] = struct{}{}
+	}
+	return ids
 }
 
 // preloadedPolicyInspector surfaces a policy-schema finding from the snapshot's

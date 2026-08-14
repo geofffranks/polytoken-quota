@@ -81,7 +81,7 @@ func legacyConfigKeys(raw []byte) []string {
 	text := string(raw)
 	keys := make([]string, 0, 2)
 	for _, key := range []string{"codexbar_providers", "polytoken_providers"} {
-		for _, line := range strings.Split(text, "\\n") {
+		for _, line := range strings.Split(text, "\n") {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, key+":") {
 				keys = append(keys, key)

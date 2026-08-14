@@ -230,7 +230,7 @@ func TestLegacyAndOrphanedDiscoverabilityFindings(t *testing.T) {
 			"orphaned\napi_key=CANARY": {},
 		}}
 		r := Run(context.Background(), Dependencies{
-			DesiredRaw:       []byte("version: 1\\ncodexbar_providers:\\n  CANARY-account: {}\\npolytoken_providers: {}\\n"),
+			DesiredRaw:       []byte("version: 1\ncodexbar_providers:\n  CANARY-account: {}\npolytoken_providers: {}\n"),
 			DesiredProviders: map[string]struct{}{"configured": {}},
 			Observed:         observed,
 		})
