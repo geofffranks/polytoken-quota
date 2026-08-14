@@ -248,12 +248,105 @@ func count(trace []string, needle string) int {
 
 // --- tests (binding, from the Task 12 blueprint) ----------------------------
 
+func TestCoordinatorHookRoutingEventsHonorRoutingEnabled(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+		spy.desired = policy.Desired{Version: 1, Routing: policy.RoutingConfig{Enabled: enabled}, Providers: map[policy.MappingID]policy.Mapping{"codex-mapping": {CodexBarProviders: []string{"codex"}, Models: map[string]policy.ModelBaseline{"codex/gpt": {Enabled: true}}}}}
+		out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
+		if !out.Accepted {
+			t.Fatalf("enabled=%v out=%+v", enabled, out)
+		}
+		for _, record := range spy.LastSaved.EventHistory.Events {
+			if record.Category == state.EventRoutingChange && !enabled {
+				t.Fatalf("routing event recorded while disabled: %+v", record)
+			}
+		}
+	}
+}
+
+func TestCoordinatorHookRecordsMeaningfulEvent(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
+	if !out.Accepted || out.Revision != 2 {
+		t.Fatalf("out=%+v", out)
+	}
+	if len(spy.LastSaved.EventHistory.Events) == 0 {
+		t.Fatal("missing event history")
+	}
+	e := spy.LastSaved.EventHistory.Events[0]
+	if e.Action != string(hook.QuotaReached) || e.Provider != "codex" || e.Result != state.EventChanged {
+		t.Fatalf("event=%+v", e)
+	}
+}
+
+func TestCoordinatorEqualTimestampLaterArrivalIsNoChange(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	stamp := time.Date(2026, 7, 19, 12, 0, 5, 0, time.UTC)
+	spy.recovered = state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaAt: stamp, QuotaArrival: 9}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 10}
+	out := spy.Coordinator.HandleEvent(context.Background(), hook.Event{Type: hook.QuotaReached, Provider: "codex", Timestamp: stamp})
+	if !out.Accepted || out.Revision != 6 {
+		t.Fatalf("out=%+v", out)
+	}
+	if spy.Publishes != 0 || spy.ValidationIntents != 0 {
+		t.Fatalf("no-change touched targets: %d/%d", spy.Publishes, spy.ValidationIntents)
+	}
+	if len(spy.LastSaved.EventHistory.Events) == 0 || spy.LastSaved.EventHistory.Events[0].Result != state.EventNoChange {
+		t.Fatalf("events=%+v", spy.LastSaved.EventHistory)
+	}
+}
+
+func TestCoordinatorManualNoOpDoesNotReviseOrPublish(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	spy.recovered = state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaNormal, Availability: state.Available, ManualDisabled: true}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 1}
+	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
+	if !out.Accepted || !out.HandledWithoutRevision || out.Revision != 5 {
+		t.Fatalf("out=%+v", out)
+	}
+	if spy.Publishes != 0 || spy.ValidationIntents != 0 || spy.StateSaves != 0 {
+		t.Fatalf("no-op mutated: %+v", spy)
+	}
+}
+
+func TestCoordinatorStaleHookHandledWithoutTargetCalls(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	prior := state.State{Revision: 5, Providers: map[string]state.ProviderState{"codex": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaAt: time.Date(2026, 7, 19, 12, 0, 5, 0, time.UTC), QuotaArrival: 9}}, Targets: map[string]state.TargetState{}, NextArrivalSequence: 10}
+	spy.recovered = prior
+	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaLow, 2))
+	if !out.Accepted || !out.HandledWithoutRevision || out.Revision != 5 {
+		t.Fatalf("out=%+v", out)
+	}
+	if spy.Publishes != 0 || spy.ValidationIntents != 0 {
+		t.Fatalf("stale hook touched targets: publishes=%d validations=%d", spy.Publishes, spy.ValidationIntents)
+	}
+	if len(spy.LastSaved.EventHistory.Events) != 1 || spy.LastSaved.EventHistory.Events[0].Result != state.EventIgnored {
+		t.Fatalf("saved=%+v", spy.LastSaved.EventHistory)
+	}
+	if spy.LastSaved.NextArrivalSequence != 11 {
+		t.Fatalf("arrival sequence=%d", spy.LastSaved.NextArrivalSequence)
+	}
+}
+
+func TestCoordinatorManualDisableRecordsEvent(t *testing.T) {
+	spy := newCoordinatorSpy().withTargets("global", validTargetKey)
+	out := spy.Coordinator.Disable(context.Background(), "codex-mapping")
+	if !out.Accepted {
+		t.Fatalf("out=%+v", out)
+	}
+	if len(spy.LastSaved.EventHistory.Events) == 0 {
+		t.Fatal("missing manual event")
+	}
+	e := spy.LastSaved.EventHistory.Events[0]
+	if e.Category != state.EventManual || e.Action != "routing-disable" || e.MappingID != "codex-mapping" || e.Result != state.EventChanged {
+		t.Fatalf("event=%+v", e)
+	}
+}
+
 func TestCoordinatorOrderAndPartialSuccess(t *testing.T) {
 	spy := newCoordinatorSpy().withTargets("global", validTargetKey, "project", "invalid")
 	out := spy.Coordinator.HandleEvent(context.Background(), event(hook.QuotaReached, 2))
 	want := []string{
 		"lock", "load-state", "recover",
-		"load-policy", "load-state", "load-sources", "accept-revision",
+		"load-policy", "load-sources",
 		"render:global", "stage:global", "validate:global", "publish:global",
 		"render:project", "stage:project", "validate:project", "record-pending:project",
 		"save-state", "unlock",
@@ -404,6 +497,12 @@ func TestSetAndClearUseSingleLockedTransactionCycle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 			out := tc.call(&spy.Coordinator)
+			if tc.name == "clear-all" {
+				if !out.Accepted || !out.HandledWithoutRevision || spy.StateSaves != 0 || spy.Publishes != 0 {
+					t.Fatalf("clear no-op out=%+v saves=%d publishes=%d", out, spy.StateSaves, spy.Publishes)
+				}
+				return
+			}
 			want := []string{"lock", "load-state", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
 			if !reflect.DeepEqual(spy.Trace, want) {
 				t.Fatalf("trace=%v want=%v", spy.Trace, want)
@@ -429,6 +528,12 @@ func TestManualProviderCommandsUseSingleLockedTransactionCycle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := newCoordinatorSpy().withTargets("global", validTargetKey)
 			out := tc.call(&spy.Coordinator)
+			if tc.name == "enable" || tc.name == "reset" {
+				if !out.Accepted || !out.HandledWithoutRevision || spy.StateSaves != 0 || spy.Publishes != 0 {
+					t.Fatalf("manual no-op out=%+v saves=%d publishes=%d", out, spy.StateSaves, spy.Publishes)
+				}
+				return
+			}
 			want := []string{"lock", "load-state", "recover", "load-policy", "load-state", tc.transition, "reconcile", "publish-targets", "save-state", "unlock"}
 			if !reflect.DeepEqual(spy.Trace, want) {
 				t.Fatalf("trace=%v want=%v", spy.Trace, want)

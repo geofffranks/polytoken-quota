@@ -196,30 +196,37 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
 | `doctor [--json]` | Run configuration, quota, journal, and persisted-error diagnostics. |
-| `history [--limit N] [--revision N] [--json]` | Show recent reconcile change history. `--limit` (1–100, default 20) lists newest summaries; `--revision` shows full detail for one revision; `--json` emits deterministic JSON. |
+| `history [--limit N] [--revision N] [--json]` | Show the meaningful provider/routing event timeline. `--limit` (1–100, default 20) limits event rows; `--revision` shows all events for one revision; `--json` emits deterministic structured events. |
 
 Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
 
-## Reconcile history
+## Meaningful event history
 
-`polytoken-quota` retains up to the newest 100 reconcile transactions that proved at least one managed-field byte change, subject to a 4 MiB aggregate history ceiling. History is persisted inside `state.json` and committed atomically with the accepted revision and target outcomes.
+`polytoken-quota history` is a newest-first timeline of meaningful provider and routing events, not a generic reconcile counter. It records quota low/reached/reset transitions, provider failures/recoveries, manual disable/enable/reset actions, ignored stale hooks, quota-poll failures, and routing changes such as rank, eligibility, pace explanation, or peak/off-peak changes. Unchanged quota observations and unchanged routing decisions are suppressed.
 
-**Qualification:** Only reconciles where at least one target has a proven old/new managed-file byte difference consume retention. Dry runs, rejected/stale events, converged equal-byte plans, and failures before revision acceptance are excluded.
+```text
+EVENT HISTORY
+Reported at: 2026-08-14 02:30:00 UTC
 
-**Triggers:** Each history record captures the typed trigger that initiated the reconcile — `init`, `hook`, `reconcile`, `routing-disable`, `routing-enable`, `routing-reset`, `quota-check`, `set`, or `clear` — with kind-relevant sanitized evidence (event type, provider alias, mapping ID, patch values).
-
-**Tiers:** Full-tier records retain shared provider modes/reasons, ranking, desired/effective chains, and changed managed-field edits per target. Aggregate-tier records (used when targets exceed 64 or the record exceeds 256 KiB) retain authoritative counts and compact target entries (ID, outcome, bounded pending detail) with explicit truncation indicators.
-
-**Privacy:** History never stores credentials, account names, auth values, raw errors, complete files, staging roots, absolute paths, or process information. All identifiers and free text are sanitized and bounded.
-
-```sh
-polytoken-quota history                    # newest 20 summaries
-polytoken-quota history --limit 50         # newest 50 summaries
-polytoken-quota history --revision 42      # full detail for revision 42
-polytoken-quota history --json             # deterministic JSON summary
+WHEN                 PROVIDER   EVENT                    RESULT
+2026-08-14 02:22:35  zai        quota_reached             disabled; removed from managed chains
+2026-08-13 14:04:03  codex      routing_changed           rank 1 -> 3; over pace
+2026-08-13 10:19:59  zai        provider_recovered        available; quota remains exhausted
+2026-08-13 10:15:00  zai        quota_low                 IGNORED; stale quota event
 ```
 
-An empty history succeeds with `No reconcile changes recorded.` A revision absent from retained history exits `1`.
+```sh
+polytoken-quota history                    # newest 20 meaningful events
+polytoken-quota history --limit 50         # newest 50 event rows
+polytoken-quota history --revision 42      # all events attached to revision 42
+polytoken-quota history --json             # deterministic structured event JSON
+```
+
+`--revision` is the forensic view for one state revision and includes every event recorded for that revision. Valid stale or duplicate hooks are durably recorded as `IGNORED` audit events without changing provider state or target files and return exit `0` after the event is saved. Malformed, contradictory, unknown, or ambiguous hook input is rejected with exit `1`. Accepted operations with pending targets or provider problems retain exit `2`.
+
+History queries are strictly read-only: they load `state.json` without acquiring the mutation lock, running recovery, reading live Polytoken files, or saving. On the first later mutating command after the schema upgrade, obsolete reconcile-history records are discarded and the new event-history model is written; operational provider state, manual controls, routing snapshots, and target outcomes are preserved. The history query itself never rewrites or deletes state.
+
+The event timeline is bounded and atomically persisted inside `state.json`. It never stores credentials, account names, auth values, raw errors, complete files, staging roots, arbitrary paths, or process information. Identifiers, explanations, statuses, and failure details are sanitized before save and display.
 
 ## Quota polling and routing
 

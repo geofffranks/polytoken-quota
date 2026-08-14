@@ -34,10 +34,25 @@ type HistoryDetailReport struct {
 	Found      bool
 }
 
+// HistoryEventReport is the newest-first event timeline query result.
+type HistoryEventReport struct {
+	ReportedAt    time.Time
+	Events        []state.EventRecord
+	OmittedEvents int
+}
+
+// HistoryRevisionReport is the event/evidence query result for one revision.
+type HistoryRevisionReport struct {
+	ReportedAt time.Time
+	Revision   uint64
+	Events     []state.EventRecord
+	Found      bool
+}
+
 // HistoryQuerier is the CLI-facing history query interface.
 type HistoryQuerier interface {
-	Summaries(limit int) (HistorySummaryReport, error)
-	Detail(revision uint64) (HistoryDetailReport, error)
+	Events(limit int) (HistoryEventReport, error)
+	RevisionEvents(revision uint64) (HistoryRevisionReport, error)
 }
 
 // HistoryReader reads durable reconcile history from state. It loads state
@@ -58,8 +73,98 @@ func NewHistoryReader(store StateStore, clock func() time.Time) *HistoryReader {
 	return &HistoryReader{Store: store, Clock: clock}
 }
 
-// Summaries returns the newest N records as deep-copied summaries. A limit
-// of 0 or less returns all retained records.
+// Events returns the newest N meaningful events as deep copies. A limit of 0 or
+// less returns all retained events. It never saves or performs migration.
+func (r *HistoryReader) Events(limit int) (HistoryEventReport, error) {
+	s, err := r.Store.LoadState()
+	if err != nil {
+		return HistoryEventReport{}, err
+	}
+	now := r.Clock()
+	events := append([]state.EventRecord(nil), s.EventHistory.Events...)
+	if limit > 0 && limit < len(events) {
+		events = events[:limit]
+	}
+	for i := range events {
+		events[i] = copyEvent(events[i])
+	}
+	if events == nil {
+		events = []state.EventRecord{}
+	}
+	return HistoryEventReport{ReportedAt: now, Events: events, OmittedEvents: s.EventHistory.OmittedEvents}, nil
+}
+
+// RevisionEvents returns all meaningful events attached to a state revision as
+// deep copies. It never saves or performs migration.
+func (r *HistoryReader) RevisionEvents(revision uint64) (HistoryRevisionReport, error) {
+	s, err := r.Store.LoadState()
+	if err != nil {
+		return HistoryRevisionReport{}, err
+	}
+	now := r.Clock()
+	var events []state.EventRecord
+	for _, event := range s.EventHistory.Events {
+		if event.Revision == revision {
+			events = append(events, copyEvent(event))
+		}
+	}
+	if events == nil {
+		return HistoryRevisionReport{ReportedAt: now, Revision: revision}, nil
+	}
+	return HistoryRevisionReport{ReportedAt: now, Revision: revision, Events: events, Found: true}, nil
+}
+
+func copyEvent(in state.EventRecord) state.EventRecord {
+	out := in
+	out.Changes = append([]string(nil), in.Changes...)
+	for _, p := range []*float64{in.UsagePercent, in.Used, in.Limit} {
+		_ = p
+	}
+	if in.UsagePercent != nil {
+		v := *in.UsagePercent
+		out.UsagePercent = &v
+	}
+	if in.Used != nil {
+		v := *in.Used
+		out.Used = &v
+	}
+	if in.Limit != nil {
+		v := *in.Limit
+		out.Limit = &v
+	}
+	if in.ResetAt != nil {
+		v := *in.ResetAt
+		out.ResetAt = &v
+	}
+	if in.OldRank != nil {
+		v := *in.OldRank
+		out.OldRank = &v
+	}
+	if in.NewRank != nil {
+		v := *in.NewRank
+		out.NewRank = &v
+	}
+	if in.OldEligible != nil {
+		v := *in.OldEligible
+		out.OldEligible = &v
+	}
+	if in.NewEligible != nil {
+		v := *in.NewEligible
+		out.NewEligible = &v
+	}
+	if in.OldOffPeak != nil {
+		v := *in.OldOffPeak
+		out.OldOffPeak = &v
+	}
+	if in.NewOffPeak != nil {
+		v := *in.NewOffPeak
+		out.NewOffPeak = &v
+	}
+	return out
+}
+
+// Summaries returns the newest N legacy records for compatibility with internal
+// callers during the CLI migration. New callers must use Events.
 func (r *HistoryReader) Summaries(limit int) (HistorySummaryReport, error) {
 	s, err := r.Store.LoadState()
 	if err != nil {

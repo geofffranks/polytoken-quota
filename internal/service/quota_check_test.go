@@ -141,6 +141,29 @@ func TestQuotaCheckPollOnlyUpdatesBothProviders(t *testing.T) {
 // never blocks a valid one: the successful provider's snapshot is updated while
 // the failed provider's QuotaSnapshot is PRESERVED and only QuotaAttempt
 // reflects the failure. Exit code is pending (Problem=true).
+func TestQuotaCheckFailureRecordsEvent(t *testing.T) {
+	spy := newQuotaCheckSpy()
+	spy.Coordinator.Policy = quotaCheckPolicyLoader{}
+	p := pollerOf(spy)
+	p.results["codex"] = failedSnap("codex", "Bearer SECRET account=alice")
+	out := spy.Coordinator.QuotaCheck(context.Background(), "", false)
+	if !out.Accepted || !out.Problem {
+		t.Fatalf("out=%+v", out)
+	}
+	found := false
+	for _, e := range spy.LastSaved.EventHistory.Events {
+		if e.Category == state.EventQuotaFailure && e.Result == state.EventFailed {
+			found = true
+			if strings.Contains(e.Reason, "SECRET") {
+				t.Fatal("unsanitized failure")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("events=%+v", spy.LastSaved.EventHistory)
+	}
+}
+
 func TestQuotaCheckIndependentFailurePreservesLastGood(t *testing.T) {
 	spy := newQuotaCheckSpy()
 	spy.Coordinator.Policy = quotaCheckPolicyLoader{}
@@ -377,8 +400,8 @@ func TestQuotaCheckCrashMatrixAfterPoll(t *testing.T) {
 	out := spy.Coordinator.QuotaCheck(context.Background(), "", false)
 
 	// Poll succeeded, but persistence failed, so the transaction is rejected.
-	if out.Accepted || out.Error == nil {
-		t.Fatalf("expected rejected outcome with save error: %+v", out)
+	if out.Accepted || !out.DurabilityFailure || out.Error == nil {
+		t.Fatalf("expected rejected durability outcome with save error: %+v", out)
 	}
 	// No state committed: the on-disk base is unchanged.
 	if crashStore.committed != nil {
@@ -518,8 +541,8 @@ func TestQuotaCheckPollOnlyCrashAtSaveBoundaryRealStore(t *testing.T) {
 
 	out := spy.Coordinator.QuotaCheck(context.Background(), "", false)
 
-	if out.Accepted || out.Error == nil {
-		t.Fatalf("expected rejected outcome with save fault error: %+v", out)
+	if out.Accepted || !out.DurabilityFailure || out.Error == nil {
+		t.Fatalf("expected rejected durability outcome with save fault error: %+v", out)
 	}
 	got := loadStateStore(t, store.Path)
 	if got.Revision != 1 {

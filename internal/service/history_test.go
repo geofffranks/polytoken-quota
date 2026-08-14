@@ -24,6 +24,51 @@ func (s *countingStore) LoadState() (state.State, error) {
 
 func (s *countingStore) Save(st state.State) error { return nil }
 
+func TestEventHistoryQueryReadsStateOnceAndReturnsNewestEvents(t *testing.T) {
+	at := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	store := &countingStore{state: state.State{EventHistory: state.EventHistory{Events: []state.EventRecord{
+		{Sequence: 3, Revision: 3, Ordinal: 0, At: at.Add(2 * time.Minute), RecordedAt: at, Category: state.EventHook, Action: "quota_reached", Provider: "zai", Result: state.EventChanged},
+		{Sequence: 2, Revision: 2, Ordinal: 0, At: at.Add(time.Minute), RecordedAt: at, Category: state.EventHook, Action: "quota_low", Provider: "codex", Result: state.EventChanged},
+		{Sequence: 1, Revision: 1, Ordinal: 0, At: at, RecordedAt: at, Category: state.EventManual, Action: "disable", Provider: "minime", Result: state.EventChanged},
+	}}}}
+	clockCalls := 0
+	reader := NewHistoryReader(store, func() time.Time { clockCalls++; return at })
+	report, err := reader.Events(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.loadCall != 1 || clockCalls != 1 {
+		t.Fatalf("loads/clocks=%d/%d", store.loadCall, clockCalls)
+	}
+	if len(report.Events) != 2 || report.Events[0].Sequence != 3 || report.Events[1].Sequence != 2 {
+		t.Fatalf("events=%+v", report.Events)
+	}
+	if report.Events[0].Provider == "" {
+		t.Fatal("provider missing")
+	}
+}
+
+func TestEventHistoryRevisionQueryIncludesAllEventsAndDeepCopies(t *testing.T) {
+	at := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	store := &countingStore{state: state.State{EventHistory: state.EventHistory{Events: []state.EventRecord{
+		{Sequence: 4, Revision: 7, Ordinal: 1, At: at, RecordedAt: at, Category: state.EventRoutingChange, Action: "routing_changed", Provider: "zai", Result: state.EventChanged, Changes: []string{"one"}},
+		{Sequence: 3, Revision: 7, Ordinal: 0, At: at, RecordedAt: at, Category: state.EventHook, Action: "quota_reached", Provider: "zai", Result: state.EventChanged},
+	}}}}
+	reader := NewHistoryReader(store, func() time.Time { return at })
+	report, err := reader.RevisionEvents(7)
+	if err != nil || !report.Found {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	if len(report.Events) != 2 {
+		t.Fatalf("events=%+v", report.Events)
+	}
+	report.Events[0].Changes[0] = "changed"
+	again, _ := reader.RevisionEvents(7)
+	if again.Events[0].Changes[0] == "changed" {
+		t.Fatal("query aliases persisted event")
+	}
+}
+
 // TestHistoryReadsStateExactlyOnceAndNothingElse verifies that Summaries and
 // Detail each load state exactly once and sample the clock exactly once.
 func TestHistoryReadsStateExactlyOnceAndNothingElse(t *testing.T) {

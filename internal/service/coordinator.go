@@ -201,6 +201,20 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	}()
 
 	var initExisting bool
+	if kind == txEvent {
+		if !validEvent(in.Event) {
+			return Outcome{Accepted: false, Error: errHookRejected}
+		}
+		// Hook identity qualification is deliberately before state load/recovery:
+		// rejected hooks must not trigger publisher recovery or any mutation.
+		desired, err := c.Policy.LoadPolicy()
+		if err != nil {
+			return Outcome{Accepted: false, Error: err}
+		}
+		if err := qualifyHookEvent(desired, *in.Event); err != nil {
+			return Outcome{Accepted: false, Error: err}
+		}
+	}
 	if kind == txInit {
 		_, err := c.Policy.LoadPolicy()
 		switch {
@@ -291,7 +305,7 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	c.recordHistoryIfQualified(&next, txInit, in, outcomes, initTargets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
@@ -299,39 +313,194 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 // transactEvent accepts a hook event and reconciles all targets with a detailed
 // per-target trace.
 func (c *Coordinator) transactEvent(ctx context.Context, recovered state.State, in transactionInput) Outcome {
-	if !validEvent(in.Event) {
-		return Outcome{Accepted: false, Error: errHookRejected}
-	}
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	c.step("load-state")
 	observed := recovered
+	if observed.NextArrivalSequence == 0 {
+		observed.NextArrivalSequence = nextArrivalSequence(observed)
+	}
+	arrivalSeq := observed.NextArrivalSequence
+	arrival := state.Arrival{Sequence: arrivalSeq, ReceivedAt: c.now()}
+	next, accepted, diag, err := state.ApplyEvent(observed, *in.Event, arrival)
+	if err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
+	next.NextArrivalSequence = arrivalSeq + 1
+	if !accepted {
+		event := eventFromHook(*in.Event, observed, next, state.EventIgnored, diag.Summary, arrivalSeq, observed.Revision, c.now())
+		event.Sequence = nextEventSequence(&next)
+		next.EventHistory, err = state.AppendEvent(next.EventHistory, event)
+		if err != nil {
+			return Outcome{Accepted: false, Error: err}
+		}
+		c.step("save-state")
+		if err := c.State.Save(next); err != nil {
+			return Outcome{Accepted: false, DurabilityFailure: true, Error: err}
+		}
+		return Outcome{Accepted: true, HandledWithoutRevision: true, Revision: observed.Revision}
+	}
+	next.Revision = observed.Revision + 1
+	result := state.EventChanged
+	reason := ""
+	if diag.Code == "no-change" {
+		result = state.EventNoChange
+		reason = diag.Summary
+	}
+	event := eventFromHook(*in.Event, observed, next, result, reason, arrivalSeq, next.Revision, c.now())
+	event.Sequence = nextEventSequence(&next)
+	next.EventHistory, err = state.AppendEvent(next.EventHistory, event)
+	if err != nil {
+		return Outcome{Accepted: false, Error: err}
+	}
+	if result == state.EventNoChange {
+		c.step("save-state")
+		if err := c.State.Save(next); err != nil {
+			return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Error: err}
+		}
+		return Outcome{Accepted: true, Revision: next.Revision, HandledWithoutRevision: true}
+	}
+	if desired.Routing.Enabled {
+		next = appendRoutingEvents(next, desired, observed, c.now())
+	}
 	c.step("load-sources")
 	targets, err := c.Targets.ResolveTargets(desired)
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	c.step("accept-revision")
-	arrival := state.Arrival{Sequence: observed.Revision + 1, ReceivedAt: c.now()}
-	next, accepted, _, err := state.ApplyEvent(observed, *in.Event, arrival)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
-	}
-	if !accepted {
-		return Outcome{Accepted: false, Error: errStaleEvent}
-	}
-	next.Revision = observed.Revision + 1
 	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
 	next = c.recordTargetOutcomes(next, outcomes)
-	c.recordHistoryIfQualified(&next, txEvent, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
+}
+
+func nextArrivalSequence(s state.State) uint64 {
+	max := uint64(0)
+	for _, ps := range s.Providers {
+		if ps.QuotaArrival > max {
+			max = ps.QuotaArrival
+		}
+		if ps.AvailabilityArrival > max {
+			max = ps.AvailabilityArrival
+		}
+	}
+	if max == ^uint64(0) {
+		return 0
+	}
+	return max + 1
+}
+
+func nextEventSequence(s *state.State) uint64 {
+	if s.NextEventSequence == 0 {
+		s.NextEventSequence = 1
+	}
+	seq := s.NextEventSequence
+	if seq == ^uint64(0) {
+		return seq
+	}
+	s.NextEventSequence++
+	return seq
+}
+
+func qualifyHookEvent(desired policy.Desired, event hook.Event) error {
+	owners := 0
+	for _, mapping := range desired.Providers {
+		for _, provider := range mapping.CodexBarProviders {
+			if provider == event.Provider {
+				owners++
+			}
+		}
+	}
+	if owners != 1 {
+		return fmt.Errorf("service: hook provider %q is unknown or ambiguous", sanitizeFailure(event.Provider))
+	}
+	return nil
+}
+
+func eventFromHook(e hook.Event, prior, next state.State, result state.EventResult, reason string, arrival, revision uint64, now time.Time) state.EventRecord {
+	before := prior.Providers[e.Provider]
+	after := next.Providers[e.Provider]
+	return state.EventRecord{ArrivalSequence: arrival, Revision: revision, At: e.Timestamp.UTC(), RecordedAt: now.UTC(), Category: state.EventHook, Action: string(e.Type), Provider: e.Provider, Result: result, Reason: reason, BeforeQuota: before.Quota, AfterQuota: after.Quota, BeforeAvail: before.Availability, AfterAvail: after.Availability, BeforeMode: state.EffectiveMode(before), AfterMode: state.EffectiveMode(after), UsagePercent: e.UsagePercent, Used: e.Used, Limit: e.Limit, ResetAt: e.ResetAt, Status: optionalString(e.Status)}
+}
+
+func appendRoutingEvents(next state.State, desired policy.Desired, prior state.State, now time.Time) state.State {
+	_, ranking := ComputeRanking(desired, next, now)
+	providers := make(map[string]state.ProviderState, len(next.Providers))
+	for k, v := range next.Providers {
+		providers[k] = v
+	}
+	for _, entry := range ranking.Entries {
+		mapping := desired.Providers[policy.MappingID(entry.MappingID)]
+		decision := state.RoutingDecision{Rank: entry.Rank, Eligible: entry.Eligible, OffPeak: entry.OffPeak, Explanation: entry.Explanation, EvaluatedAt: now.UTC()}
+		changed := false
+		for _, alias := range mapping.CodexBarProviders {
+			ps := providers[alias]
+			old := ps.Routing.Decision
+			if old == nil || old.Rank != decision.Rank || old.Eligible != decision.Eligible || old.OffPeak != decision.OffPeak || old.Explanation != decision.Explanation {
+				changed = true
+			}
+			ps.Routing.Decision = &decision
+			ps.Routing.LastRank = entry.Rank
+			ps.Routing.LastDecisionAt = now.UTC()
+			ps.Routing.LastAppliedRevision = next.Revision
+			providers[alias] = ps
+		}
+		if changed {
+			e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: now.UTC(), RecordedAt: now.UTC(), Category: state.EventRoutingChange, Action: "routing_changed", MappingID: entry.MappingID, Result: state.EventChanged, Reason: entry.Explanation, NewRank: eventIntPtr(entry.Rank), NewEligible: eventBoolPtr(entry.Eligible), NewOffPeak: eventBoolPtr(entry.OffPeak), Explanation: entry.Explanation}
+			next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
+		}
+	}
+	next.Providers = providers
+	return next
+}
+
+func eventIntPtr(v int) *int    { return &v }
+func eventBoolPtr(v bool) *bool { return &v }
+
+func optionalString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func trackedProviders(s state.State) []string {
+	out := make([]string, 0, len(s.Providers))
+	for provider := range s.Providers {
+		out = append(out, provider)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func appendManualEvent(next, prior state.State, kind transactionKind, in transactionInput, now time.Time) state.State {
+	action := ""
+	switch kind {
+	case txDisable:
+		action = string(state.TriggerRoutingDisable)
+	case txEnable:
+		action = string(state.TriggerRoutingEnable)
+	case txReset:
+		action = string(state.TriggerRoutingReset)
+	case txSet:
+		action = string(state.TriggerSet)
+	case txClear:
+		action = string(state.TriggerClear)
+	default:
+		return next
+	}
+	mapping := in.Provider
+	if mapping == "" && in.Selector.Provider != "" {
+		mapping = in.Selector.Provider
+	}
+	e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: now.UTC(), RecordedAt: now.UTC(), Category: state.EventManual, Action: action, MappingID: mapping, Result: state.EventChanged}
+	next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
+	return next
 }
 
 // transactReconcile regenerates candidates. Dry-run reports intent without
@@ -363,7 +532,7 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	c.recordHistoryIfQualified(&next, txReconcile, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }
@@ -406,6 +575,19 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	changed := true
+	if kind == txDisable {
+		changed = state.ManualDisableChanged(observed, mapping.CodexBarProviders, true)
+	}
+	if kind == txEnable {
+		changed = state.ManualDisableChanged(observed, mapping.CodexBarProviders, false)
+	}
+	if kind == txReset {
+		changed = state.ManualDisableChanged(observed, trackedProviders(observed), false)
+	}
+	if !changed {
+		return Outcome{Accepted: true, HandledWithoutRevision: true, Revision: observed.Revision}
+	}
 	next.Revision = observed.Revision + 1
 	c.step("reconcile")
 	targets, err := c.Targets.ResolveTargets(desired)
@@ -414,7 +596,7 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 		outcomes := []TargetOutcome{pending}
 		next = c.recordTargetOutcomes(next, outcomes)
 		if saveErr := c.State.Save(next); saveErr != nil {
-			return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: fmt.Errorf("%w (state save: %v)", err, saveErr)}
+			return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: fmt.Errorf("%w (state save: %v)", err, saveErr)}
 		}
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
@@ -425,10 +607,11 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
+	next = appendManualEvent(next, observed, kind, in, c.now())
 	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }
@@ -456,6 +639,16 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	changed := true
+	if kind == txSet {
+		changed = state.SetChanged(observed, in.Provider, in.Patch)
+	}
+	if kind == txClear {
+		changed = state.ClearChanged(observed, in.Selector)
+	}
+	if !changed {
+		return Outcome{Accepted: true, HandledWithoutRevision: true, Revision: observed.Revision}
+	}
 	next.Revision = observed.Revision + 1
 	c.step("reconcile")
 	targets, err := c.Targets.ResolveTargets(desired)
@@ -471,10 +664,11 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
 	next = c.recordTargetOutcomes(next, outcomes)
+	next = appendManualEvent(next, observed, kind, in, c.now())
 	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
-		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
+		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }

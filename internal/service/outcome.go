@@ -29,9 +29,18 @@ type TargetOutcome struct {
 // operation was rejected (e.g. init refused to overwrite desired.yaml).
 type Outcome struct {
 	Accepted bool
-	Revision uint64
-	Targets  []TargetOutcome
-	Error    error
+	// HandledWithoutRevision is true when a valid command was durably processed
+	// without target mutation. Ignored stale hooks and idempotent manual no-ops
+	// also leave the revision unchanged; an equal-timestamp no-change event may
+	// advance arrival/revision metadata while still skipping target processing.
+	HandledWithoutRevision bool
+	// DurabilityFailure distinguishes a save failure from an ordinary rejection;
+	// both are non-success at the CLI boundary, but the flag prevents callers from
+	// claiming that an event was durable.
+	DurabilityFailure bool
+	Revision          uint64
+	Targets           []TargetOutcome
+	Error             error
 	// Problem is true when an accepted observation transition left a pending
 	// provider problem (a failed poll attempt) even when no target is pending.
 	// The CLI maps it to exit code 2 alongside PendingCount. It is set only by

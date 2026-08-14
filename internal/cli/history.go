@@ -100,7 +100,7 @@ func runHistory(args []string, deps Dependencies, stdout, stderr io.Writer) int 
 }
 
 func runHistorySummary(flags historyFlags, deps Dependencies, stdout, stderr io.Writer) int {
-	report, err := deps.HistoryQuerier.Summaries(flags.limit)
+	report, err := deps.HistoryQuerier.Events(flags.limit)
 	if err != nil {
 		if flags.json {
 			writeHistoryJSONError(stdout, err)
@@ -109,33 +109,24 @@ func runHistorySummary(flags historyFlags, deps Dependencies, stdout, stderr io.
 		}
 		return ExitRejected
 	}
-
 	if flags.json {
-		writeHistoryJSONSummary(stdout, report)
+		writeHistoryJSONEvents(stdout, report)
 		return ExitOK
 	}
-
-	if len(report.Records) == 0 {
-		fmt.Fprintln(stdout, "No reconcile changes recorded.")
+	if len(report.Events) == 0 {
+		fmt.Fprintln(stdout, "No provider or routing events recorded.")
 		return ExitOK
 	}
-
-	fmt.Fprintf(stdout, "Reported at: %s\n\n", report.ReportedAt.Format("2006-01-02 15:04:05 UTC"))
-	fmt.Fprintf(stdout, "%-8s %-20s %-18s %-8s %-8s\n", "REV", "COMPLETED", "TRIGGER", "APPLIED", "PENDING")
-	for _, r := range report.Records {
-		fmt.Fprintf(stdout, "%-8d %-20s %-18s %-8d %-8d\n",
-			r.Revision,
-			r.CompletedAt.Format("2006-01-02 15:04:05"),
-			string(r.Trigger.Kind),
-			r.Applied,
-			r.Pending,
-		)
+	fmt.Fprintf(stdout, "EVENT HISTORY\nReported at: %s\n\n", report.ReportedAt.Format("2006-01-02 15:04:05 UTC"))
+	fmt.Fprintf(stdout, "%-20s %-10s %-24s %s\n", "WHEN", "PROVIDER", "EVENT", "RESULT")
+	for _, event := range report.Events {
+		writeHistoryEventHuman(stdout, event)
 	}
 	return ExitOK
 }
 
 func runHistoryDetail(flags historyFlags, deps Dependencies, stdout, stderr io.Writer) int {
-	report, err := deps.HistoryQuerier.Detail(uint64(flags.revision))
+	report, err := deps.HistoryQuerier.RevisionEvents(uint64(flags.revision))
 	if err != nil {
 		if flags.json {
 			writeHistoryJSONError(stdout, err)
@@ -163,90 +154,60 @@ func runHistoryDetail(flags historyFlags, deps Dependencies, stdout, stderr io.W
 	return ExitOK
 }
 
-func writeHistoryDetailHuman(w io.Writer, report service.HistoryDetailReport) {
-	r := report.Record
-	fmt.Fprintf(w, "Revision:     %d\n", r.Revision)
-	fmt.Fprintf(w, "Completed:    %s\n", r.CompletedAt.Format("2006-01-02 15:04:05 UTC"))
-	fmt.Fprintf(w, "Trigger:      %s\n", string(r.Trigger.Kind))
-	fmt.Fprintf(w, "Tier:         %s\n", string(r.Tier))
-	fmt.Fprintf(w, "Targets:      %d total, %d applied, %d pending\n", r.Counts.Total, r.Counts.Applied, r.Counts.Pending)
-	if r.DetailTruncated {
-		fmt.Fprintf(w, "              %d targets omitted (detail truncated)\n", r.Counts.Omitted)
+func writeHistoryEventHuman(w io.Writer, event state.EventRecord) {
+	provider := event.Provider
+	if provider == "" {
+		provider = event.MappingID
 	}
-	if r.Trigger.Hook != nil {
-		fmt.Fprintf(w, "Hook Event:   %s on %s\n", r.Trigger.Hook.Event, r.Trigger.Hook.Provider)
+	result := event.Reason
+	if result == "" {
+		result = string(event.Result)
 	}
-	if r.Trigger.MappingID != "" {
-		fmt.Fprintf(w, "Mapping:      %s\n", r.Trigger.MappingID)
+	if event.AfterMode != "" && event.BeforeMode != event.AfterMode {
+		result = fmt.Sprintf("%s; mode %s -> %s", result, event.BeforeMode, event.AfterMode)
 	}
-	fmt.Fprintln(w)
+	if event.OldRank != nil && event.NewRank != nil && *event.OldRank != *event.NewRank {
+		result = fmt.Sprintf("%s; rank %d -> %d", result, *event.OldRank, *event.NewRank)
+	}
+	if event.Applied > 0 || event.Pending > 0 {
+		result = fmt.Sprintf("%s; applied=%d pending=%d", result, event.Applied, event.Pending)
+	}
+	fmt.Fprintf(w, "%-20s %-10s %-24s %s\n", event.At.Format("2006-01-02 15:04:05"), provider, event.Action, result)
+}
 
-	if r.Tier == "full" {
-		for _, p := range r.Providers {
-			fmt.Fprintf(w, "  Provider %-12s mode=%-10s reason=%s\n", p.MappingID, p.Mode, p.Reason)
-		}
-	}
-
-	for _, t := range r.Targets {
-		outcome := "applied"
-		if t.Outcome == state.OutcomePending {
-			outcome = "pending"
-		}
-		fmt.Fprintf(w, "  Target %-20s %s\n", t.ID, outcome)
-		for _, c := range t.Chains {
-			fmt.Fprintf(w, "    Chain %-30s effective=%v\n", c.Name, c.Effective)
-		}
-		for _, e := range t.Edits {
-			fmt.Fprintf(w, "    Edit %-20s %s = %s\n", e.File, e.Action, e.Detail)
-		}
-	}
-
-	for _, ct := range r.CompactTargets {
-		outcome := "applied"
-		if ct.Outcome == state.OutcomePending {
-			outcome = "pending"
-		}
-		fmt.Fprintf(w, "  Target %-20s %s\n", ct.ID, outcome)
+func writeHistoryDetailHuman(w io.Writer, report service.HistoryRevisionReport) {
+	fmt.Fprintf(w, "Revision: %d\n", report.Revision)
+	fmt.Fprintf(w, "Events:   %d\n\n", len(report.Events))
+	for _, event := range report.Events {
+		writeHistoryEventHuman(w, event)
 	}
 }
 
-func writeHistoryJSONSummary(w io.Writer, report service.HistorySummaryReport) {
-	type jsonRec struct {
-		Revision    uint64 `json:"revision"`
-		CompletedAt string `json:"completed_at"`
-		Trigger     string `json:"trigger"`
-		Applied     int    `json:"applied"`
-		Pending     int    `json:"pending"`
-	}
-	type jsonReport struct {
-		ReportedAt string    `json:"reported_at"`
-		Records    []jsonRec `json:"records"`
-	}
-	recs := make([]jsonRec, 0, len(report.Records))
-	for _, r := range report.Records {
-		recs = append(recs, jsonRec{
-			Revision:    r.Revision,
-			CompletedAt: r.CompletedAt.Format(time.RFC3339Nano),
-			Trigger:     string(r.Trigger.Kind),
-			Applied:     r.Applied,
-			Pending:     r.Pending,
-		})
-	}
-	if recs == nil {
-		recs = []jsonRec{}
-	}
+func writeHistoryJSONEvents(w io.Writer, report service.HistoryEventReport) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(jsonReport{
-		ReportedAt: report.ReportedAt.Format(time.RFC3339Nano),
-		Records:    recs,
-	})
+	_ = enc.Encode(struct {
+		ReportedAt    string              `json:"reported_at"`
+		OmittedEvents int                 `json:"omitted_events,omitempty"`
+		Events        []state.EventRecord `json:"events"`
+	}{report.ReportedAt.Format(time.RFC3339Nano), report.OmittedEvents, nonNilEvents(report.Events)})
 }
 
-func writeHistoryJSONDetail(w io.Writer, report service.HistoryDetailReport) {
+func writeHistoryJSONDetail(w io.Writer, report service.HistoryRevisionReport) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(report.Record)
+	_ = enc.Encode(struct {
+		ReportedAt string              `json:"reported_at"`
+		Revision   uint64              `json:"revision"`
+		Events     []state.EventRecord `json:"events"`
+	}{report.ReportedAt.Format(time.RFC3339Nano), report.Revision, nonNilEvents(report.Events)})
+}
+
+func nonNilEvents(events []state.EventRecord) []state.EventRecord {
+	if events == nil {
+		return []state.EventRecord{}
+	}
+	return events
 }
 
 func writeHistoryJSONError(w io.Writer, err error) {
