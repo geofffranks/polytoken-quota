@@ -40,6 +40,7 @@ type QuotaWindow struct {
 	Limit        *float64
 	UsagePercent *float64
 	ResetAt      *time.Time
+	Period       *time.Duration
 }
 
 // QuotaSnapshot is the aggregate observation for one provider mapping. It
