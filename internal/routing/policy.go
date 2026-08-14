@@ -360,11 +360,13 @@ const minProjectionPeriod = 24 * time.Hour
 // 0 and false when no qualifying window exists.
 //
 //	usedFrac    = 1 - remainingFraction
-//	elapsedFrac = clamp01(1 - (ResetAt - now) / Period)
+//	elapsedFrac = ceilToDay(clamp01(1 - (ResetAt - now) / Period))
 //	pace        = usedFrac / max(elapsedFrac, eps)
 //
-// pace < 1.0 → under-utilized (ranks first); pace > 1.0 → over-utilized.
-// A just-reset window (used≈0, elapsed≈0) yields pace ≈ 0.
+// Elapsed time is rounded up to whole days before normalization. This avoids
+// transient pace spikes immediately after a reset while retaining a small
+// epsilon for a window that has not reached its first day. Pace < 1.0 →
+// under-utilized (ranks first); pace > 1.0 → over-utilized.
 func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
 	if snap == nil {
 		return 0, false
@@ -391,12 +393,17 @@ func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok boo
 	rem := anchor.Remaining()
 	usedFrac := 1.0 - *rem
 	timeToReset := anchor.ResetAt.Sub(now)
-	elapsedFrac := 1.0 - float64(timeToReset)/float64(*anchor.Period)
-	if elapsedFrac < 0 {
-		elapsedFrac = 0
-	} else if elapsedFrac > 1 {
-		elapsedFrac = 1
+	elapsed := *anchor.Period - timeToReset
+	if elapsed < 0 {
+		elapsed = 0
+	} else if elapsed > *anchor.Period {
+		elapsed = *anchor.Period
 	}
+	// Quantize elapsed time upward so a newly reset quota is measured against
+	// one day, not a few minutes or seconds. This makes pace stable enough for
+	// periodic reconciliation while preserving the full-period endpoint.
+	elapsed = ((elapsed + 24*time.Hour - 1) / (24 * time.Hour)) * (24 * time.Hour)
+	elapsedFrac := float64(elapsed) / float64(*anchor.Period)
 	eps := float64(5*time.Minute) / float64(*anchor.Period)
 	if elapsedFrac < eps {
 		elapsedFrac = eps
