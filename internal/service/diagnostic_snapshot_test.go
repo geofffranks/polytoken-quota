@@ -405,8 +405,11 @@ func TestRoutingViewIncludesClassifierAndConcreteSources(t *testing.T) {
 		t.Fatalf("explain selector incomplete: %+v", explain)
 	}
 	for i := range bare.Routes {
-		if !reflect.DeepEqual(bare.Routes[i].Effective, explain.Routes[i].Effective) || len(explain.Routes[i].Desired) == 0 {
-			t.Fatalf("selector route mismatch at %d: bare=%+v explain=%+v", i, bare.Routes[i], explain.Routes[i])
+		if len(bare.Routes[i].Effective) == 0 {
+			t.Fatalf("bare route lost effective chain at %d: %+v", i, bare.Routes[i])
+		}
+		if explain.Routes[i].Desired == "" || explain.Routes[i].Effective == "" {
+			t.Fatalf("explain route lost scalar values at %d: %+v", i, explain.Routes[i])
 		}
 	}
 	encoded, err := json.Marshal(struct {
@@ -423,9 +426,9 @@ func TestRoutingViewIncludesClassifierAndConcreteSources(t *testing.T) {
 	}
 
 	bare.Routes[0].Effective[0] = "mutated"
-	explain.Routes[0].Desired[0] = "mutated"
+	explain.Routes[0].Desired = "mutated"
 	again := snapshot.RoutingExplainView()
-	if again.Routes[0].Effective[0] == "mutated" || again.Routes[0].Desired[0] == "mutated" {
+	if again.Routes[0].Effective == "mutated" || again.Routes[0].Desired == "mutated" {
 		t.Fatal("routing selector mutation reached shared snapshot")
 	}
 }
@@ -447,6 +450,80 @@ func TestRoutingExplainComplete(t *testing.T) {
 	}
 	if len(explain.Routes) == 0 || !reflect.DeepEqual(explain.Routes[0].Desired, explain.Routes[0].Effective) {
 		t.Fatalf("disabled routing effective chain is not baseline: %+v", explain.Routes)
+	}
+}
+
+func TestRoutingExplainUsesDedicatedScalarProjection(t *testing.T) {
+	snapshot := DiagnosticSnapshot{
+		routingEnabled: true,
+		ranks:          []RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak"}},
+		routes: []RouteProjection{{
+			TargetID: "global", Name: "full", SourcePath: "config.yaml",
+			Desired:   []string{"codex/gpt-5.6-luna(high)", "zai/glm-5.2"},
+			Effective: []string{"zai/glm-5.2", "codex/gpt-5.6-luna(high)"},
+		}},
+	}
+	snapshot.explainRanks = projectExplainRanks(snapshot.ranks)
+	snapshot.explainRoutes = projectExplainRoutes(snapshot.routes)
+
+	report := snapshot.RoutingExplainView()
+	if got := report.Routes[0].Desired; got != "codex/gpt-5.6-luna(high)" {
+		t.Fatalf("explain desired=%q, want top model", got)
+	}
+	if got := report.Routes[0].Effective; got != "zai/glm-5.2" {
+		t.Fatalf("explain effective=%q, want selected model", got)
+	}
+	if got := report.Ranks[0].Status; got != "ready" {
+		t.Fatalf("explain status=%q, want ready", got)
+	}
+	bare := snapshot.RoutingView()
+	if got := bare.Routes[0].SourcePath; got != "config.yaml" {
+		t.Fatalf("bare routing source=%q, want config.yaml", got)
+	}
+	if got := bare.Routes[0].TargetID; got != "global" {
+		t.Fatalf("bare routing target=%q, want global", got)
+	}
+	if got := bare.Routes[0].Desired; len(got) != 0 {
+		t.Fatalf("bare routing should not expose desired chain, got %v", got)
+	}
+	if got := bare.Routes[0].Effective; len(got) != 2 {
+		t.Fatalf("shared full-chain effective projection changed: %v", got)
+	}
+}
+
+func TestRoutingExplainEmptyModelsUseNone(t *testing.T) {
+	snapshot := DiagnosticSnapshot{routes: []RouteProjection{{Name: "empty"}}}
+	snapshot.explainRoutes = projectExplainRoutes(snapshot.routes)
+	report := snapshot.RoutingExplainView()
+	if got := report.Routes[0].Desired; got != "none" {
+		t.Fatalf("empty desired=%q, want none", got)
+	}
+	if got := report.Routes[0].Effective; got != "none" {
+		t.Fatalf("empty effective=%q, want none", got)
+	}
+}
+
+func TestRoutingExplainPendingTargetsSanitizedAndCopied(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.observed.Targets = map[string]state.TargetState{
+		"z-project": {Pending: &state.ApplyFailure{}},
+		"a-project": {Pending: &state.ApplyFailure{}},
+		"bad:key":   {Pending: &state.ApplyFailure{}},
+		"bad\nkey":  {Pending: &state.ApplyFailure{}},
+	}
+	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())
+	report := snapshot.RoutingExplainView()
+	want := []string{"<invalid>", "a-project", "z-project"}
+	if !reflect.DeepEqual(report.PendingTargets, want) {
+		t.Fatalf("pending targets=%v, want %v", report.PendingTargets, want)
+	}
+	if d.stateLoads != 1 {
+		t.Fatalf("state loads=%d, want 1", d.stateLoads)
+	}
+	report.PendingTargets[0] = "mutated"
+	again := snapshot.RoutingExplainView()
+	if !reflect.DeepEqual(again.PendingTargets, want) {
+		t.Fatalf("pending targets were not copied: %v", again.PendingTargets)
 	}
 }
 

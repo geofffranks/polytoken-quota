@@ -93,15 +93,15 @@ var helpDocs = map[string]helpDoc{
 			{"--json", "Output JSON (bare and explain)"},
 		},
 		subcommands: []subcommandDoc{
-			{"explain", "Show full routing ranks and effective chains"},
+			{"explain", "Show routing readiness and selected desired/effective models"},
 			{"enable", "Enable routing for a provider"},
 			{"disable", "Disable routing for a provider"},
 			{"reset", "Reset routing overrides to defaults"},
 		},
 	},
 	"routing explain": {
-		short: "Show full routing ranks and effective chains",
-		long:  "Show the full ranking of routing candidates with desired and effective chains.",
+		short: "Show routing readiness and selected desired/effective models",
+		long:  "Show provider readiness as ready or not ready and the selected desired and effective model for each route. Pending targets may not be live; run polytoken-quota doctor to diagnose.",
 		usage: []string{"polytoken-quota routing explain [--json]"},
 		flags: []flagDoc{
 			{"--json", "Output JSON"},

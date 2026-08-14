@@ -15,6 +15,12 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
+const routingPendingWarningSuffix = "; run polytoken-quota doctor"
+
+func routingPendingWarning(targets []string) string {
+	return "routing data may not be live for pending targets: " + strings.Join(targets, ", ") + routingPendingWarningSuffix
+}
+
 // runRouting dispatches the routing subcommands.
 func runRouting(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
 	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {

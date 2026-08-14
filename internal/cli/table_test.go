@@ -129,13 +129,13 @@ func TestRoutingTextANSIAlignment(t *testing.T) {
 func TestRoutingExplainTextANSIAlignment(t *testing.T) {
 	report := service.RoutingExplainReport{
 		RoutingEnabled: true,
-		Ranks: []service.RankEntryReport{
-			{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "healthy"},
-			{MappingID: "a-much-longer-provider", Rank: 1, OffPeak: true, Eligible: true, Explanation: "off peak"},
+		Ranks: []service.ExplainRankProjection{
+			{MappingID: "codex", Status: "ready", Eligible: true, Explanation: "healthy"},
+			{MappingID: "a-much-longer-provider", Status: "ready", OffPeak: true, Eligible: true, Explanation: "off peak"},
 		},
-		Routes: []service.RouteProjection{
-			{TargetID: "global", SourcePath: "config.yaml", Name: "classifier", Desired: []string{"minime/qwen", "codex/gpt"}, Effective: []string{"minime/qwen", "codex/gpt"}},
-			{TargetID: "global", SourcePath: "subagents/researcher.md", Name: "Researcher", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}},
+		Routes: []service.ExplainRouteProjection{
+			{Name: "classifier", Desired: "minime/qwen", Effective: "minime/qwen"},
+			{Name: "Researcher", Desired: "codex/gpt", Effective: "codex/gpt"},
 		},
 	}
 	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeRoutingExplainText(out, report, s) })

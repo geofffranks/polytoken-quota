@@ -114,42 +114,53 @@ type rankJSON struct {
 	Rank        int    `json:"rank"`
 	OffPeak     bool   `json:"off_peak"`
 	Eligible    bool   `json:"eligible"`
+	Status      string `json:"status"`
 	Explanation string `json:"explanation"`
+}
+
+type explainRouteJSON struct {
+	Name      string `json:"name"`
+	Desired   string `json:"desired"`
+	Effective string `json:"effective"`
 }
 
 // routingExplainJSON is the normative top-level routing explain shape:
 //
 //	{"as_of":"...Z","routing_enabled":true,"ranks":[],"routes":[],"errors":[]}
 type routingExplainJSON struct {
-	AsOf           time.Time       `json:"as_of"`
-	RoutingEnabled bool            `json:"routing_enabled"`
-	Ranks          []rankJSON      `json:"ranks"`
-	Routes         []routeJSON     `json:"routes"`
-	Errors         []diagErrorJSON `json:"errors"`
-	Error          string          `json:"error,omitempty"`
+	AsOf           time.Time          `json:"as_of"`
+	RoutingEnabled bool               `json:"routing_enabled"`
+	Ranks          []rankJSON         `json:"ranks"`
+	Routes         []explainRouteJSON `json:"routes"`
+	PendingTargets *[]string          `json:"pending_targets,omitempty"`
+	Warning        string             `json:"warning,omitempty"`
+	Errors         []diagErrorJSON    `json:"errors"`
+	Error          string             `json:"error,omitempty"`
 }
 
 func routingExplainEnvelope(r service.RoutingExplainReport) routingExplainJSON {
 	out := routingExplainJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled, Error: r.Error}
+	if r.Error == "" {
+		pending := append([]string{}, r.PendingTargets...)
+		out.PendingTargets = &pending
+		if len(pending) > 0 {
+			out.Warning = routingPendingWarning(pending)
+		}
+	}
 	for _, rank := range r.Ranks {
 		out.Ranks = append(out.Ranks, rankJSON{
 			MappingID: rank.MappingID, Rank: rank.Rank, OffPeak: rank.OffPeak,
-			Eligible: rank.Eligible, Explanation: rank.Explanation,
+			Eligible: rank.Eligible, Status: rank.Status, Explanation: rank.Explanation,
 		})
 	}
 	if out.Ranks == nil {
 		out.Ranks = []rankJSON{}
 	}
 	for _, route := range r.Routes {
-		rj := routeJSON{TargetID: route.TargetID, Name: route.Name, Source: route.SourcePath, Effective: route.Effective}
-		if rj.Effective == nil {
-			rj.Effective = []string{}
-		}
-		rj.Desired = append([]string(nil), route.Desired...)
-		out.Routes = append(out.Routes, rj)
+		out.Routes = append(out.Routes, explainRouteJSON{Name: route.Name, Desired: route.Desired, Effective: route.Effective})
 	}
 	if out.Routes == nil {
-		out.Routes = []routeJSON{}
+		out.Routes = []explainRouteJSON{}
 	}
 	for _, e := range r.Errors {
 		out.Errors = append(out.Errors, diagErrorJSON{Scope: string(e.Scope), MappingID: e.MappingID, TargetID: e.TargetID, SourcePath: e.SourcePath, Summary: e.Summary})

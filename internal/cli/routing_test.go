@@ -54,42 +54,64 @@ func TestRoutingBareDispatch(t *testing.T) {
 	})
 }
 
-func TestRoutingTextShowsTargetAndSource(t *testing.T) {
+func TestRoutingBareTextShowsTargetAndSource(t *testing.T) {
 	routes := []service.RouteProjection{
 		{TargetID: "global", Name: "classifier", SourcePath: "config.yaml", Effective: []string{"minime/qwen"}},
 		{TargetID: "global", Name: "Researcher", SourcePath: "subagents/researcher.md", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}},
 	}
-	for name, render := range map[string]func(io.Writer){
-		"bare":    func(w io.Writer) { writeRoutingText(w, service.RoutingReport{Routes: routes}, styler{}) },
-		"explain": func(w io.Writer) { writeRoutingExplainText(w, service.RoutingExplainReport{Routes: routes}, styler{}) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			var out bytes.Buffer
-			render(&out)
-			text := out.String()
-			if !strings.Contains(text, "target  source") || !strings.Contains(text, "global  config.yaml") || !strings.Contains(text, "global  subagents/researcher.md") {
-				t.Fatalf("routing text does not expose target and source:\n%s", text)
-			}
-		})
+	var out bytes.Buffer
+	writeRoutingText(&out, service.RoutingReport{Routes: routes}, styler{})
+	text := out.String()
+	if !strings.Contains(text, "target  source") || !strings.Contains(text, "global  config.yaml") || !strings.Contains(text, "global  subagents/researcher.md") {
+		t.Fatalf("bare routing text does not expose target and source:\n%s", text)
 	}
 }
 
-func TestRoutingJSONPreservesPublicSourceContract(t *testing.T) {
-	route := service.RouteProjection{TargetID: "global", Name: "classifier", SourcePath: "config.yaml", Effective: []string{"minime/qwen"}}
-	for name, envelope := range map[string]any{
-		"bare":    routingEnvelope(service.RoutingReport{Routes: []service.RouteProjection{route}}),
-		"explain": routingExplainEnvelope(service.RoutingExplainReport{Routes: []service.RouteProjection{route}}),
-	} {
-		t.Run(name, func(t *testing.T) {
-			raw, err := json.Marshal(envelope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			text := string(raw)
-			if !strings.Contains(text, `"target_id":"global"`) || !strings.Contains(text, `"source":"config.yaml"`) || strings.Contains(text, `"source_path"`) {
-				t.Fatalf("public routing JSON contract changed: %s", text)
-			}
-		})
+func TestRoutingExplainTextOmitsTargetAndSource(t *testing.T) {
+	var out bytes.Buffer
+	writeRoutingExplainText(&out, service.RoutingExplainReport{
+		Ranks:  []service.ExplainRankProjection{{MappingID: "codex", Eligible: true, Status: "ready", Explanation: "peak"}},
+		Routes: []service.ExplainRouteProjection{{Name: "full", Desired: "codex/gpt", Effective: "zai/glm"}},
+	}, styler{})
+	text := out.String()
+	if strings.Contains(text, "target") || strings.Contains(text, "source") || strings.Contains(text, "rank") || strings.Contains(text, "off_peak") || strings.Contains(text, "eligible") {
+		t.Fatalf("explain text contains internal columns:\n%s", text)
+	}
+	for _, want := range []string{"provider", "status", "reason", "route", "desired", "effective", "ready", "codex/gpt", "zai/glm"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("explain text missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRoutingJSONPreservesBareRouteContract(t *testing.T) {
+	route := service.RouteProjection{TargetID: "global", Name: "classifier", SourcePath: "config.yaml", Desired: []string{"codex/gpt"}, Effective: []string{"minime/qwen"}}
+	raw, err := json.Marshal(routingEnvelope(service.RoutingReport{Routes: []service.RouteProjection{route}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"target_id":"global"`) || !strings.Contains(text, `"source":"config.yaml"`) || !strings.Contains(text, `"desired":["codex/gpt"]`) {
+		t.Fatalf("bare routing JSON contract changed: %s", text)
+	}
+}
+
+func TestRoutingExplainJSONUsesScalarRouteContract(t *testing.T) {
+	raw, err := json.Marshal(routingExplainEnvelope(service.RoutingExplainReport{
+		Ranks:  []service.ExplainRankProjection{{MappingID: "codex", Rank: 0, Eligible: true, Status: "ready", Explanation: "peak"}},
+		Routes: []service.ExplainRouteProjection{{Name: "full", Desired: "codex/gpt", Effective: "minime/qwen"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{`"desired":"codex/gpt"`, `"effective":"minime/qwen"`, `"status":"ready"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("explain JSON missing %q: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "target_id") || strings.Contains(text, "source") || strings.Contains(text, `"desired":[`) {
+		t.Fatalf("explain JSON leaked bare route fields: %s", text)
 	}
 }
 
@@ -153,6 +175,51 @@ func TestRoutingJSONFailuresEmitOneEnvelope(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestRoutingExplainReadinessProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		eligible bool
+		want     string
+	}{
+		{name: "ready", eligible: true, want: "ready"},
+		{name: "not ready", eligible: false, want: "not ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			writeRoutingExplainText(&out, service.RoutingExplainReport{
+				Ranks: []service.ExplainRankProjection{{MappingID: "provider", Eligible: tc.eligible, Status: tc.want, Explanation: "reason"}},
+			}, styler{})
+			if !strings.Contains(out.String(), tc.want) || !strings.Contains(out.String(), "reason") {
+				t.Fatalf("output missing status/reason:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestRoutingExplainPendingTargetsAndWarning(t *testing.T) {
+	r := service.RoutingExplainReport{PendingTargets: []string{"project-a", "global"}}
+	var text bytes.Buffer
+	writeRoutingExplainText(&text, r, styler{})
+	if !strings.Contains(text.String(), "routing data may not be live") || !strings.Contains(text.String(), "project-a, global") || !strings.Contains(text.String(), "polytoken-quota doctor") {
+		t.Fatalf("pending warning missing:\n%s", text.String())
+	}
+	encoded, err := json.Marshal(routingExplainEnvelope(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonText := string(encoded)
+	if !strings.Contains(jsonText, `"pending_targets":["project-a","global"]`) || !strings.Contains(jsonText, `"warning":"routing data may not be live`) {
+		t.Fatalf("pending JSON warning missing: %s", jsonText)
+	}
+	encoded, err = json.Marshal(routingExplainEnvelope(service.RoutingExplainReport{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"pending_targets":[]`) || strings.Contains(string(encoded), `"warning"`) {
+		t.Fatalf("empty pending JSON contract wrong: %s", encoded)
 	}
 }
 

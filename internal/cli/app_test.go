@@ -714,6 +714,18 @@ func TestInitOutputContract(t *testing.T) {
 	}
 }
 
+func TestStatusJSONDoesNotGainExplainFields(t *testing.T) {
+	raw, err := json.Marshal(statusEnvelope(service.StatusReport{
+		Ranking: []service.RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak"}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"status"`) {
+		t.Fatalf("status JSON gained explain-only status field: %s", raw)
+	}
+}
+
 func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
 	spy := newDepsSpy()
 	spy.StatusReportValue = service.StatusReport{Error: "state: parse state.json: unexpected end of JSON input"}

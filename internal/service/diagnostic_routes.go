@@ -31,15 +31,35 @@ type RoutingReport struct {
 	Error          string            `json:"error,omitempty"`
 }
 
-// RoutingExplainReport adds enablement, full ranks, and desired chains.
+// ExplainRankProjection is the explain-only rank view. RankEntryReport remains
+// shared by status and reconcile traces and therefore does not gain Status.
+type ExplainRankProjection struct {
+	MappingID   string `json:"mapping_id"`
+	Rank        int    `json:"rank"`
+	OffPeak     bool   `json:"off_peak"`
+	Eligible    bool   `json:"eligible"`
+	Status      string `json:"status"`
+	Explanation string `json:"explanation"`
+}
+
+// ExplainRouteProjection is the compact explain-only route view. It deliberately
+// omits target/source provenance and selects only the top desired/effective model.
+type ExplainRouteProjection struct {
+	Name      string `json:"name"`
+	Desired   string `json:"desired"`
+	Effective string `json:"effective"`
+}
+
+// RoutingExplainReport is the compact, human-oriented routing explain view.
 type RoutingExplainReport struct {
-	AsOf           time.Time         `json:"as_of"`
-	RoutingEnabled bool              `json:"routing_enabled"`
-	Ranks          []RankEntryReport `json:"ranks,omitempty"`
-	Routes         []RouteProjection `json:"routes,omitempty"`
-	Errors         []DiagnosticError `json:"errors,omitempty"`
-	Partial        bool              `json:"partial"`
-	Error          string            `json:"error,omitempty"`
+	AsOf           time.Time                `json:"as_of"`
+	RoutingEnabled bool                     `json:"routing_enabled"`
+	Ranks          []ExplainRankProjection  `json:"ranks,omitempty"`
+	Routes         []ExplainRouteProjection `json:"routes,omitempty"`
+	PendingTargets []string                 `json:"pending_targets"`
+	Errors         []DiagnosticError        `json:"errors,omitempty"`
+	Partial        bool                     `json:"partial"`
+	Error          string                   `json:"error,omitempty"`
 }
 
 func projectRoutes(desired policy.Desired, observed state.State, targets []RegisteredTarget, ranks reconcile.RankLookup) ([]RouteProjection, []DiagnosticError) {

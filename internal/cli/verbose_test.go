@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
@@ -76,6 +77,18 @@ func TestReconcileVerboseRendersTrace(t *testing.T) {
 	}
 	if !strings.Contains(out, "edits:") {
 		t.Fatalf("missing edits in verbose output:\n%s", out)
+	}
+}
+
+func TestReconcileTraceJSONDoesNotGainExplainFields(t *testing.T) {
+	raw, err := json.Marshal(service.ReconcileTrace{
+		Ranking: []service.RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"status"`) {
+		t.Fatalf("reconcile trace JSON gained explain-only status field: %s", raw)
 	}
 }
 
