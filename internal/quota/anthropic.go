@@ -197,13 +197,17 @@ func (a *AnthropicSource) budgetWindow(spendUSD float64) QuotaWindow {
 	limit := a.MonthlyBudgetUSD
 	used := spendUSD
 	pct := clampRange(used/limit*100, 0, 100)
-	reset := nextMonthStart(a.now())
+	now := a.now()
+	start := monthStart(now)
+	reset := nextMonthStart(now)
+	period := reset.Sub(start)
 	return QuotaWindow{
 		Name:         "monthly",
 		Used:         &used,
 		Limit:        &limit,
 		UsagePercent: &pct,
 		ResetAt:      &reset,
+		Period:       &period,
 	}
 }
 
