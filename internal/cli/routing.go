@@ -17,6 +17,10 @@ import (
 
 // runRouting dispatches the routing subcommands.
 func runRouting(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if len(args) > 0 && (args[0] == "--help" || args[0] == "-h") {
+		writeCommandHelp(stdout, "routing")
+		return ExitOK
+	}
 	if len(args) == 0 {
 		return runRoutingBare(ctx, nil, deps, stdout, stderr)
 	}
@@ -39,6 +43,10 @@ func runRouting(ctx context.Context, args []string, deps Dependencies, stdout, s
 
 // runRoutingBare handles `routing [--json]` — effective chains only.
 func runRoutingBare(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "routing")
+		return ExitOK
+	}
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
 		return routingFailure(hasRoutingJSONFlag(args), false, "routing: invalid arguments", stdout, stderr)
@@ -62,6 +70,10 @@ func runRoutingBare(ctx context.Context, args []string, deps Dependencies, stdou
 
 // runRoutingExplain handles `routing explain [--json]` — full ranks + chains.
 func runRoutingExplain(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "routing explain")
+		return ExitOK
+	}
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
 		return routingFailure(hasRoutingJSONFlag(args), true, "routing explain: invalid arguments", stdout, stderr)
@@ -85,6 +97,14 @@ func runRoutingExplain(ctx context.Context, args []string, deps Dependencies, st
 
 // runRoutingMutate handles `routing enable/disable <provider>`.
 func runRoutingMutate(ctx context.Context, args []string, deps Dependencies, enabled bool, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		if enabled {
+			writeCommandHelp(stdout, "routing enable")
+		} else {
+			writeCommandHelp(stdout, "routing disable")
+		}
+		return ExitOK
+	}
 	provider, ok := parseRoutingToggleFlags(args)
 	if !ok {
 		label := "enable"
@@ -124,6 +144,10 @@ func runRoutingMutate(ctx context.Context, args []string, deps Dependencies, ena
 
 // runRoutingReset handles `routing reset`.
 func runRoutingReset(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "routing reset")
+		return ExitOK
+	}
 	if len(args) != 0 {
 		fmt.Fprintln(stderr, "routing reset: takes no arguments")
 		return ExitRejected

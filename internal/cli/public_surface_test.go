@@ -41,6 +41,11 @@ var removedCommandNames = []string{
 	"state",
 }
 
+// polytokenPrefix is the binary-name stem that precedes "quota" in
+// "polytoken-quota". Used to exclude false positives where a removed-command
+// invocation regex matches inside the binary name (e.g. "polytoken-quota check").
+const polytokenPrefix = "polytoken-"
+
 // removedCommandInvocations are the backticked removed-command spellings that
 // must never be presented to a user as a runnable command. Each is matched on
 // word boundaries; "polytoken-quota" (the binary name) is excluded separately.
@@ -207,10 +212,16 @@ func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
 				stripped := stripDecls(b)
 				for _, invocation := range removedCommandInvocations {
 					re := regexp.MustCompile(invocation)
-					if loc := re.FindIndex(stripped); loc != nil {
-						// Exclude the polytoken-quota binary name prefix.
+					for _, loc := range re.FindAllIndex(stripped, -1) {
+						// Exclude matches that are part of the binary name
+						// "polytoken-quota". The regex may match starting at
+						// "quota" inside "polytoken-quota check", so check both
+						// the excerpt prefix and a "polytoken-" lookback.
 						excerpt := string(stripped[loc[0]:])
 						if strings.HasPrefix(excerpt, "polytoken-quota ") {
+							continue
+						}
+						if loc[0] >= len(polytokenPrefix) && string(stripped[loc[0]-len(polytokenPrefix):loc[0]]) == polytokenPrefix {
 							continue
 						}
 						t.Errorf("removed-command invocation %q present in %s", invocation, path)

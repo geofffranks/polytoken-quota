@@ -110,6 +110,8 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return ExitRejected
 	}
 	switch args[0] {
+	case "help", "--help", "-h":
+		return runHelp(stdout, stderr, args[1:])
 	case "init":
 		return runInit(ctx, args[1:], deps, stdout, stderr)
 	case "status":
@@ -135,6 +137,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 // runInit handles init [--force].
 func runInit(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "init")
+		return ExitOK
+	}
 	force, ok := parseInitFlags(args)
 	if !ok {
 		fmt.Fprintln(stderr, "init: invalid arguments")
@@ -171,6 +177,10 @@ func parseInitFlags(args []string) (force, ok bool) {
 
 // runStatus handles status [--json].
 func runStatus(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "status")
+		return ExitOK
+	}
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
 		fmt.Fprintln(stderr, "status: invalid arguments")
@@ -202,6 +212,10 @@ func runStatus(ctx context.Context, args []string, deps Dependencies, stdout, st
 
 // runCheck handles check [--provider <id>] [--reconcile] [--json] [--quiet].
 func runCheck(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "check")
+		return ExitOK
+	}
 	provider, jsonOut, reconcile, quiet, ok := parseCheckFlags(args)
 	if !ok {
 		if quiet {
@@ -279,6 +293,10 @@ func emitMutationError(stdout, stderr io.Writer, msg string, jsonOut bool) {
 
 // runReconcile handles reconcile [--dry-run] [--keep-staging] [--verbose].
 func runReconcile(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "reconcile")
+		return ExitOK
+	}
 	dryRun, keepStaging, verbose, ok := parseReconcileFlags(args)
 	if !ok {
 		fmt.Fprintln(stderr, "reconcile: invalid arguments")
@@ -357,6 +375,10 @@ func writePendingTargets(o service.Outcome, stderr io.Writer) {
 
 // runDoctor handles doctor [--json].
 func runDoctor(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "doctor")
+		return ExitOK
+	}
 	jsonOut, ok := parseBoolFlags(args, "--json")
 	if !ok {
 		fmt.Fprintln(stderr, "doctor: invalid arguments")
@@ -395,4 +417,5 @@ func parseBoolFlags(args []string, allowed ...string) (present, ok bool) {
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
 	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history")
+	fmt.Fprintln(w, "run 'polytoken-quota help' or 'polytoken-quota <command> --help' for details")
 }
