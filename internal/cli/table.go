@@ -174,7 +174,7 @@ func writeRoutingText(w io.Writer, r service.RoutingReport, s styler) {
 	}
 }
 
-// writeRoutingExplainText renders the full ranking + desired/effective chains.
+// writeRoutingExplainText renders compact ranking status and selected route models.
 func writeRoutingExplainText(w io.Writer, r service.RoutingExplainReport, s styler) {
 	enabledText, enabledStyle := "enabled", s.green
 	if !r.RoutingEnabled {
@@ -184,25 +184,33 @@ func writeRoutingExplainText(w io.Writer, r service.RoutingExplainReport, s styl
 	if !r.AsOf.IsZero() {
 		writeTable(w, [][]tableCell{{{text: "as of", style: s.dim}, {text: formatRFC3339(r.AsOf)}}})
 	}
+	if len(r.PendingTargets) > 0 {
+		fmt.Fprintf(w, "%s\n", s.yellow("warning: "+routingPendingWarning(r.PendingTargets)))
+	}
 	fmt.Fprintln(w)
 	if len(r.Ranks) > 0 {
 		rows := [][]tableCell{{
-			{text: "provider", style: s.dim}, {text: "rank", style: s.dim}, {text: "off_peak", style: s.dim},
-			{text: "eligible", style: s.dim}, {text: "reason", style: s.dim},
+			{text: "provider", style: s.dim}, {text: "status", style: s.dim}, {text: "reason", style: s.dim},
 		}}
 		for _, rank := range r.Ranks {
-			rows = append(rows, []tableCell{{text: rank.MappingID}, {text: fmt.Sprint(rank.Rank)}, {text: fmt.Sprint(rank.OffPeak)}, {text: fmt.Sprint(rank.Eligible)}, {text: rank.Explanation}})
+			status := rank.Status
+			if status == "" {
+				status = "not ready"
+				if rank.Eligible {
+					status = "ready"
+				}
+			}
+			rows = append(rows, []tableCell{{text: rank.MappingID}, {text: status}, {text: rank.Explanation}})
 		}
 		writeTable(w, rows)
 		fmt.Fprintln(w)
 	}
 	if len(r.Routes) > 0 {
 		rows := [][]tableCell{{
-			{text: "target", style: s.dim}, {text: "source", style: s.dim}, {text: "route", style: s.dim},
-			{text: "desired", style: s.dim}, {text: "effective", style: s.dim},
+			{text: "route", style: s.dim}, {text: "desired", style: s.dim}, {text: "effective", style: s.dim},
 		}}
 		for _, route := range r.Routes {
-			rows = append(rows, []tableCell{{text: route.TargetID}, {text: route.SourcePath}, {text: route.Name}, {text: strings.Join(route.Desired, ", ")}, {text: strings.Join(route.Effective, ", ")}})
+			rows = append(rows, []tableCell{{text: route.Name}, {text: route.Desired}, {text: route.Effective}})
 		}
 		writeTable(w, rows)
 	}

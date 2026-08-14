@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/sanitize"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -172,16 +173,7 @@ func Run(ctx context.Context, deps Dependencies) Report {
 }
 
 func safeIdentifier(value string) string {
-	if value == "" {
-		return "<invalid>"
-	}
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' || r == '/' {
-			continue
-		}
-		return "<invalid>"
-	}
-	return value
+	return sanitize.Identifier(value)
 }
 
 // pendingTargetFinding builds a target-pending finding from a persisted

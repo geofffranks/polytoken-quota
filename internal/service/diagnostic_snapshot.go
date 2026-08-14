@@ -9,6 +9,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
+	sanitizepkg "github.com/geofffranks/polytoken-quota/internal/sanitize"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -37,6 +38,9 @@ type DiagnosticSnapshot struct {
 	providers      []ProviderProjection
 	ranks          []RankEntryReport
 	routes         []RouteProjection
+	explainRoutes  []ExplainRouteProjection
+	explainRanks   []ExplainRankProjection
+	pendingTargets []string
 	providerErrors []DiagnosticError
 	routeErrors    []DiagnosticError
 	revision       uint64
@@ -107,11 +111,14 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	snapshot.routingEnabled = desired.Routing.Enabled
 	snapshot.revision = observed.Revision
 	snapshot.targets, snapshot.pending, snapshot.drift = projectLegacyTargets(observed)
+	snapshot.pendingTargets = projectPendingTargets(observed)
 	snapshot.legacyQuota, snapshot.problem = projectLegacyQuota(desired, observed, snapshot.asOf)
 	ranks, ranking := ComputeRanking(desired, observed, snapshot.asOf)
 	snapshot.ranks = completeRankProjection(desired, ranking.Entries)
+	snapshot.explainRanks = projectExplainRanks(snapshot.ranks)
 	snapshot.providers, snapshot.providerErrors = projectProviders(desired, observed, snapshot.asOf)
 	snapshot.routes, snapshot.routeErrors = projectRoutes(desired, observed, targets, ranks)
+	snapshot.explainRoutes = projectExplainRoutes(snapshot.routes)
 	return snapshot
 }
 
@@ -163,19 +170,66 @@ func (s DiagnosticSnapshot) RoutingView() RoutingReport {
 	return report
 }
 
-// RoutingExplainView adds policy enablement, every rank explanation, and desired
-// chains to the same effective route projection.
+// RoutingExplainView adds policy enablement, compact rank explanations, selected
+// route models, and pending target metadata to the shared diagnostic snapshot.
 func (s DiagnosticSnapshot) RoutingExplainView() RoutingExplainReport {
 	report := RoutingExplainReport{AsOf: s.asOf, Error: s.fatalError}
 	if s.fatalError != "" {
 		return report
 	}
 	report.RoutingEnabled = s.routingEnabled
-	report.Ranks = append([]RankEntryReport(nil), s.ranks...)
-	report.Routes = cloneRoutes(s.routes, true)
+	report.Ranks = append([]ExplainRankProjection(nil), s.explainRanks...)
+	report.Routes = append([]ExplainRouteProjection(nil), s.explainRoutes...)
+	report.PendingTargets = append([]string(nil), s.pendingTargets...)
 	report.Errors = cloneDiagnosticErrors(s.routeErrors)
 	report.Partial = len(report.Errors) > 0
 	return report
+}
+
+func projectExplainRanks(in []RankEntryReport) []ExplainRankProjection {
+	out := make([]ExplainRankProjection, 0, len(in))
+	for _, rank := range in {
+		status := "not ready"
+		if rank.Eligible {
+			status = "ready"
+		}
+		out = append(out, ExplainRankProjection{
+			MappingID: rank.MappingID, Rank: rank.Rank, OffPeak: rank.OffPeak,
+			Eligible: rank.Eligible, Status: status, Explanation: rank.Explanation,
+		})
+	}
+	return out
+}
+
+func projectExplainRoutes(in []RouteProjection) []ExplainRouteProjection {
+	out := make([]ExplainRouteProjection, 0, len(in))
+	for _, route := range in {
+		desired, effective := "none", "none"
+		if len(route.Desired) > 0 {
+			desired = route.Desired[0]
+		}
+		if len(route.Effective) > 0 {
+			effective = route.Effective[0]
+		}
+		out = append(out, ExplainRouteProjection{Name: route.Name, Desired: desired, Effective: effective})
+	}
+	return out
+}
+
+func projectPendingTargets(observed state.State) []string {
+	seen := map[string]bool{}
+	for id, target := range observed.Targets {
+		if target.Pending == nil {
+			continue
+		}
+		seen[sanitizepkg.Identifier(id)] = true
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func cloneDiagnosticErrors(in []DiagnosticError) []DiagnosticError {

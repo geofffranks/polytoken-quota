@@ -162,6 +162,18 @@ func TestHelpFlagPrecedenceOverInvalidArgs(t *testing.T) {
 
 // --- Routing help ---
 
+func TestRoutingExplainHelpDescribesSelectedModels(t *testing.T) {
+	stdout, stderr, code := runHelpCapture(t, []string{"routing", "explain", "--help"})
+	if code != ExitOK || stderr != "" {
+		t.Fatalf("help exit=%d stderr=%q", code, stderr)
+	}
+	for _, want := range []string{"selected desired and effective model", "ready", "not ready", "pending", "doctor"} {
+		if !strings.Contains(strings.ToLower(stdout), want) {
+			t.Fatalf("routing explain help missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
 func TestRoutingHelpViaFlag(t *testing.T) {
 	stdout, stderr, code := runHelpCapture(t, []string{"routing", "--help"})
 	if code != ExitOK {

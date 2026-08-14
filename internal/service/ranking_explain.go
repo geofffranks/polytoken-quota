@@ -43,10 +43,17 @@ type RankingReport struct {
 // sanitized error string. The injected clock supplies "now".
 func (c *Coordinator) RankingExplain(ctx context.Context) RankingReport {
 	view := c.BuildDiagnosticSnapshot(ctx).RoutingExplainView()
+	entries := make([]RankEntryReport, 0, len(view.Ranks))
+	for _, rank := range view.Ranks {
+		entries = append(entries, RankEntryReport{
+			MappingID: rank.MappingID, Rank: rank.Rank, OffPeak: rank.OffPeak,
+			Eligible: rank.Eligible, Explanation: rank.Explanation,
+		})
+	}
 	return RankingReport{
 		Enabled: view.RoutingEnabled,
 		Now:     view.AsOf,
-		Entries: append([]RankEntryReport(nil), view.Ranks...),
+		Entries: entries,
 		Error:   view.Error,
 	}
 }

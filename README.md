@@ -191,7 +191,7 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
 | `routing [--json]` | Show effective routing chains for every managed route, with its registered target and concrete source. |
-| `routing explain [--json]` | Show complete routing explanation: ranks, reasons, target, source, and desired and effective chains. |
+| `routing explain [--json]` | Show provider readiness and each route's selected desired/effective model. Pending targets may not be live; run `polytoken-quota doctor` to diagnose. |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
