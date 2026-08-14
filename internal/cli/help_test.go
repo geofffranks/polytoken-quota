@@ -162,18 +162,6 @@ func TestHelpFlagPrecedenceOverInvalidArgs(t *testing.T) {
 
 // --- Routing help ---
 
-func TestRoutingExplainHelpDescribesSelectedModels(t *testing.T) {
-	stdout, stderr, code := runHelpCapture(t, []string{"routing", "explain", "--help"})
-	if code != ExitOK || stderr != "" {
-		t.Fatalf("help exit=%d stderr=%q", code, stderr)
-	}
-	for _, want := range []string{"selected desired and effective model", "ready", "not ready", "pending", "doctor"} {
-		if !strings.Contains(strings.ToLower(stdout), want) {
-			t.Fatalf("routing explain help missing %q:\n%s", want, stdout)
-		}
-	}
-}
-
 func TestRoutingHelpViaFlag(t *testing.T) {
 	stdout, stderr, code := runHelpCapture(t, []string{"routing", "--help"})
 	if code != ExitOK {
@@ -182,10 +170,13 @@ func TestRoutingHelpViaFlag(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("expected empty stderr, got %q", stderr)
 	}
-	for _, want := range []string{"Subcommands:", "explain", "enable", "disable", "reset"} {
+	for _, want := range []string{"Subcommands:", "enable", "disable", "reset"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("routing help missing %q:\n%s", want, stdout)
 		}
+	}
+	if strings.Contains(stdout, "explain") {
+		t.Errorf("routing help still documents removed explain subcommand:\n%s", stdout)
 	}
 }
 
@@ -194,10 +185,13 @@ func TestRoutingHelpViaHelpCommand(t *testing.T) {
 	if code != ExitOK {
 		t.Fatalf("expected exit %d, got %d", ExitOK, code)
 	}
-	for _, want := range []string{"Subcommands:", "explain", "enable", "disable", "reset"} {
+	for _, want := range []string{"Subcommands:", "enable", "disable", "reset"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("help routing missing %q:\n%s", want, stdout)
 		}
+	}
+	if strings.Contains(stdout, "explain") {
+		t.Errorf("help routing still documents removed explain subcommand:\n%s", stdout)
 	}
 }
 
@@ -206,7 +200,6 @@ func TestRoutingSubcommandHelpViaFlag(t *testing.T) {
 		args []string
 		path string
 	}{
-		{[]string{"routing", "explain", "--help"}, "routing explain"},
 		{[]string{"routing", "enable", "--help"}, "routing enable"},
 		{[]string{"routing", "disable", "--help"}, "routing disable"},
 		{[]string{"routing", "reset", "--help"}, "routing reset"},
@@ -233,7 +226,6 @@ func TestRoutingSubcommandHelpViaHelpCommand(t *testing.T) {
 		args []string
 		path string
 	}{
-		{[]string{"help", "routing", "explain"}, "routing explain"},
 		{[]string{"help", "routing", "enable"}, "routing enable"},
 		{[]string{"help", "routing", "disable"}, "routing disable"},
 		{[]string{"help", "routing", "reset"}, "routing reset"},

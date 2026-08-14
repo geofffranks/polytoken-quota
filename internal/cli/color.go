@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -165,6 +166,21 @@ func (s styler) modeStyler(m state.Mode) func(string) string {
 
 // noopStyler leaves text unchanged (used for unrecognized enum values).
 func noopStyler(t string) string { return t }
+
+// mergedStatusStyler colors a consolidated merged-status value:
+// available=green, disabled/unavailable=red, enabled=yellow.
+func (s styler) mergedStatusStyler(status string) func(string) string {
+	switch status {
+	case service.StatusAvailable:
+		return s.green
+	case service.StatusDisabled, service.StatusUnavailable:
+		return s.red
+	case service.StatusEnabled:
+		return s.yellow
+	default:
+		return noopStyler
+	}
+}
 
 // styleFreshness colors a freshness: fresh=green, stale=yellow, missing=red.
 func (s styler) styleFreshness(f string) string {

@@ -160,6 +160,170 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 	return &diagnosticDeps{desired: desired, observed: observed, targets: resolved, policyExists: true}, root
 }
 
+func TestMergedStatusViewConsolidatesSnapshot(t *testing.T) {
+	observedAt := diagnosticAsOf.Add(-10 * time.Minute)
+	future := diagnosticAsOf.Add(30 * time.Minute)
+	d, _ := diagnosticFixture(t, true)
+	// Stagger beta's snapshot so the global last-checked is alpha's.
+	d.observed.Providers["beta"].QuotaSnapshot.CheckedAt = observedAt.Add(-5 * time.Minute)
+	report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).MergedStatusView()
+
+	if report.Error != "" {
+		t.Fatalf("unexpected fatal error: %q", report.Error)
+	}
+	if !report.RoutingEnabled {
+		t.Fatal("RoutingEnabled = false, want true")
+	}
+	if !report.LastChecked.Equal(observedAt) {
+		t.Fatalf("LastChecked = %s, want max snapshot CheckedAt %s", report.LastChecked, observedAt)
+	}
+	if len(report.Providers) != 2 {
+		t.Fatalf("providers = %d, want 2", len(report.Providers))
+	}
+	alpha, beta := report.Providers[0], report.Providers[1]
+	if alpha.Provider != "alpha" || beta.Provider != "beta" {
+		t.Fatalf("provider order = %s,%s want alpha,beta", alpha.Provider, beta.Provider)
+	}
+	if alpha.Status != "available" || beta.Status != "available" {
+		t.Fatalf("status = %s,%s want available,available", alpha.Status, beta.Status)
+	}
+	if len(alpha.Windows) != 4 || len(beta.Windows) != 1 {
+		t.Fatalf("windows = %d,%d want 4,1", len(alpha.Windows), len(beta.Windows))
+	}
+	if alpha.NextResetAt == nil || !alpha.NextResetAt.Equal(future) {
+		t.Fatalf("alpha NextResetAt = %v, want earliest reset after as-of %s", alpha.NextResetAt, future)
+	}
+	if len(report.Routes) == 0 {
+		t.Fatal("routes empty")
+	}
+	for _, route := range report.Routes {
+		if len(route.Desired) == 0 {
+			t.Fatalf("route %q has empty desired chain", route.Name)
+		}
+	}
+	if !report.Problem {
+		t.Fatal("Problem = false, want true (failed attempt and missing remaining)")
+	}
+}
+
+func TestMergedStatusViewStatusPrecedence(t *testing.T) {
+	observedAt := diagnosticAsOf.Add(-10 * time.Minute)
+	tests := []struct {
+		name   string
+		mutate func(*diagnosticDeps)
+		want   map[string]string
+	}{
+		{
+			name: "manual disable wins over available snapshot",
+			mutate: func(d *diagnosticDeps) {
+				ps := d.observed.Providers["alpha"]
+				ps.ManualDisabled = true
+				d.observed.Providers["alpha"] = ps
+			},
+			want: map[string]string{"alpha": "disabled", "beta": "available"},
+		},
+		{
+			name: "never observed quota-mapped provider shows enabled",
+			mutate: func(d *diagnosticDeps) {
+				mapping := d.desired.Providers["alpha"]
+				d.desired.Providers["gamma"] = mapping
+			},
+			want: map[string]string{"alpha": "available", "beta": "available", "gamma": "enabled"},
+		},
+		{
+			name: "manual disable wins for a never-observed provider",
+			mutate: func(d *diagnosticDeps) {
+				d.desired.Providers["gamma"] = d.desired.Providers["alpha"]
+				d.observed.Providers["gamma"] = state.ProviderState{ManualDisabled: true}
+			},
+			want: map[string]string{"alpha": "available", "beta": "available", "gamma": "disabled"},
+		},
+		{
+			name: "unavailable axis wins over snapshot",
+			mutate: func(d *diagnosticDeps) {
+				ps := d.observed.Providers["beta"]
+				ps.Availability = state.Unavailable
+				d.observed.Providers["beta"] = ps
+			},
+			want: map[string]string{"alpha": "available", "beta": "unavailable"},
+		},
+		{
+			name: "failed attempt without snapshot is unavailable",
+			mutate: func(d *diagnosticDeps) {
+				ps := d.observed.Providers["beta"]
+				ps.QuotaSnapshot = nil
+				ps.QuotaAttempt = &quota.QuotaSnapshot{MappingID: "beta", CheckedAt: observedAt, Status: quota.SourceFailed}
+				ps.Availability = state.Available
+				d.observed.Providers["beta"] = ps
+			},
+			want: map[string]string{"alpha": "available", "beta": "unavailable"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := diagnosticFixture(t, true)
+			tc.mutate(d)
+			report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).MergedStatusView()
+			if report.Error != "" {
+				t.Fatalf("unexpected fatal error: %q", report.Error)
+			}
+			got := map[string]string{}
+			for _, provider := range report.Providers {
+				got[provider.Provider] = provider.Status
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("status = %v, want %v", got, tc.want)
+			}
+			for _, provider := range report.Providers {
+				if tc.want[provider.Provider] == "enabled" {
+					if provider.Windows != nil || provider.NextResetAt != nil {
+						t.Fatalf("enabled provider %s carries quota data: %+v", provider.Provider, provider)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMergedStatusViewNeverCheckedAndFatal(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	// No provider observations at all: last-checked is zero and every provider is enabled.
+	d.observed.Providers = map[string]state.ProviderState{}
+	report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).MergedStatusView()
+	if !report.LastChecked.IsZero() {
+		t.Fatalf("LastChecked = %s, want zero", report.LastChecked)
+	}
+	for _, provider := range report.Providers {
+		if provider.Status != "enabled" {
+			t.Fatalf("provider %s status = %s, want enabled", provider.Provider, provider.Status)
+		}
+	}
+
+	d, _ = diagnosticFixture(t, true)
+	d.policyErr = errors.New("Bearer POLICY-CANARY")
+	report = diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).MergedStatusView()
+	if report.Error == "" || strings.Contains(report.Error, "CANARY") {
+		t.Fatalf("fatal error missing/unsanitized: %q", report.Error)
+	}
+	if report.Providers != nil || report.Routes != nil || report.RoutingEnabled {
+		t.Fatalf("fatal report carries data: providers=%d routes=%d routing=%v", len(report.Providers), len(report.Routes), report.RoutingEnabled)
+	}
+}
+
+func TestMergedStatusViewPendingTargetsAndErrors(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.observed.Targets = map[string]state.TargetState{
+		"project-b": {Pending: &state.ApplyFailure{Stage: "apply"}},
+	}
+	report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).MergedStatusView()
+	if len(report.PendingTargets) != 1 || report.PendingTargets[0] != "project-b" {
+		t.Fatalf("PendingTargets = %v, want [project-b]", report.PendingTargets)
+	}
+	if report.Error != "" {
+		t.Fatalf("unexpected fatal error: %q", report.Error)
+	}
+}
+
 func TestDiagnosticSnapshotSingleReadSingleClock(t *testing.T) {
 	d, _ := diagnosticFixture(t, true)
 	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())
@@ -279,9 +443,9 @@ func TestQuotaExemptMappingStatusAndRouteSafety(t *testing.T) {
 	if legacy.Problem != withoutLocalHistory.Problem {
 		t.Fatalf("quota-exempt durable history changed status problem: with=%t without=%t", legacy.Problem, withoutLocalHistory.Problem)
 	}
-	for _, quotaReport := range legacy.Quota {
-		if quotaReport.MappingID == "minime" {
-			t.Fatalf("quota-exempt durable history leaked into legacy quota status: %+v", quotaReport)
+	for _, provider := range legacy.Providers {
+		if provider.Provider == "minime" {
+			t.Fatalf("quota-exempt durable history leaked into status providers: %+v", provider)
 		}
 	}
 	for _, route := range snapshot.RoutingView().Routes {
@@ -362,7 +526,7 @@ func TestStatusPreservesManualDisabled(t *testing.T) {
 	if report.Error != "" {
 		t.Fatalf("status error=%q", report.Error)
 	}
-	var got *ProviderStatus
+	var got *MergedStatusProvider
 	for i := range report.Providers {
 		if report.Providers[i].Provider == "alpha" {
 			got = &report.Providers[i]
@@ -371,11 +535,8 @@ func TestStatusPreservesManualDisabled(t *testing.T) {
 	if got == nil {
 		t.Fatalf("alpha provider missing from status: %+v", report.Providers)
 	}
-	if !got.ManualDisabled {
-		t.Fatalf("manual-disabled axis not projected: %+v", got)
-	}
-	if got.Reason != "manual_disabled" {
-		t.Fatalf("reason=%q want manual_disabled", got.Reason)
+	if got.Status != StatusDisabled {
+		t.Fatalf("status=%q want %q (manual disable)", got.Status, StatusDisabled)
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 // Diagnoser performs the read-only diagnostic operations surfaced by the CLI.
 // The production implementation is *Coordinator.
 type Diagnoser interface {
-	Status(context.Context, bool) StatusReport
+	Status(context.Context, bool) MergedStatusReport
 	Doctor(context.Context, bool) doctor.Report
 }
 
@@ -32,18 +32,16 @@ type SnapshotBuilder interface {
 	BuildDiagnosticSnapshot(context.Context) DiagnosticSnapshot
 }
 
-// ProviderStatus is one provider's quota/availability/mode axis in a status
-// report.
-type ProviderStatus struct {
-	Provider       string             `json:"provider"`
-	Quota          state.Quota        `json:"quota"`
-	Availability   state.Availability `json:"availability"`
-	Mode           state.Mode         `json:"mode"`
-	ManualDisabled bool               `json:"manual_disabled"`
-	Reason         string             `json:"reason"`
-	LastEvent      string             `json:"last_event,omitempty"`
+// TargetStatus is one target's attempted/applied revision in a status report.
+type TargetStatus struct {
+	TargetID          string `json:"target_id"`
+	AttemptedRevision uint64 `json:"attempted_revision"`
+	AppliedRevision   uint64 `json:"applied_revision"`
+	Pending           bool   `json:"pending"`
 }
 
+// providerReason names a provider's decisive condition for the provider
+// projection's Reason field.
 func providerReason(ps state.ProviderState) string {
 	if ps.ManualDisabled {
 		return "manual_disabled"
@@ -60,72 +58,19 @@ func providerReason(ps state.ProviderState) string {
 	return "normal"
 }
 
-// TargetStatus is one target's attempted/applied revision in a status report.
-type TargetStatus struct {
-	TargetID          string `json:"target_id"`
-	AttemptedRevision uint64 `json:"attempted_revision"`
-	AppliedRevision   uint64 `json:"applied_revision"`
-	Pending           bool   `json:"pending"`
-}
-
-// ChainOrderReport carries the desired vs effective model order for one managed
-// chain, so status can show how routing has reordered survivors.
-type ChainOrderReport struct {
-	TargetID  string   `json:"target_id"`
-	Chain     string   `json:"chain"`
-	Desired   []string `json:"desired"`
-	Effective []string `json:"effective"`
-}
-
-// StatusReport is the result of the status command. It carries the provider
-// axes, effective modes, last events, current revision, per-target
-// attempted/applied revisions, concise pending/drift summary, routing ranking
-// and effective order (when routing is enabled), and per-provider quota state.
-type StatusReport struct {
-	JSON            bool                  `json:"-"`
-	AsOf            time.Time             `json:"as_of"`
-	Revision        uint64                `json:"revision"`
-	Providers       []ProviderStatus      `json:"providers,omitempty"`
-	Targets         []TargetStatus        `json:"targets,omitempty"`
-	Pending         int                   `json:"pending"`
-	Drift           bool                  `json:"drift"`
-	RoutingEnabled  bool                  `json:"routing_enabled"`
-	Ranking         []RankEntryReport     `json:"ranking,omitempty"`
-	EffectiveOrders []ChainOrderReport    `json:"effective_orders,omitempty"`
-	Quota           []QuotaSnapshotReport `json:"quota,omitempty"`
-	Problem         bool                  `json:"problem"`
-	// Error carries a sanitized diagnostic when the report could not be
-	// produced at all (state unreadable / no store). Callers must treat a
-	// non-empty Error as a failed diagnostic, never as a clean report.
-	Error string `json:"error,omitempty"`
-}
-
 // Compile-time assertions that *Coordinator implements both Mutator (via its
 // InitWithOptions/Reconcile/Disable/Enable/Reset/QuotaCheck methods) and Diagnoser.
 var (
 	_ Diagnoser = (*Coordinator)(nil)
 )
 
-// Status renders the current observed state, policy providers, and per-target
-// reconciliation outcome into a StatusReport. It is read-only: it never mutates
-// state or targets. A load or resolution error yields a report carrying only the
-// error-safe fields (empty providers/targets) rather than panicking.
-func (c *Coordinator) Status(ctx context.Context, _ bool) StatusReport {
-	snapshot := c.BuildDiagnosticSnapshot(ctx)
-	view := snapshot.StatusView()
-	report := StatusReport{
-		AsOf: snapshot.asOf, Revision: snapshot.revision, Targets: append([]TargetStatus(nil), snapshot.targets...),
-		Pending: snapshot.pending, Drift: snapshot.drift, Problem: snapshot.problem,
-		Quota: cloneLegacyQuota(snapshot.legacyQuota), Error: view.Error,
-	}
-	for _, provider := range view.Providers {
-		report.Providers = append(report.Providers, ProviderStatus{
-			Provider: provider.MappingID, Quota: state.Quota(provider.QuotaClass),
-			Availability: provider.Availability, Mode: provider.EffectiveMode,
-			ManualDisabled: provider.ManualDisabled, Reason: provider.Reason,
-		})
-	}
-	return report
+// Status renders the merged status view: consolidated provider status, raw
+// quota window numbers, routes with skip reasons, pending targets, and one
+// global last-checked timestamp. It is read-only: it never mutates state or
+// targets. A load or resolution error yields a report carrying only the
+// sanitized error string rather than panicking.
+func (c *Coordinator) Status(ctx context.Context, _ bool) MergedStatusReport {
+	return c.BuildDiagnosticSnapshot(ctx).MergedStatusView()
 }
 
 // Doctor collects health and drift diagnostics by building the shared

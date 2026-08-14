@@ -39,7 +39,7 @@ type depsSpy struct {
 	QuotaCheckReconcile bool
 	QuotaCheckOutcome   service.Outcome
 	QuotaCheckSet       bool
-	StatusReportValue   service.StatusReport
+	StatusReportValue   service.MergedStatusReport
 	DoctorReportValue   doctor.Report
 	SnapshotValue       service.DiagnosticSnapshot
 }
@@ -98,7 +98,9 @@ func (s *depsSpy) QuotaCheck(_ context.Context, provider string, reconcile bool)
 	return service.Outcome{Accepted: true}
 }
 
-func (s *depsSpy) Status(context.Context, bool) service.StatusReport { return s.StatusReportValue }
+func (s *depsSpy) Status(context.Context, bool) service.MergedStatusReport {
+	return s.StatusReportValue
+}
 
 func (s *depsSpy) Doctor(context.Context, bool) doctor.Report { return s.DoctorReportValue }
 
@@ -119,7 +121,7 @@ func floatPtr(v float64) *float64 { return &v }
 
 type outcomeSpy struct {
 	outcome       service.Outcome
-	statusReport  service.StatusReport
+	statusReport  service.MergedStatusReport
 	doctorReport  doctor.Report
 	snapshotValue service.DiagnosticSnapshot
 }
@@ -136,8 +138,8 @@ func (s *outcomeSpy) Reset(context.Context) service.Outcome           { return s
 func (s *outcomeSpy) QuotaCheck(context.Context, string, bool) service.Outcome {
 	return s.outcome
 }
-func (s *outcomeSpy) Status(context.Context, bool) service.StatusReport { return s.statusReport }
-func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report        { return s.doctorReport }
+func (s *outcomeSpy) Status(context.Context, bool) service.MergedStatusReport { return s.statusReport }
+func (s *outcomeSpy) Doctor(context.Context, bool) doctor.Report              { return s.doctorReport }
 func (s *outcomeSpy) BuildDiagnosticSnapshot(context.Context) service.DiagnosticSnapshot {
 	return s.snapshotValue
 }
@@ -217,19 +219,16 @@ func TestCommandTreeDiagnosticsRedesign(t *testing.T) {
 		}
 	})
 
-	t.Run("routing bare dispatches", func(t *testing.T) {
-		spy := newDepsSpy()
-		code := Run(context.Background(), []string{"routing"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
-		if code != ExitOK {
-			t.Fatalf("exit=%d", code)
-		}
-	})
-
-	t.Run("routing explain dispatches", func(t *testing.T) {
-		spy := newDepsSpy()
-		code := Run(context.Background(), []string{"routing", "explain"}, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
-		if code != ExitOK {
-			t.Fatalf("exit=%d", code)
+	t.Run("routing bare and explain are removed", func(t *testing.T) {
+		for _, args := range [][]string{{"routing"}, {"routing", "explain"}} {
+			spy := newDepsSpy()
+			code := Run(context.Background(), args, strings.NewReader(""), io.Discard, io.Discard, spy.Dependencies())
+			if code != ExitRejected {
+				t.Fatalf("args=%v exit=%d want 1", args, code)
+			}
+			if spy.Mutations != 0 {
+				t.Fatalf("args=%v invoked a dependency", args)
+			}
 		}
 	})
 
@@ -295,6 +294,8 @@ func TestRemovedCommandsRejectWithoutMutation(t *testing.T) {
 		{"routing", "enable"},  // no-argument
 		{"routing", "disable"}, // no-argument
 		{"routing", "show"},    // does not exist
+		{"routing"},            // display surface removed
+		{"routing", "explain"}, // display surface removed
 	}
 	for _, args := range removed {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
@@ -383,11 +384,9 @@ func TestJSONContractsNoANSI(t *testing.T) {
 
 	spy := newDepsSpy()
 	now := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
-	spy.StatusReportValue = service.StatusReport{
-		AsOf: now, Revision: 1,
-		Providers: []service.ProviderStatus{
-			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
-		},
+	spy.StatusReportValue = service.MergedStatusReport{
+		RoutingEnabled: true, LastChecked: now,
+		Providers: []service.MergedStatusProvider{{Provider: "codex", Status: "available"}},
 	}
 	spy.SnapshotValue = service.DiagnosticSnapshot{} // zero snapshot: clean empty views
 
@@ -396,8 +395,6 @@ func TestJSONContractsNoANSI(t *testing.T) {
 		args []string
 	}{
 		{"status", []string{"status", "--json"}},
-		{"routing", []string{"routing", "--json"}},
-		{"routing explain", []string{"routing", "explain", "--json"}},
 		{"doctor", []string{"doctor", "--json"}},
 		{"check", []string{"check", "--json"}},
 	} {
@@ -470,7 +467,7 @@ func TestJSONErrorAndPendingEnvelopes(t *testing.T) {
 
 	t.Run("status error emits json envelope exit 1", func(t *testing.T) {
 		spy := newDepsSpy()
-		spy.StatusReportValue = service.StatusReport{Error: "state unreadable"}
+		spy.StatusReportValue = service.MergedStatusReport{Error: "state unreadable"}
 		var out bytes.Buffer
 		code := Run(context.Background(), []string{"status", "--json"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
 		if code != ExitRejected {
@@ -540,47 +537,21 @@ func TestCheckRejectedNoErrorToStdout(t *testing.T) {
 // their input reports.
 func TestRenderersDoNotMutateReports(t *testing.T) {
 	t.Run("status render does not mutate", func(t *testing.T) {
-		r := service.StatusReport{
-			Revision: 5,
-			Providers: []service.ProviderStatus{
-				{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
-			},
+		r := service.MergedStatusReport{
+			RoutingEnabled: true,
+			Providers:      []service.MergedStatusProvider{{Provider: "codex", Status: "available"}},
+			Routes:         []service.MergedStatusRoute{{Name: "full", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}}},
 		}
 		originalProviders := len(r.Providers)
 		s := styler{enabled: false}
 		var buf bytes.Buffer
-		writeStatusText(&buf, r, s)
+		writeMergedStatusText(&buf, r, s)
 		_ = statusEnvelope(r)
 		if len(r.Providers) != originalProviders {
 			t.Fatalf("render mutated providers: %d -> %d", originalProviders, len(r.Providers))
 		}
 	})
 
-	t.Run("routing render does not mutate", func(t *testing.T) {
-		r := service.RoutingReport{
-			RoutingEnabled: true,
-			Routes: []service.RouteProjection{
-				{TargetID: "global", Name: "full", Effective: []string{"codex/gpt"}},
-			},
-		}
-		originalEffective := r.Routes[0].Effective
-		s := styler{enabled: false}
-		var buf bytes.Buffer
-		writeRoutingText(&buf, r, s)
-		_ = routingEnvelope(r)
-		got := r.Routes[0].Effective
-		if len(got) != len(originalEffective) {
-			t.Fatalf("routing render mutated Effective length: %d -> %d", len(originalEffective), len(got))
-		}
-		if len(got) > 0 && &got[0] != &originalEffective[0] {
-			t.Fatalf("routing render mutated Effective slice")
-		}
-		for i := range originalEffective {
-			if got[i] != originalEffective[i] {
-				t.Fatalf("routing render mutated Effective[%d]: %q -> %q", i, originalEffective[i], got[i])
-			}
-		}
-	})
 }
 
 func TestDoctorJSONUsesReportAsOf(t *testing.T) {
@@ -720,21 +691,106 @@ func TestInitOutputContract(t *testing.T) {
 	}
 }
 
-func TestStatusJSONDoesNotGainExplainFields(t *testing.T) {
-	raw, err := json.Marshal(statusEnvelope(service.StatusReport{
-		Ranking: []service.RankEntryReport{{MappingID: "codex", Rank: 0, Eligible: true, Explanation: "peak"}},
-	}))
-	if err != nil {
-		t.Fatal(err)
+func TestStatusJSONMergedEnvelope(t *testing.T) {
+	used, limit := 41.0, 80.0
+	reset := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	spy := newDepsSpy()
+	spy.StatusReportValue = service.MergedStatusReport{
+		RoutingEnabled: true,
+		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
+		Providers: []service.MergedStatusProvider{{
+			Provider: "zai", Status: "available",
+			Windows:     []service.QuotaWindowReport{{Name: "5h", Used: &used, Limit: &limit, ResetAt: &reset}},
+			NextResetAt: &reset,
+		}},
+		Routes: []service.MergedStatusRoute{{
+			Name: "global", TargetID: "global",
+			Desired:   []string{"glm-4.6", "gpt-5.2"},
+			Effective: []string{"glm-4.6"},
+			Skipped:   []service.SkippedModel{{Model: "gpt-5.2", Reason: "quota exhausted"}},
+		}},
+		PendingTargets: []string{"work"},
 	}
-	if strings.Contains(string(raw), `"status"`) {
-		t.Fatalf("status JSON gained explain-only status field: %s", raw)
+	var out bytes.Buffer
+	code := Run(context.Background(), []string{"status", "--json"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+	if code != ExitOK {
+		t.Fatalf("exit=%d want 0", code)
 	}
+	var parsed struct {
+		RoutingEnabled bool   `json:"routing_enabled"`
+		LastChecked    string `json:"last_checked"`
+		Providers      []struct {
+			Provider string `json:"provider"`
+			Status   string `json:"status"`
+			Windows  []struct {
+				Name  string   `json:"name"`
+				Used  *float64 `json:"used"`
+				Limit *float64 `json:"limit"`
+			} `json:"windows"`
+		} `json:"providers"`
+		Routes []struct {
+			Name    string `json:"name"`
+			Skipped []struct {
+				Model  string `json:"model"`
+				Reason string `json:"reason"`
+			} `json:"skipped"`
+		} `json:"routes"`
+		PendingTargets []string `json:"pending_targets"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out.String())
+	}
+	if !parsed.RoutingEnabled || parsed.LastChecked != "2026-08-14T09:12:00Z" {
+		t.Fatalf("header fields wrong: %+v", parsed)
+	}
+	if len(parsed.Providers) != 1 || parsed.Providers[0].Provider != "zai" || parsed.Providers[0].Status != "available" {
+		t.Fatalf("providers wrong: %+v", parsed.Providers)
+	}
+	win := parsed.Providers[0].Windows[0]
+	if win.Name != "5h" || win.Used == nil || *win.Used != 41 || win.Limit == nil || *win.Limit != 80 {
+		t.Fatalf("raw window numbers missing: %+v", win)
+	}
+	if len(parsed.Routes) != 1 || len(parsed.Routes[0].Skipped) != 1 || parsed.Routes[0].Skipped[0].Reason != "quota exhausted" {
+		t.Fatalf("routes/skipped wrong: %+v", parsed.Routes)
+	}
+	if len(parsed.PendingTargets) != 1 || parsed.PendingTargets[0] != "work" {
+		t.Fatalf("pending targets wrong: %+v", parsed.PendingTargets)
+	}
+	// Legacy fields are gone.
+	for _, banned := range []string{`"as_of"`, `"revision"`, `"mode"`, `"manual_disabled"`} {
+		if strings.Contains(out.String(), banned) {
+			t.Fatalf("merged status JSON contains legacy field %s: %s", banned, out.String())
+		}
+	}
+}
+
+func TestStatusMergedExitCodes(t *testing.T) {
+	t.Run("route projection failure exits 1", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.StatusReportValue = service.MergedStatusReport{
+			Routes: []service.MergedStatusRoute{{Name: "broken", Desired: []string{"a/full"}, ProjectionError: true}},
+		}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"status"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitRejected {
+			t.Fatalf("exit=%d want 1", code)
+		}
+	})
+
+	t.Run("problem without projection failure exits 2", func(t *testing.T) {
+		spy := newDepsSpy()
+		spy.StatusReportValue = service.MergedStatusReport{Problem: true}
+		var out bytes.Buffer
+		code := Run(context.Background(), []string{"status"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+		if code != ExitPending {
+			t.Fatalf("exit=%d want 2", code)
+		}
+	})
 }
 
 func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
 	spy := newDepsSpy()
-	spy.StatusReportValue = service.StatusReport{Error: "state: parse state.json: unexpected end of JSON input"}
+	spy.StatusReportValue = service.MergedStatusReport{Error: "state: parse state.json: unexpected end of JSON input"}
 	stderr := &strings.Builder{}
 	got := Run(context.Background(), []string{"status"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
 	if got != ExitRejected {
@@ -749,11 +805,9 @@ func TestStatusStateLoadFailureExitsRejected(t *testing.T) {
 // the running-session advisory (AC.11).
 func TestStatusNoRunningSessionAdvisory(t *testing.T) {
 	spy := newDepsSpy()
-	spy.StatusReportValue = service.StatusReport{
-		Revision: 1,
-		Providers: []service.ProviderStatus{
-			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
-		},
+	spy.StatusReportValue = service.MergedStatusReport{
+		RoutingEnabled: true,
+		Providers:      []service.MergedStatusProvider{{Provider: "codex", Status: "available"}},
 	}
 	var out bytes.Buffer
 	Run(context.Background(), []string{"status"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/service"
-	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -80,63 +79,130 @@ func TestTableWriterEscapesTerminalActiveControls(t *testing.T) {
 	}
 }
 
-func TestStatusTextANSIAlignment(t *testing.T) {
-	report := service.StatusReport{
-		AsOf: time.Date(2026, 8, 11, 1, 2, 3, 0, time.UTC),
-		Providers: []service.ProviderStatus{
-			{Provider: "minime", Quota: state.QuotaLow, Availability: state.Available, Mode: state.ModeReserve, Reason: "quota_low"},
-			{Provider: "a-much-longer-provider", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: "normal"},
+func TestMergedStatusTextLayout(t *testing.T) {
+	used, limit := 41.0, 80.0
+	reset := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	report := service.MergedStatusReport{
+		RoutingEnabled: true,
+		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
+		Providers: []service.MergedStatusProvider{
+			{Provider: "zai", Status: "available", Windows: []service.QuotaWindowReport{
+				{Name: "5h", Used: &used, Limit: &limit},
+				{Name: "weekly", Used: &used, Limit: &limit},
+			}, NextResetAt: &reset},
+			{Provider: "minime", Status: "enabled"},
 		},
+		Routes: []service.MergedStatusRoute{
+			{Name: "global", TargetID: "global", Desired: []string{"glm-4.6", "gpt-5.2", "sonnet"},
+				Effective: []string{"glm-4.6"},
+				Skipped:   []service.SkippedModel{{Model: "gpt-5.2", Reason: "quota exhausted"}, {Model: "sonnet", Reason: "manual disable"}}},
+			{Name: "work-api", TargetID: "work", Desired: []string{"glm-4.6"}, Effective: []string{"glm-4.6"}},
+		},
+		PendingTargets: []string{"work"},
 	}
-	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeStatusText(out, report, s) })
-}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
 
-func TestStatusTextProviderColumnsArePadded(t *testing.T) {
-	// Regression: styled cells (quota/availability/mode) lost their column
-	// padding because their style closures discarded the padded input text,
-	// producing "normalavailablenormalnormal" instead of aligned columns.
-	report := service.StatusReport{
-		Providers: []service.ProviderStatus{
-			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: ""},
-			{Provider: "neuralwatt", Quota: state.QuotaLow, Availability: state.Available, Mode: state.ModeReserve, Reason: "quota_low"},
-		},
-	}
-	wantRows := []string{
-		"provider    quota   availability  mode     reason",
-		"codex       normal  available     normal   normal",
-		"neuralwatt  low     available     reserve  quota_low",
-	}
-	for _, enabled := range []bool{false, true} {
-		var out bytes.Buffer
-		writeStatusText(&out, report, styler{enabled: enabled})
-		got := visibleText(out.String())
-		for _, want := range wantRows {
-			if !strings.Contains(got, want) {
-				t.Fatalf("styled=%v: aligned row missing from output\n  want %q\n  got\n%s", enabled, want, got)
-			}
+	for _, want := range []string{
+		"routing: enabled",
+		"last checked: 2026-08-14 09:12 UTC",
+		"PROVIDER STATUS QUOTA NEXT RESET",
+		"zai available 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
+		"minime enabled no data —",
+		"ROUTE DESIRED EFFECTIVE REASON",
+		"global glm-4.6, gpt-5.2, sonnet glm-4.6 gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable",
+		"work-api glm-4.6 glm-4.6",
+		"warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("normalized output missing %q\noutput:\n%s", want, got)
 		}
 	}
 }
 
-func TestRoutingTextANSIAlignment(t *testing.T) {
-	report := service.RoutingReport{RoutingEnabled: true, Routes: []service.RouteProjection{
-		{TargetID: "global", SourcePath: "config.yaml", Name: "classifier", Effective: []string{"minime/qwen"}},
-		{TargetID: "project-with-long-id", SourcePath: "subagents/researcher.md", Name: "Researcher", Effective: []string{"codex/gpt", "minime/qwen"}},
-	}}
-	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeRoutingText(out, report, s) })
+func TestMergedStatusTextHeaderVariants(t *testing.T) {
+	var out bytes.Buffer
+	writeMergedStatusText(&out, service.MergedStatusReport{RoutingEnabled: false}, styler{})
+	got := collapseSpaces(out.String())
+	for _, want := range []string{"routing: disabled", "last checked: never"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("header missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "warning:") {
+		t.Fatalf("pending warning shown without pending targets: %q", got)
+	}
 }
 
-func TestRoutingExplainTextANSIAlignment(t *testing.T) {
-	report := service.RoutingExplainReport{
-		RoutingEnabled: true,
-		Ranks: []service.ExplainRankProjection{
-			{MappingID: "codex", Status: "ready", Eligible: true, Explanation: "healthy"},
-			{MappingID: "a-much-longer-provider", Status: "ready", OffPeak: true, Eligible: true, Explanation: "off peak"},
-		},
-		Routes: []service.ExplainRouteProjection{
-			{Name: "classifier", Desired: "minime/qwen", Effective: "minime/qwen"},
-			{Name: "Researcher", Desired: "codex/gpt", Effective: "codex/gpt"},
-		},
+func TestMergedStatusTextStatusColors(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		code   string
+	}{
+		{"available", "\x1b[32m"},
+		{"disabled", "\x1b[31m"},
+		{"unavailable", "\x1b[31m"},
+		{"enabled", "\x1b[33m"},
+	} {
+		report := service.MergedStatusReport{Providers: []service.MergedStatusProvider{{Provider: "p", Status: tc.status}}}
+		var out bytes.Buffer
+		writeMergedStatusText(&out, report, styler{enabled: true})
+		// Styles wrap the padded cell text, so match the color prefix + status word.
+		if !strings.Contains(out.String(), tc.code+tc.status) {
+			t.Fatalf("status %s not colored %q in output:\n%s", tc.status, tc.code, out.String())
+		}
 	}
-	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeRoutingExplainText(out, report, s) })
+}
+
+func TestMergedStatusTextProjectionErrorAndWindowFormats(t *testing.T) {
+	pct := 55.5
+	reset := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	report := service.MergedStatusReport{
+		RoutingEnabled: true,
+		Providers: []service.MergedStatusProvider{
+			{Provider: "codex", Status: "available", Windows: []service.QuotaWindowReport{
+				{Name: "5h", UsagePercent: &pct},
+			}, NextResetAt: &reset},
+		},
+		Routes: []service.MergedStatusRoute{
+			{Name: "broken", TargetID: "global", Desired: []string{"a/full"}, ProjectionError: true},
+		},
+		Errors: []service.DiagnosticError{{Scope: service.ErrorScopeRoute, TargetID: "global", Summary: "route projection unavailable"}},
+	}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
+	for _, want := range []string{
+		"codex available 5h 55.5% 2026-08-20 00:00 UTC",
+		"broken a/full none projection unavailable",
+		"error: route projection unavailable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("normalized output missing %q\noutput:\n%s", want, got)
+		}
+	}
+}
+
+func TestMergedStatusTextANSIAlignment(t *testing.T) {
+	used, limit := 41.0, 80.0
+	reset := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	report := service.MergedStatusReport{
+		RoutingEnabled: true,
+		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
+		Providers: []service.MergedStatusProvider{
+			{Provider: "zai", Status: "available", Windows: []service.QuotaWindowReport{{Name: "5h", Used: &used, Limit: &limit}}, NextResetAt: &reset},
+			{Provider: "a-much-longer-provider", Status: "disabled", Windows: []service.QuotaWindowReport{{Name: "5h", Used: &used, Limit: &limit}}, NextResetAt: &reset},
+		},
+		Routes: []service.MergedStatusRoute{
+			{Name: "global", Desired: []string{"glm-4.6", "gpt-5.2"}, Effective: []string{"glm-4.6"},
+				Skipped: []service.SkippedModel{{Model: "gpt-5.2", Reason: "quota exhausted"}}},
+		},
+		PendingTargets: []string{"work"},
+	}
+	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeMergedStatusText(out, report, s) })
+}
+
+func collapseSpaces(text string) string {
+	return strings.Join(strings.Fields(text), " ")
 }

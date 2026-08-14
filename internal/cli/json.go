@@ -14,57 +14,8 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/service"
-	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
-
-// --- status JSON ---
-
-// statusProviderJSON is one provider row in the status JSON envelope.
-type statusProviderJSON struct {
-	Provider       string             `json:"provider"`
-	Quota          state.Quota        `json:"quota"`
-	Availability   state.Availability `json:"availability"`
-	Mode           state.Mode         `json:"mode"`
-	ManualDisabled bool               `json:"manual_disabled"`
-	Reason         string             `json:"reason"`
-}
-
-// statusJSON is the normative top-level status shape:
-//
-//	{"as_of":"...Z","revision":1,"problem":false,"providers":[],"error":"optional"}
-type statusJSON struct {
-	AsOf      time.Time            `json:"as_of"`
-	Revision  uint64               `json:"revision"`
-	Problem   bool                 `json:"problem"`
-	Providers []statusProviderJSON `json:"providers"`
-	Error     string               `json:"error,omitempty"`
-}
-
-func statusEnvelope(r service.StatusReport) statusJSON {
-	out := statusJSON{AsOf: r.AsOf, Revision: r.Revision, Problem: r.Problem, Error: r.Error}
-	for _, p := range r.Providers {
-		out.Providers = append(out.Providers, statusProviderJSON{
-			Provider: p.Provider, Quota: p.Quota, Availability: p.Availability,
-			Mode: p.Mode, ManualDisabled: p.ManualDisabled, Reason: p.Reason,
-		})
-	}
-	if out.Providers == nil {
-		out.Providers = []statusProviderJSON{}
-	}
-	return out
-}
-
-// --- routing JSON ---
-
-// routeJSON is one effective route in the routing JSON envelopes.
-type routeJSON struct {
-	TargetID  string   `json:"target_id"`
-	Name      string   `json:"name"`
-	Source    string   `json:"source,omitempty"`
-	Desired   []string `json:"desired,omitempty"`
-	Effective []string `json:"effective"`
-}
 
 // diagErrorJSON is one safe diagnostic error projection.
 type diagErrorJSON struct {
@@ -75,92 +26,99 @@ type diagErrorJSON struct {
 	Summary    string `json:"summary"`
 }
 
-// routingJSON is the normative top-level bare routing shape:
-//
-//	{"as_of":"...Z","routing_enabled":true,"routes":[],"errors":[]}
-type routingJSON struct {
-	AsOf           time.Time       `json:"as_of"`
-	RoutingEnabled bool            `json:"routing_enabled"`
-	Routes         []routeJSON     `json:"routes"`
-	Errors         []diagErrorJSON `json:"errors"`
-	Error          string          `json:"error,omitempty"`
+// --- status JSON ---
+
+// statusWindowJSON is one raw quota window in the status JSON envelope.
+type statusWindowJSON struct {
+	Name         string   `json:"name"`
+	Used         *float64 `json:"used,omitempty"`
+	Limit        *float64 `json:"limit,omitempty"`
+	UsagePercent *float64 `json:"usage_percent,omitempty"`
+	ResetAt      string   `json:"reset_at,omitempty"`
 }
 
-func routingEnvelope(r service.RoutingReport) routingJSON {
-	out := routingJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled, Error: r.Error}
-	for _, route := range r.Routes {
-		rj := routeJSON{TargetID: route.TargetID, Name: route.Name, Source: route.SourcePath, Effective: route.Effective}
-		if rj.Effective == nil {
-			rj.Effective = []string{}
+// statusProviderJSON is one provider row in the status JSON envelope.
+type statusProviderJSON struct {
+	Provider    string             `json:"provider"`
+	Status      string             `json:"status"`
+	Windows     []statusWindowJSON `json:"windows"`
+	NextResetAt string             `json:"next_reset_at,omitempty"`
+}
+
+// statusSkippedJSON is one desired model absent from the effective chain.
+type statusSkippedJSON struct {
+	Model  string `json:"model"`
+	Reason string `json:"reason"`
+}
+
+// statusRouteJSON is one route with desired/effective chains and skip reasons.
+type statusRouteJSON struct {
+	Name            string              `json:"name"`
+	TargetID        string              `json:"target_id,omitempty"`
+	Desired         []string            `json:"desired"`
+	Effective       []string            `json:"effective"`
+	Skipped         []statusSkippedJSON `json:"skipped,omitempty"`
+	ProjectionError bool                `json:"projection_error,omitempty"`
+}
+
+// statusJSON is the normative top-level merged status shape:
+//
+//	{"routing_enabled":true,"last_checked":"...Z","providers":[],"routes":[],
+//	 "pending_targets":[],"problem":false,"errors":[],"error":"optional"}
+type statusJSON struct {
+	RoutingEnabled bool                 `json:"routing_enabled"`
+	LastChecked    string               `json:"last_checked,omitempty"`
+	Providers      []statusProviderJSON `json:"providers"`
+	Routes         []statusRouteJSON    `json:"routes"`
+	PendingTargets []string             `json:"pending_targets"`
+	Problem        bool                 `json:"problem"`
+	Errors         []diagErrorJSON      `json:"errors"`
+	Error          string               `json:"error,omitempty"`
+}
+
+func statusEnvelope(r service.MergedStatusReport) statusJSON {
+	out := statusJSON{
+		RoutingEnabled: r.RoutingEnabled, Problem: r.Problem,
+		PendingTargets: append([]string{}, r.PendingTargets...), Error: r.Error,
+	}
+	if !r.LastChecked.IsZero() {
+		out.LastChecked = r.LastChecked.UTC().Format(time.RFC3339)
+	}
+	for _, p := range r.Providers {
+		pj := statusProviderJSON{Provider: p.Provider, Status: p.Status}
+		for _, win := range p.Windows {
+			wj := statusWindowJSON{Name: win.Name, Used: win.Used, Limit: win.Limit, UsagePercent: win.UsagePercent}
+			if win.ResetAt != nil {
+				wj.ResetAt = win.ResetAt.UTC().Format(time.RFC3339)
+			}
+			pj.Windows = append(pj.Windows, wj)
 		}
-		rj.Desired = append([]string(nil), route.Desired...)
+		if pj.Windows == nil {
+			pj.Windows = []statusWindowJSON{}
+		}
+		if p.NextResetAt != nil {
+			pj.NextResetAt = p.NextResetAt.UTC().Format(time.RFC3339)
+		}
+		out.Providers = append(out.Providers, pj)
+	}
+	if out.Providers == nil {
+		out.Providers = []statusProviderJSON{}
+	}
+	for _, route := range r.Routes {
+		rj := statusRouteJSON{
+			Name: route.Name, TargetID: route.TargetID, ProjectionError: route.ProjectionError,
+			Desired: append([]string{}, route.Desired...), Effective: append([]string{}, route.Effective...),
+		}
+		for _, s := range route.Skipped {
+			rj.Skipped = append(rj.Skipped, statusSkippedJSON{Model: s.Model, Reason: s.Reason})
+		}
 		out.Routes = append(out.Routes, rj)
 	}
 	if out.Routes == nil {
-		out.Routes = []routeJSON{}
+		out.Routes = []statusRouteJSON{}
 	}
-	for _, e := range r.Errors {
-		out.Errors = append(out.Errors, diagErrorJSON{Scope: string(e.Scope), MappingID: e.MappingID, TargetID: e.TargetID, SourcePath: e.SourcePath, Summary: e.Summary})
-	}
-	if out.Errors == nil {
-		out.Errors = []diagErrorJSON{}
-	}
-	return out
-}
-
-// rankJSON is one provider rank explanation in the explain envelope.
-type rankJSON struct {
-	MappingID   string `json:"mapping_id"`
-	Rank        int    `json:"rank"`
-	OffPeak     bool   `json:"off_peak"`
-	Eligible    bool   `json:"eligible"`
-	Status      string `json:"status"`
-	Explanation string `json:"explanation"`
-}
-
-type explainRouteJSON struct {
-	Name      string `json:"name"`
-	Desired   string `json:"desired"`
-	Effective string `json:"effective"`
-}
-
-// routingExplainJSON is the normative top-level routing explain shape:
-//
-//	{"as_of":"...Z","routing_enabled":true,"ranks":[],"routes":[],"errors":[]}
-type routingExplainJSON struct {
-	AsOf           time.Time          `json:"as_of"`
-	RoutingEnabled bool               `json:"routing_enabled"`
-	Ranks          []rankJSON         `json:"ranks"`
-	Routes         []explainRouteJSON `json:"routes"`
-	PendingTargets *[]string          `json:"pending_targets,omitempty"`
-	Warning        string             `json:"warning,omitempty"`
-	Errors         []diagErrorJSON    `json:"errors"`
-	Error          string             `json:"error,omitempty"`
-}
-
-func routingExplainEnvelope(r service.RoutingExplainReport) routingExplainJSON {
-	out := routingExplainJSON{AsOf: r.AsOf, RoutingEnabled: r.RoutingEnabled, Error: r.Error}
-	if r.Error == "" {
-		pending := append([]string{}, r.PendingTargets...)
-		out.PendingTargets = &pending
-		if len(pending) > 0 {
-			out.Warning = routingPendingWarning(pending)
-		}
-	}
-	for _, rank := range r.Ranks {
-		out.Ranks = append(out.Ranks, rankJSON{
-			MappingID: rank.MappingID, Rank: rank.Rank, OffPeak: rank.OffPeak,
-			Eligible: rank.Eligible, Status: rank.Status, Explanation: rank.Explanation,
-		})
-	}
-	if out.Ranks == nil {
-		out.Ranks = []rankJSON{}
-	}
-	for _, route := range r.Routes {
-		out.Routes = append(out.Routes, explainRouteJSON{Name: route.Name, Desired: route.Desired, Effective: route.Effective})
-	}
-	if out.Routes == nil {
-		out.Routes = []explainRouteJSON{}
+	if out.PendingTargets == nil {
+		out.PendingTargets = []string{}
 	}
 	for _, e := range r.Errors {
 		out.Errors = append(out.Errors, diagErrorJSON{Scope: string(e.Scope), MappingID: e.MappingID, TargetID: e.TargetID, SourcePath: e.SourcePath, Summary: e.Summary})
