@@ -78,6 +78,10 @@ func parseHistoryFlags(args []string) (historyFlags, bool) {
 }
 
 func runHistory(args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	if hasHelpFlag(args) {
+		writeCommandHelp(stdout, "history")
+		return ExitOK
+	}
 	if deps.HistoryQuerier == nil {
 		fmt.Fprintln(stderr, "history: history querier unavailable")
 		return ExitRejected
