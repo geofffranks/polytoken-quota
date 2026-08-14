@@ -111,43 +111,60 @@ func (s styler) severity(sev doctor.Severity) string {
 
 // styleQuota colors a quota level: normal=green, low=yellow, exhausted=red.
 func (s styler) styleQuota(q state.Quota) string {
+	return s.quotaStyler(q)(string(q))
+}
+
+// quotaStyler returns a string transform that colors arbitrary text with the
+// quota semantic color, so padded table cells keep their alignment.
+func (s styler) quotaStyler(q state.Quota) func(string) string {
 	switch q {
 	case state.QuotaNormal:
-		return s.green(string(q))
+		return s.green
 	case state.QuotaLow:
-		return s.yellow(string(q))
+		return s.yellow
 	case state.QuotaExhausted:
-		return s.red(string(q))
+		return s.red
 	default:
-		return string(q)
+		return noopStyler
 	}
 }
 
 // styleAvailability colors an availability: available=green, unavailable=red.
 func (s styler) styleAvailability(a state.Availability) string {
+	return s.availabilityStyler(a)(string(a))
+}
+
+func (s styler) availabilityStyler(a state.Availability) func(string) string {
 	switch a {
 	case state.Available:
-		return s.green(string(a))
+		return s.green
 	case state.Unavailable:
-		return s.red(string(a))
+		return s.red
 	default:
-		return string(a)
+		return noopStyler
 	}
 }
 
 // styleMode colors an effective mode: normal=green, reserve=yellow, disabled=red.
 func (s styler) styleMode(m state.Mode) string {
+	return s.modeStyler(m)(string(m))
+}
+
+func (s styler) modeStyler(m state.Mode) func(string) string {
 	switch m {
 	case state.ModeNormal:
-		return s.green(string(m))
+		return s.green
 	case state.ModeReserve:
-		return s.yellow(string(m))
+		return s.yellow
 	case state.ModeDisabled:
-		return s.red(string(m))
+		return s.red
 	default:
-		return string(m)
+		return noopStyler
 	}
 }
+
+// noopStyler leaves text unchanged (used for unrecognized enum values).
+func noopStyler(t string) string { return t }
 
 // styleFreshness colors a freshness: fresh=green, stale=yellow, missing=red.
 func (s styler) styleFreshness(f string) string {

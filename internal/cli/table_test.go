@@ -91,6 +91,33 @@ func TestStatusTextANSIAlignment(t *testing.T) {
 	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeStatusText(out, report, s) })
 }
 
+func TestStatusTextProviderColumnsArePadded(t *testing.T) {
+	// Regression: styled cells (quota/availability/mode) lost their column
+	// padding because their style closures discarded the padded input text,
+	// producing "normalavailablenormalnormal" instead of aligned columns.
+	report := service.StatusReport{
+		Providers: []service.ProviderStatus{
+			{Provider: "codex", Quota: state.QuotaNormal, Availability: state.Available, Mode: state.ModeNormal, Reason: ""},
+			{Provider: "neuralwatt", Quota: state.QuotaLow, Availability: state.Available, Mode: state.ModeReserve, Reason: "quota_low"},
+		},
+	}
+	wantRows := []string{
+		"provider    quota   availability  mode     reason",
+		"codex       normal  available     normal   normal",
+		"neuralwatt  low     available     reserve  quota_low",
+	}
+	for _, enabled := range []bool{false, true} {
+		var out bytes.Buffer
+		writeStatusText(&out, report, styler{enabled: enabled})
+		got := visibleText(out.String())
+		for _, want := range wantRows {
+			if !strings.Contains(got, want) {
+				t.Fatalf("styled=%v: aligned row missing from output\n  want %q\n  got\n%s", enabled, want, got)
+			}
+		}
+	}
+}
+
 func TestRoutingTextANSIAlignment(t *testing.T) {
 	report := service.RoutingReport{RoutingEnabled: true, Routes: []service.RouteProjection{
 		{TargetID: "global", SourcePath: "config.yaml", Name: "classifier", Effective: []string{"minime/qwen"}},

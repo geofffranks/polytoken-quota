@@ -123,9 +123,9 @@ func writeStatusText(w io.Writer, r service.StatusReport, s styler) {
 				reason = "normal"
 			}
 			rows = append(rows, []tableCell{
-				{text: p.Provider}, {text: string(p.Quota), style: func(string) string { return s.styleQuota(p.Quota) }},
-				{text: string(p.Availability), style: func(string) string { return s.styleAvailability(p.Availability) }},
-				{text: string(p.Mode), style: func(string) string { return s.styleMode(p.Mode) }}, {text: reason},
+				{text: p.Provider}, {text: string(p.Quota), style: s.quotaStyler(p.Quota)},
+				{text: string(p.Availability), style: s.availabilityStyler(p.Availability)},
+				{text: string(p.Mode), style: s.modeStyler(p.Mode)}, {text: reason},
 			})
 		}
 		writeTable(w, rows)
