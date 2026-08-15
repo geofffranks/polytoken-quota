@@ -542,13 +542,20 @@ func TestRenderersDoNotMutateReports(t *testing.T) {
 			Providers:      []service.MergedStatusProvider{{Provider: "codex", Status: "available"}},
 			Routes:         []service.MergedStatusRoute{{Name: "full", Desired: []string{"codex/gpt"}, Effective: []string{"codex/gpt"}}},
 		}
-		originalProviders := len(r.Providers)
+		before, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("marshal report before rendering: %v", err)
+		}
 		s := styler{enabled: false}
 		var buf bytes.Buffer
 		writeMergedStatusText(&buf, r, s)
 		_ = statusEnvelope(r)
-		if len(r.Providers) != originalProviders {
-			t.Fatalf("render mutated providers: %d -> %d", originalProviders, len(r.Providers))
+		after, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("marshal report after rendering: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("render mutated report:\nbefore=%s\nafter=%s", before, after)
 		}
 	})
 
@@ -699,12 +706,13 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 		RoutingEnabled: true,
 		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
 		Providers: []service.MergedStatusProvider{{
-			Provider: "zai", Status: "available",
+			Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true,
+			Reason:      "off-peak, pace 109%",
 			Windows:     []service.QuotaWindowReport{{Name: "5h", Used: &used, Limit: &limit, ResetAt: &reset}},
 			NextResetAt: &reset,
 		}},
 		Routes: []service.MergedStatusRoute{{
-			Name: "global", TargetID: "global",
+			Name: "global", TargetID: "global", SourcePath: "config.yaml",
 			Desired:   []string{"glm-4.6", "gpt-5.2"},
 			Effective: []string{"glm-4.6"},
 			Skipped:   []service.SkippedModel{{Model: "gpt-5.2", Reason: "quota exhausted"}},
@@ -722,6 +730,10 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 		Providers      []struct {
 			Provider string `json:"provider"`
 			Status   string `json:"status"`
+			Rank     int    `json:"rank"`
+			OffPeak  bool   `json:"off_peak"`
+			Eligible bool   `json:"eligible"`
+			Reason   string `json:"reason"`
 			Windows  []struct {
 				Name  string   `json:"name"`
 				Used  *float64 `json:"used"`
@@ -729,10 +741,12 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 			} `json:"windows"`
 		} `json:"providers"`
 		Routes []struct {
-			Name      string   `json:"name"`
-			Desired   []string `json:"desired"`
-			Effective []string `json:"effective"`
-			Skipped   []struct {
+			Name       string   `json:"name"`
+			TargetID   string   `json:"target_id"`
+			SourcePath string   `json:"source_path"`
+			Desired    []string `json:"desired"`
+			Effective  []string `json:"effective"`
+			Skipped    []struct {
 				Model  string `json:"model"`
 				Reason string `json:"reason"`
 			} `json:"skipped"`
@@ -748,12 +762,15 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 	if len(parsed.Providers) != 1 || parsed.Providers[0].Provider != "zai" || parsed.Providers[0].Status != "available" {
 		t.Fatalf("providers wrong: %+v", parsed.Providers)
 	}
+	if parsed.Providers[0].Rank != 1 || !parsed.Providers[0].OffPeak || !parsed.Providers[0].Eligible || parsed.Providers[0].Reason != "off-peak, pace 109%" {
+		t.Fatalf("provider ranking fields missing: %+v", parsed.Providers[0])
+	}
 	win := parsed.Providers[0].Windows[0]
 	if win.Name != "5h" || win.Used == nil || *win.Used != 41 || win.Limit == nil || *win.Limit != 80 {
 		t.Fatalf("raw window numbers missing: %+v", win)
 	}
-	if len(parsed.Routes) != 1 || len(parsed.Routes[0].Desired) != 2 || len(parsed.Routes[0].Effective) != 1 {
-		t.Fatalf("complete route chains missing: %+v", parsed.Routes)
+	if len(parsed.Routes) != 1 || parsed.Routes[0].TargetID != "global" || parsed.Routes[0].SourcePath != "config.yaml" || len(parsed.Routes[0].Desired) != 2 || len(parsed.Routes[0].Effective) != 1 {
+		t.Fatalf("complete route provenance/chains missing: %+v", parsed.Routes)
 	}
 	if len(parsed.Routes[0].Skipped) != 1 || parsed.Routes[0].Skipped[0].Reason != "quota exhausted" {
 		t.Fatalf("routes/skipped wrong: %+v", parsed.Routes)

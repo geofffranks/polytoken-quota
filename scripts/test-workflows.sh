@@ -300,11 +300,11 @@ assert_contains "$readme" 'No release is assumed to exist yet' 'README does not 
 # test_readme_routing_status_contract: every configured mapping is visible in
 # diagnostics; unknown/manual mappings stay managed routing participants, while
 # the merged status surface names provider/route tables and pending targets.
-assert_contains "$readme" 'every configured mapping.*consolidated status' 'README documents all-configured-mapping status participation'
+assert_contains "$readme" 'every configured mapping.*status/reason' 'README documents all-configured-mapping status participation'
 assert_contains "$readme" 'Unknown/manual mappings without a supported quota adapter.*remain managed routing' 'README documents unknown/manual managed routing participation'
-assert_contains "$readme" 'PROVIDER.*STATUS.*QUOTA.*NEXT RESET' 'README documents merged status provider table'
-assert_contains "$readme" 'ROUTE.*DESIRED.*EFFECTIVE.*REASON' 'README documents merged status route table'
-assert_contains "$readme" 'skipped:.*quota exhausted' 'README documents route skip reasons'
+assert_contains "$readme" 'PROVIDER.*STATUS.*REASON.*QUOTA.*NEXT RESET' 'README documents compact merged status provider table'
+assert_contains "$readme" 'TARGET.*SOURCE.*ROUTE.*DESIRED.*EFFECTIVE' 'README documents compact merged status route table'
+assert_contains "$readme" 'first desired/effective model' 'README documents compact route model display'
 assert_contains "$readme" 'target\(s\) pending.*polytoken-quota doctor' 'README documents pending-config doctor pointer'
 assert_contains "$readme" -- '--quiet' 'README documents --quiet for scheduled runs'
 assert_contains "$readme" 'check --reconcile --quiet' 'README scheduler examples use --quiet'

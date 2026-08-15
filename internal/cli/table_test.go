@@ -86,17 +86,17 @@ func TestMergedStatusTextLayout(t *testing.T) {
 		RoutingEnabled: true,
 		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
 		Providers: []service.MergedStatusProvider{
-			{Provider: "zai", Status: "available", Windows: []service.QuotaWindowReport{
+			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, pace 109%", Windows: []service.QuotaWindowReport{
 				{Name: "5h", Used: &used, Limit: &limit},
 				{Name: "weekly", Used: &used, Limit: &limit},
 			}, NextResetAt: &reset},
-			{Provider: "minime", Status: "enabled"},
+			{Provider: "minime", Status: "enabled", Rank: 3, Reason: "not configured"},
 		},
 		Routes: []service.MergedStatusRoute{
-			{Name: "global", TargetID: "global", Desired: []string{"glm-4.6", "gpt-5.2", "sonnet"},
+			{Name: "global", TargetID: "global", SourcePath: "config.yaml", Desired: []string{"glm-4.6", "gpt-5.2", "sonnet"},
 				Effective: []string{"glm-4.6"},
 				Skipped:   []service.SkippedModel{{Model: "gpt-5.2", Reason: "quota exhausted"}, {Model: "sonnet", Reason: "manual disable"}}},
-			{Name: "work-api", TargetID: "work", Desired: []string{"glm-4.6"}, Effective: []string{"glm-4.6"}},
+			{Name: "work-api", TargetID: "work", SourcePath: "subagents/work-api.md", Desired: []string{"glm-4.6"}, Effective: []string{"glm-4.6"}},
 		},
 		PendingTargets: []string{"work"},
 	}
@@ -107,45 +107,17 @@ func TestMergedStatusTextLayout(t *testing.T) {
 	for _, want := range []string{
 		"routing: enabled",
 		"last checked: 2026-08-14 09:12 UTC",
-		"PROVIDER STATUS QUOTA NEXT RESET",
-		"zai available 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
-		"minime enabled no data —",
-		"ROUTE DESIRED EFFECTIVE REASON",
-		"global glm-4.6 glm-4.6 gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable",
-		"work-api glm-4.6 glm-4.6",
+		"PROVIDER STATUS REASON QUOTA NEXT RESET",
+		"zai available off-peak, pace 109% 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
+		"minime enabled not configured no data —",
+		"TARGET SOURCE ROUTE DESIRED EFFECTIVE",
+		"global config.yaml global glm-4.6 glm-4.6",
+		"work subagents/work-api.md work-api glm-4.6 glm-4.6",
 		"warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("normalized output missing %q\noutput:\n%s", want, got)
 		}
-	}
-}
-
-func TestMergedStatusTextCompactsLongRouteChains(t *testing.T) {
-	report := service.MergedStatusReport{
-		RoutingEnabled: true,
-		Routes: []service.MergedStatusRoute{{
-			Name: "full",
-			Desired: []string{
-				"codex/gpt-5.6-luna(high)",
-				"neuralwatt/deepseek-v4-flash(high)",
-				"zai/glm-5.2",
-			},
-			Effective: []string{
-				"codex/gpt-5.6-luna(high)",
-				"neuralwatt/deepseek-v4-flash(high)",
-				"zai/glm-5.2",
-			},
-		}},
-	}
-	var out bytes.Buffer
-	writeMergedStatusText(&out, report, styler{})
-	got := collapseSpaces(out.String())
-	if !strings.Contains(got, "full codex/gpt-5.6-luna(high) codex/gpt-5.6-luna(high)") {
-		t.Fatalf("route row did not show top desired/effective models: %q", got)
-	}
-	if strings.Contains(got, "neuralwatt/deepseek-v4-flash(high)") || strings.Contains(got, "zai/glm-5.2") {
-		t.Fatalf("compact row rendered non-top models: %q", got)
 	}
 }
 
@@ -189,12 +161,12 @@ func TestMergedStatusTextProjectionErrorAndWindowFormats(t *testing.T) {
 	report := service.MergedStatusReport{
 		RoutingEnabled: true,
 		Providers: []service.MergedStatusProvider{
-			{Provider: "codex", Status: "available", Windows: []service.QuotaWindowReport{
+			{Provider: "codex", Status: "available", Rank: 0, Eligible: true, Reason: "peak", Windows: []service.QuotaWindowReport{
 				{Name: "5h", UsagePercent: &pct},
 			}, NextResetAt: &reset},
 		},
 		Routes: []service.MergedStatusRoute{
-			{Name: "broken", TargetID: "global", Desired: []string{"a/full"}, ProjectionError: true},
+			{Name: "broken", TargetID: "global", SourcePath: "config.yaml", Desired: []string{"a/full"}, ProjectionError: true},
 		},
 		Errors: []service.DiagnosticError{{Scope: service.ErrorScopeRoute, TargetID: "global", Summary: "route projection unavailable"}},
 	}
@@ -202,8 +174,8 @@ func TestMergedStatusTextProjectionErrorAndWindowFormats(t *testing.T) {
 	writeMergedStatusText(&out, report, styler{})
 	got := collapseSpaces(out.String())
 	for _, want := range []string{
-		"codex available 5h 55.5% 2026-08-20 00:00 UTC",
-		"broken a/full none projection unavailable",
+		"codex available peak 5h 55.5% 2026-08-20 00:00 UTC",
+		"global config.yaml broken a/full none",
 		"error: route projection unavailable",
 	} {
 		if !strings.Contains(got, want) {
@@ -229,6 +201,48 @@ func TestMergedStatusTextANSIAlignment(t *testing.T) {
 		PendingTargets: []string{"work"},
 	}
 	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeMergedStatusText(out, report, s) })
+}
+
+func TestMergedStatusTextUsesHiddenRankForProviderOrder(t *testing.T) {
+	report := service.MergedStatusReport{
+		Providers: []service.MergedStatusProvider{
+			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, pace 109%"},
+			{Provider: "codex", Status: "available", Rank: 0, Eligible: true, Reason: "peak, pace 50%"},
+		},
+	}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
+	if !strings.Contains(got, "PROVIDER STATUS REASON QUOTA NEXT RESET") {
+		t.Fatalf("compact provider header missing: %q", got)
+	}
+	for _, hidden := range []string{"RANK", "OFF_PEAK", "ELIGIBLE"} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("provider table exposed hidden field %q: %q", hidden, got)
+		}
+	}
+	if strings.Index(got, "codex available") > strings.Index(got, "zai available") {
+		t.Fatalf("providers were not sorted by hidden rank: %q", got)
+	}
+}
+
+func TestMergedStatusTextShowsFirstModelOnlyInRouteChains(t *testing.T) {
+	report := service.MergedStatusReport{Routes: []service.MergedStatusRoute{{
+		Name:      "full",
+		Desired:   []string{"codex/first", "neuralwatt/second", "zai/third"},
+		Effective: []string{"codex/first", "neuralwatt/second", "zai/third"},
+	}}}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
+	if !strings.Contains(got, "full codex/first codex/first") {
+		t.Fatalf("route row did not show first desired/effective models: %q", got)
+	}
+	for _, model := range []string{"neuralwatt/second", "zai/third"} {
+		if strings.Contains(got, model) {
+			t.Fatalf("route row rendered non-first model %q: %q", model, got)
+		}
+	}
 }
 
 func collapseSpaces(text string) string {

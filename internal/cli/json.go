@@ -41,6 +41,10 @@ type statusWindowJSON struct {
 type statusProviderJSON struct {
 	Provider    string             `json:"provider"`
 	Status      string             `json:"status"`
+	Rank        int                `json:"rank"`
+	OffPeak     bool               `json:"off_peak"`
+	Eligible    bool               `json:"eligible"`
+	Reason      string             `json:"reason"`
 	Windows     []statusWindowJSON `json:"windows"`
 	NextResetAt string             `json:"next_reset_at,omitempty"`
 }
@@ -55,6 +59,7 @@ type statusSkippedJSON struct {
 type statusRouteJSON struct {
 	Name            string              `json:"name"`
 	TargetID        string              `json:"target_id,omitempty"`
+	SourcePath      string              `json:"source_path,omitempty"`
 	Desired         []string            `json:"desired"`
 	Effective       []string            `json:"effective"`
 	Skipped         []statusSkippedJSON `json:"skipped,omitempty"`
@@ -85,7 +90,10 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 		out.LastChecked = r.LastChecked.UTC().Format(time.RFC3339)
 	}
 	for _, p := range r.Providers {
-		pj := statusProviderJSON{Provider: p.Provider, Status: p.Status}
+		pj := statusProviderJSON{
+			Provider: p.Provider, Status: p.Status, Rank: p.Rank,
+			OffPeak: p.OffPeak, Eligible: p.Eligible, Reason: p.Reason,
+		}
 		for _, win := range p.Windows {
 			wj := statusWindowJSON{Name: win.Name, Used: win.Used, Limit: win.Limit, UsagePercent: win.UsagePercent}
 			if win.ResetAt != nil {
@@ -106,8 +114,9 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 	}
 	for _, route := range r.Routes {
 		rj := statusRouteJSON{
-			Name: route.Name, TargetID: route.TargetID, ProjectionError: route.ProjectionError,
-			Desired: append([]string{}, route.Desired...), Effective: append([]string{}, route.Effective...),
+			Name: route.Name, TargetID: route.TargetID, SourcePath: route.SourcePath,
+			ProjectionError: route.ProjectionError,
+			Desired:         append([]string{}, route.Desired...), Effective: append([]string{}, route.Effective...),
 		}
 		for _, s := range route.Skipped {
 			rj.Skipped = append(rj.Skipped, statusSkippedJSON{Model: s.Model, Reason: s.Reason})
