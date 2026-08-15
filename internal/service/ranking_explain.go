@@ -109,11 +109,9 @@ func (c *Coordinator) QuotaStatus(_ context.Context) QuotaStatusReport {
 	if c.Policy != nil {
 		if desired, err := c.Policy.LoadPolicy(); err == nil {
 			for id, m := range desired.Providers {
-				if m.Quota != nil {
-					configured[string(id)] = []string{string(id)}
-					if m.Quota.FreshnessTTL > 0 {
-						freshness[string(id)] = m.Quota.FreshnessTTL
-					}
+				configured[string(id)] = []string{string(id)}
+				if m.Quota != nil && m.Quota.FreshnessTTL > 0 {
+					freshness[string(id)] = m.Quota.FreshnessTTL
 				}
 			}
 		}

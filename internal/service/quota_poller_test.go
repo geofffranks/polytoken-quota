@@ -94,6 +94,40 @@ func TestNewQuotaPollerUsesReviewedReleaseEvidence(t *testing.T) {
 	}
 }
 
+func TestQuotaPollerSelection(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.CodexEvidence(now))
+	transport := &fakeTransport{
+		canned: map[string]*http.Response{
+			"chatgpt.com": bodyResponse(`{"rate_limit":{"primary_window":{"used_percent":20,"reset_at":100}}}`),
+		},
+		called: map[string]int{},
+	}
+	poller := &QuotaPollerImpl{
+		Client: &quota.BoundedClient{Transport: transport}, Credentials: literalCreds{}, Evidence: reg,
+		Now: func() time.Time { return now },
+	}
+	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
+		"codex":     {Models: map[string]policy.ModelBaseline{"codex/model": {}}, Quota: &policy.QuotaConfig{Adapter: "codex"}},
+		"anthropic": {Models: map[string]policy.ModelBaseline{"anthropic/model": {}}},
+		"legacy":    {Models: map[string]policy.ModelBaseline{"legacy/model": {}}},
+	}}
+	out, err := poller.Poll(context.Background(), desired, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["codex"]; !ok {
+		t.Fatalf("defaulted codex was not polled: %+v", out)
+	}
+	if _, ok := out["anthropic"]; ok {
+		t.Fatalf("budgetless Anthropic should not be polled: %+v", out)
+	}
+	if _, ok := out["legacy"]; ok {
+		t.Fatalf("unknown/manual mapping should not be polled: %+v", out)
+	}
+}
+
 func TestQuotaPollerIsolationOneFailureDoesNotBlockAnother(t *testing.T) {
 	reg := quota.NewEvidenceRegistry()
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
@@ -241,6 +275,26 @@ func doctorQuotaFindings(t *testing.T, observed state.State, desired policy.Desi
 		evidence: evidence,
 	})
 	return doctor.QuotaFindings(probes, false, now)
+}
+
+func TestDoctorProbesIncludeNormalizedMappings(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
+		"codex":  {Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
+		"legacy": {Models: map[string]policy.ModelBaseline{"legacy/model": {}}},
+	}}
+	probes, _ := buildDoctorQuotaProbes(doctorQuotaInputs{desired: desired, observed: state.State{Providers: map[string]state.ProviderState{}}, now: now})
+	seen := map[string]doctor.QuotaProbe{}
+	for _, probe := range probes {
+		seen[probe.Provider] = probe
+	}
+	if _, ok := seen["codex"]; !ok {
+		t.Fatalf("codex probe missing: %+v", probes)
+	}
+	legacy, ok := seen["legacy"]
+	if !ok || legacy.HasQuotaConfig || legacy.Supported {
+		t.Fatalf("legacy probe=%+v, want visible unsupported probe", legacy)
+	}
 }
 
 func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {

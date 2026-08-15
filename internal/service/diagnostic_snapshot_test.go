@@ -160,6 +160,38 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 	return &diagnosticDeps{desired: desired, observed: observed, targets: resolved, policyExists: true}, root
 }
 
+func TestProjectLegacyQuotaIncludesUnobservedMappings(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.desired.Providers["codex"] = policy.Mapping{Models: map[string]policy.ModelBaseline{"codex/model": {Enabled: true}}, Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}}
+	d.desired.Providers["legacy"] = policy.Mapping{Models: map[string]policy.ModelBaseline{"legacy/model": {Enabled: true}}}
+	rows, _ := projectLegacyQuota(d.desired, d.observed, diagnosticAsOf)
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.MappingID] = true
+	}
+	for _, id := range []string{"alpha", "beta", "codex", "legacy"} {
+		if !seen[id] {
+			t.Fatalf("provider %q missing from legacy projection: %+v", id, rows)
+		}
+	}
+}
+
+func TestProjectProvidersIncludesUnobservedMappings(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.desired.Providers["codex"] = policy.Mapping{Models: map[string]policy.ModelBaseline{"codex/model": {Enabled: true}}, Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}}
+	d.desired.Providers["legacy"] = policy.Mapping{Models: map[string]policy.ModelBaseline{"legacy/model": {Enabled: true}}}
+	providers, _ := projectProviders(d.desired, d.observed, diagnosticAsOf)
+	seen := map[string]bool{}
+	for _, provider := range providers {
+		seen[provider.MappingID] = true
+	}
+	for _, id := range []string{"alpha", "beta", "codex", "legacy"} {
+		if !seen[id] {
+			t.Fatalf("provider %q missing from projection: %+v", id, providers)
+		}
+	}
+}
+
 func TestMergedStatusViewConsolidatesSnapshot(t *testing.T) {
 	observedAt := diagnosticAsOf.Add(-10 * time.Minute)
 	future := diagnosticAsOf.Add(30 * time.Minute)
@@ -429,10 +461,14 @@ func TestQuotaExemptMappingStatusAndRouteSafety(t *testing.T) {
 
 	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())
 	status := snapshot.StatusView()
+	foundMinime := false
 	for _, provider := range status.Providers {
 		if provider.MappingID == "minime" {
-			t.Fatalf("quota-exempt mapping leaked into status: %+v", provider)
+			foundMinime = true
 		}
+	}
+	if !foundMinime {
+		t.Fatalf("configured quota-exempt mapping missing from status: %+v", status.Providers)
 	}
 	legacy := diagnosticCoordinator(d).Status(context.Background(), false)
 	baseline := *d
@@ -443,10 +479,14 @@ func TestQuotaExemptMappingStatusAndRouteSafety(t *testing.T) {
 	if legacy.Problem != withoutLocalHistory.Problem {
 		t.Fatalf("quota-exempt durable history changed status problem: with=%t without=%t", legacy.Problem, withoutLocalHistory.Problem)
 	}
+	foundMinime = false
 	for _, provider := range legacy.Providers {
 		if provider.Provider == "minime" {
-			t.Fatalf("quota-exempt durable history leaked into status providers: %+v", provider)
+			foundMinime = true
 		}
+	}
+	if !foundMinime {
+		t.Fatalf("configured quota-exempt mapping missing from merged status: %+v", legacy.Providers)
 	}
 	for _, route := range snapshot.RoutingView().Routes {
 		if route.Name == "classifier" || route.Name == "Shared (subagents/zeta.md)" {

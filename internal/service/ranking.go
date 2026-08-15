@@ -40,7 +40,9 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 	for _, idStr := range ids {
 		m := desired.Providers[policy.MappingID(idStr)]
 		if m.Quota == nil {
-			continue // no quota config: not a routing participant
+			// Unpollable mappings stay visible in diagnostics but cannot affect
+			// quota ranking or the routing overlay.
+			continue
 		}
 		policies = append(policies, routing.ProviderPolicy{
 			MappingID:    idStr,

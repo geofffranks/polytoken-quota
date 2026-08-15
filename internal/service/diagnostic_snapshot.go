@@ -148,7 +148,7 @@ func completeRankProjection(desired policy.Desired, ranked []routing.RankEntry) 
 	}
 	sort.Strings(missing)
 	for _, id := range missing {
-		out = append(out, RankEntryReport{MappingID: id, Rank: len(out), Explanation: "quota routing not configured"})
+		out = append(out, RankEntryReport{MappingID: id, Rank: len(out), Explanation: "not configured"})
 	}
 	return out
 }

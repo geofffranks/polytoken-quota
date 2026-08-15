@@ -89,11 +89,22 @@ func loadBytes(data []byte) (Desired, error) {
 			}
 			m.Models[base] = mb
 		}
-		// Optional per-provider quota/routing section. When absent it stays nil
-		// (routing treats the mapping as unrankable). When present its schedule
-		// (if any) is validated via routing.ParseSchedule so a bad schedule
-		// rejects policy loading rather than being silently accepted.
-		if mw.Quota != nil {
+		// Supported non-Anthropic mappings default into quota routing even when
+		// the quota section is omitted. Anthropic remains visible but unpollable
+		// without an explicit user budget, because no safe budget default exists.
+		if quota.KnownAdapter(string(id)) {
+			if id == "anthropic" && mw.Quota == nil {
+				// Leave Anthropic unpollable until the user supplies a budget.
+			} else if id == "anthropic" && mw.Quota != nil && !mw.Quota.hasAnyField() {
+				// An explicit empty quota block has the same safe meaning.
+			} else {
+				qc, err := quotaFromWire(string(id), mw.Quota)
+				if err != nil {
+					return Desired{}, err
+				}
+				m.Quota = qc
+			}
+		} else if mw.Quota != nil {
 			qc, err := quotaFromWire(string(id), mw.Quota)
 			if err != nil {
 				return Desired{}, err
@@ -384,6 +395,28 @@ type quotaWire struct {
 	Weight           int           `yaml:"weight"`
 	MonthlyBudgetUSD float64       `yaml:"monthly_budget_usd"`
 	Schedule         *scheduleWire `yaml:"schedule"`
+	hasFields        bool
+	monthlyBudgetSet bool
+}
+
+func (q *quotaWire) UnmarshalYAML(value *yaml.Node) error {
+	type plain quotaWire
+	var decoded plain
+	if err := value.Decode(&decoded); err != nil {
+		return err
+	}
+	*q = quotaWire(decoded)
+	q.hasFields = len(value.Content) > 0
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == "monthly_budget_usd" {
+			q.monthlyBudgetSet = true
+		}
+	}
+	return nil
+}
+
+func (q *quotaWire) hasAnyField() bool {
+	return q != nil && q.hasFields
 }
 
 // scheduleWire is the on-disk shape of a peak schedule. Peak windows are
@@ -446,6 +479,12 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 		}
 		return nil, fmt.Errorf("policy: mapping %q: the provider key selects the quota adapter and must be one of: %s", mappingID, strings.Join(names, ", "))
 	}
+	if w == nil {
+		w = &quotaWire{}
+	}
+	if mappingID == "anthropic" && w.hasAnyField() && !w.monthlyBudgetSet {
+		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
+	}
 	qc := &QuotaConfig{
 		Adapter:          mappingID,
 		FreshnessTTL:     defaultQuotaFreshness,
@@ -453,12 +492,12 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
 	}
-	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 {
+	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 || (mappingID == "anthropic" && w.monthlyBudgetSet && w.MonthlyBudgetUSD == 0) {
 		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be finite and positive", mappingID)
 	}
 	// The anthropic adapter measures month-to-date spend against a
 	// user-defined budget; without one there is nothing to measure against.
-	if mappingID == "anthropic" && w.MonthlyBudgetUSD == 0 {
+	if mappingID == "anthropic" && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
 	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)

@@ -456,7 +456,8 @@ providers:
 }
 
 // TestLoadRoutingQuotaBackwardCompat proves a desired.yaml without routing or
-// quota sections still loads, with routing enabled by default and nil quota.
+// quota sections still loads, with routing enabled by default and default quota
+// configuration for recognized non-Anthropic providers.
 func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	d, err := Load("testdata/synthetic_desired.yaml")
 	if err != nil {
@@ -465,10 +466,82 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	if !d.Routing.Enabled {
 		t.Fatal("routing should be enabled by default for the legacy fixture")
 	}
-	for id, m := range d.Providers {
-		if m.Quota != nil {
-			t.Fatalf("mapping %q has unexpected quota config %+v", id, m.Quota)
+	for _, id := range []MappingID{"codex", "zai"} {
+		q := d.Providers[id].Quota
+		if q == nil || q.Adapter != string(id) || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 || q.Schedule != nil {
+			t.Fatalf("mapping %q quota=%+v, want normalized defaults", id, q)
 		}
+	}
+}
+
+func TestLoadOmittedQuotaDefaults(t *testing.T) {
+	for _, id := range []string{"codex", "zai", "neuralwatt"} {
+		t.Run(id, func(t *testing.T) {
+			yaml := "version: 1\nproviders:\n  " + id + ":\n    models: [" + id + "/model]\n"
+			d, err := Load(writeTemp(t, yaml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			q := d.Providers[MappingID(id)].Quota
+			if q == nil || q.Adapter != id || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
+				t.Fatalf("quota=%+v, want normalized defaults", q)
+			}
+		})
+	}
+}
+
+func TestLoadEmptyQuotaDefaults(t *testing.T) {
+	yaml := `version: 1
+providers:
+  codex:
+    models: [codex/model]
+    quota: {}
+`
+	d, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	q := d.Providers["codex"].Quota
+	if q == nil || q.Adapter != "codex" || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
+		t.Fatalf("quota=%+v, want normalized defaults", q)
+	}
+}
+
+func TestLoadAnthropicQuotaSemantics(t *testing.T) {
+	base := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/model]\n"
+	cases := []struct {
+		name    string
+		suffix  string
+		wantErr string
+		wantNil bool
+	}{
+		{name: "omitted", wantNil: true},
+		{name: "empty", suffix: "    quota: {}\n", wantNil: true},
+		{name: "partial", suffix: "    quota:\n      freshness_ttl: 10m\n", wantErr: "requires monthly_budget_usd"},
+		{name: "zero", suffix: "    quota:\n      monthly_budget_usd: 0\n", wantErr: "must be finite and positive"},
+		{name: "negative", suffix: "    quota:\n      monthly_budget_usd: -1\n", wantErr: "must be finite and positive"},
+		{name: "positive", suffix: "    quota:\n      monthly_budget_usd: 250\n", wantErr: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := Load(writeTemp(t, base+tc.suffix))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			q := d.Providers["anthropic"].Quota
+			if (q == nil) != tc.wantNil {
+				t.Fatalf("quota=%+v, want nil=%v", q, tc.wantNil)
+			}
+			if q != nil && (q.MonthlyBudgetUSD != 250 || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1) {
+				t.Fatalf("quota=%+v, want positive-budget defaults", q)
+			}
+		})
 	}
 }
 
@@ -532,14 +605,18 @@ providers:
 	}
 }
 
-// TestLoadAnthropicBudgetRequired proves the anthropic mapping key requires
-// monthly_budget_usd and loads with it set.
+// TestLoadAnthropicBudgetRequired proves empty Anthropic quota is accepted as
+// visible but unpollable, while a positive monthly budget enables polling.
 func TestLoadAnthropicBudgetRequired(t *testing.T) {
 	base := "version: 1\nproviders:\n  anthropic:\n    models: [anthropic/claude]\n"
-	if _, err := Load(writeTemp(t, base+"    quota: {}\n")); err == nil {
-		t.Fatal("expected anthropic without monthly_budget_usd to be rejected")
+	d, err := Load(writeTemp(t, base+"    quota: {}\n"))
+	if err != nil {
+		t.Fatalf("Load empty quota: %v", err)
 	}
-	d, err := Load(writeTemp(t, base+"    quota:\n      monthly_budget_usd: 250\n"))
+	if d.Providers["anthropic"].Quota != nil {
+		t.Fatalf("empty Anthropic quota=%+v, want unpollable nil config", d.Providers["anthropic"].Quota)
+	}
+	d, err = Load(writeTemp(t, base+"    quota:\n      monthly_budget_usd: 250\n"))
 	if err != nil {
 		t.Fatalf("Load with budget: %v", err)
 	}

@@ -92,10 +92,9 @@ func writeTable(w io.Writer, rows [][]tableCell) {
 }
 
 // writeMergedStatusText renders the merged status report: a header line with
-// routing enablement and one global last-checked timestamp, a provider table
-// (consolidated STATUS, raw window numbers, next reset), a route table with
-// synthesized skip reasons, and a pending-config warning. It reads and
-// formats only; it never mutates the report.
+// routing enablement and one global last-checked timestamp, a ranked provider
+// table, a target/source route table with complete chains, and a pending-config
+// warning. It reads and formats only; it never mutates the report.
 func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) {
 	enabledText, enabledStyle := "enabled", s.green
 	if !r.RoutingEnabled {
@@ -111,13 +110,22 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 		fmt.Fprintln(w)
 		rows := [][]tableCell{{
 			{text: "PROVIDER", style: s.dim}, {text: "STATUS", style: s.dim},
-			{text: "QUOTA", style: s.dim}, {text: "NEXT RESET", style: s.dim},
+			{text: "REASON", style: s.dim}, {text: "QUOTA", style: s.dim},
+			{text: "NEXT RESET", style: s.dim},
 		}}
-		for _, p := range r.Providers {
+		providers := append([]service.MergedStatusProvider(nil), r.Providers...)
+		sort.SliceStable(providers, func(i, j int) bool {
+			if providers[i].Rank != providers[j].Rank {
+				return providers[i].Rank < providers[j].Rank
+			}
+			return providers[i].Provider < providers[j].Provider
+		})
+		for _, p := range providers {
 			quota, quotaStyle := formatMergedWindows(p.Windows, s)
 			rows = append(rows, []tableCell{
 				{text: p.Provider},
 				{text: p.Status, style: s.mergedStatusStyler(p.Status)},
+				{text: p.Reason, style: s.dim},
 				{text: quota, style: quotaStyle},
 				{text: formatMergedReset(p.NextResetAt)},
 			})
@@ -128,19 +136,17 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 	if len(r.Routes) > 0 {
 		fmt.Fprintln(w)
 		rows := [][]tableCell{{
+			{text: "TARGET", style: s.dim}, {text: "SOURCE", style: s.dim},
 			{text: "ROUTE", style: s.dim}, {text: "DESIRED", style: s.dim},
-			{text: "EFFECTIVE", style: s.dim}, {text: "REASON", style: s.dim},
+			{text: "EFFECTIVE", style: s.dim},
 		}}
 		for _, route := range r.Routes {
-			reason := formatSkipReasons(route.Skipped)
-			if route.ProjectionError {
-				reason = "projection unavailable"
-			}
 			rows = append(rows, []tableCell{
+				{text: route.TargetID},
+				{text: route.SourcePath},
 				{text: route.Name},
-				{text: chainText(route.Desired)},
-				{text: chainText(route.Effective)},
-				{text: reason, style: s.dim},
+				{text: topModel(route.Desired)},
+				{text: topModel(route.Effective)},
 			})
 		}
 		writeTable(w, rows)
@@ -186,25 +192,12 @@ func formatMergedReset(reset *time.Time) string {
 	return reset.UTC().Format("2006-01-02 15:04 UTC")
 }
 
-// chainText renders a model chain, or "none" for an empty chain.
-func chainText(chain []string) string {
+// topModel renders the first model in a route, or "none" for an empty chain.
+func topModel(chain []string) string {
 	if len(chain) == 0 {
 		return "none"
 	}
-	return strings.Join(chain, ", ")
-}
-
-// formatSkipReasons renders skipped models as "model skipped: reason" joined
-// with "; ".
-func formatSkipReasons(skipped []service.SkippedModel) string {
-	if len(skipped) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(skipped))
-	for _, s := range skipped {
-		parts = append(parts, fmt.Sprintf("%s skipped: %s", s.Model, s.Reason))
-	}
-	return strings.Join(parts, "; ")
+	return chain[0]
 }
 
 // writeDoctorText renders the doctor report grouped and sorted by severity.

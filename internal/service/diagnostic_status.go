@@ -23,22 +23,26 @@ const (
 	StatusAvailable   = "available"
 )
 
-// MergedStatusProvider is one provider row: consolidated status, raw quota
-// window numbers, and the earliest upcoming reset.
+// MergedStatusProvider is one provider row: consolidated status, ranking
+// metadata, raw quota window numbers, and the earliest upcoming reset.
 type MergedStatusProvider struct {
 	Provider    string              `json:"provider"`
 	Status      string              `json:"status"`
+	Rank        int                 `json:"rank"`
+	OffPeak     bool                `json:"off_peak"`
+	Eligible    bool                `json:"eligible"`
+	Reason      string              `json:"reason"`
 	Windows     []QuotaWindowReport `json:"windows,omitempty"`
 	NextResetAt *time.Time          `json:"next_reset_at,omitempty"`
 }
 
-// MergedStatusRoute is one route with its desired/effective chains and the
-// synthesized skip reasons for desired models absent from the effective
-// chain. ProjectionError marks a route whose projection failed (Skipped is
-// not synthesized for such routes).
+// MergedStatusRoute is one route with target/source provenance and its
+// complete desired/effective chains. ProjectionError marks a route whose
+// projection failed (Skipped is not synthesized for such routes).
 type MergedStatusRoute struct {
 	Name            string         `json:"name"`
 	TargetID        string         `json:"target_id,omitempty"`
+	SourcePath      string         `json:"source_path,omitempty"`
 	Desired         []string       `json:"desired,omitempty"`
 	Effective       []string       `json:"effective,omitempty"`
 	Skipped         []SkippedModel `json:"skipped,omitempty"`
@@ -80,10 +84,19 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	report.Errors = cloneDiagnosticErrors(s.providerErrors)
 	report.Errors = append(report.Errors, cloneDiagnosticErrors(s.routeErrors)...)
 
+	ranks := make(map[string]RankEntryReport, len(s.ranks))
+	for _, rank := range s.ranks {
+		ranks[rank.MappingID] = rank
+	}
 	for _, provider := range s.providers {
+		rank := ranks[provider.MappingID]
 		row := MergedStatusProvider{
 			Provider: provider.MappingID,
 			Status:   mergedProviderStatus(provider),
+			Rank:     rank.Rank,
+			OffPeak:  rank.OffPeak,
+			Eligible: rank.Eligible,
+			Reason:   rank.Explanation,
 		}
 		if provider.CheckedAt.After(report.LastChecked) {
 			report.LastChecked = provider.CheckedAt
@@ -99,7 +112,7 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	routeFailed := failedRouteKeys(s.routeErrors)
 	for _, route := range s.routes {
 		row := MergedStatusRoute{
-			Name: route.Name, TargetID: route.TargetID,
+			Name: route.Name, TargetID: route.TargetID, SourcePath: route.SourcePath,
 			Desired:   append([]string(nil), route.Desired...),
 			Effective: append([]string(nil), route.Effective...),
 		}
