@@ -125,7 +125,7 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 			rows = append(rows, []tableCell{
 				{text: p.Provider},
 				{text: p.Status, style: s.mergedStatusStyler(p.Status)},
-				{text: p.Reason, style: s.dim},
+				{text: p.Reason, style: mergedReasonStyler(s, p.Reason)},
 				{text: quota, style: quotaStyle},
 				{text: formatMergedReset(p.NextResetAt)},
 			})
@@ -161,6 +161,15 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 			"warning: %d target(s) pending — shown values may not be live; run polytoken-quota doctor",
 			len(r.PendingTargets))))
 	}
+}
+
+// mergedReasonStyler styles a provider reason: the normal color like the QUOTA
+// column, except the "not configured" placeholder which stays dim like "no data".
+func mergedReasonStyler(s styler, reason string) func(string) string {
+	if reason == "not configured" {
+		return s.dim
+	}
+	return nil
 }
 
 // formatMergedWindows renders one provider's raw quota numbers: "name used/limit"
