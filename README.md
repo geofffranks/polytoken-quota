@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling participates per provider: any provider mapping with a `quota` block is polled and quota-based routing is enabled by default. The tool ranks configured providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
+Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires a positive `monthly_budget_usd` before it can be polled. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
 The tool never controls a running Polytoken process, stores provider credentials, or persists raw provider responses, auth headers, or account IDs.
 
@@ -77,7 +77,7 @@ The file is versioned YAML and is created by `polytoken-quota init`. Its main se
 - `providers.<id>` is the provider mapping identity, enumerates the exact concrete models managed by that mapping, and optionally carries a `quota` block that enrolls the provider in quota polling and routing. The mapping key selects the quota adapter (`codex`, `zai`, `anthropic`, or `neuralwatt`).
 - `global` defines the global Polytoken root, default chains (`full`, `mini`, `nano`, `classifier`), and the definition files whose `polytoken.model` or `polytoken.fallback_models` fields are managed.
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
-- `routing`, `operational`, and every quota field except `monthly_budget_usd` (required for `anthropic`) are optional with sane defaults — omit them.
+- `routing`, `operational`, and quota fields are optional with sane defaults for supported non-Anthropic mappings. Anthropic may omit `quota` or use `quota: {}` to remain visible but unpollable; set a positive `monthly_budget_usd` to enable its spend adapter.
 
 A complete minimal shape is:
 
@@ -98,7 +98,7 @@ global:
 projects: []
 ```
 
-Mappings without a `quota` block remain managed routing participants: they keep their configured chain positions, are not quota-ranked, and still honor explicit disable or unavailable state. The `status` command shows only mappings with a `quota` block.
+Unknown/manual mappings without a supported quota adapter remain managed routing participants: they keep their configured chain positions, are not quota-ranked or polled, and still honor explicit disable or unavailable state. Every configured mapping appears in diagnostics, including defaulted supported mappings and unpollable Anthropic/manual mappings.
 
 The `models` list is the ownership boundary: only listed concrete models and the listed target chains/definition fields are managed. Preserve unmanaged Polytoken settings outside those fields. Model entries may be bare names, as shown above, or explicit mappings such as `codex/gpt-5: {enabled: true}`.
 
@@ -150,7 +150,7 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | Command | Description |
 |---------|-------------|
 | `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
-| `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, per-provider consolidated status (`disabled`/`unavailable`/`available`/`enabled`), raw per-window quota numbers, next resets, effective routes with skip reasons, and a pending-config warning pointing at `doctor`. |
+| `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's consolidated status (`disabled`/`unavailable`/`available`/`enabled`), raw per-window quota numbers, next resets, compact top-model route rows with skip reasons, and a pending-config warning pointing at `doctor`. `--json` retains complete desired/effective chains. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]]` | Reconcile managed Polytoken fields toward desired state. `--keep-staging` (dry-run only) retains a failed validation candidate's staging root for inspection; the retained path is printed and the caller owns deleting it (it may contain merged configuration). |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
@@ -207,14 +207,14 @@ PROVIDER    STATUS      QUOTA                     NEXT RESET
 zai         available   5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
 minime      enabled     no data                   —
 
-ROUTE           DESIRED                    EFFECTIVE     REASON
-global          glm-4.6, gpt-5.2, sonnet   glm-4.6       gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable
-work-api        glm-4.6                    glm-4.6
+ROUTE           DESIRED       EFFECTIVE     REASON
+global          glm-4.6       glm-4.6       gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable
+work-api        glm-4.6       glm-4.6
 
 warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor
 ```
 
-Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a provider with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`. Quota exhaustion shows in the raw window numbers and the route REASON, not STATUS. The route REASON lists each desired model dropped from the effective chain and why (`manual disable`, `unavailable`, `quota exhausted`). `status --json` emits the same data as one sanitized envelope (raw window numbers, `skipped` arrays, `pending_targets`, `problem`); exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
+Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a configured mapping with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`. Quota exhaustion shows in the raw window numbers and the route REASON, not STATUS. Human route rows show only the top desired and effective model; the route REASON still lists each desired model dropped from the effective chain and why (`manual disable`, `unavailable`, `quota exhausted`). `status --json` emits the complete desired/effective chains and the same sanitized envelope (raw window numbers, `skipped` arrays, `pending_targets`, `problem`); exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
 
 Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only. In interactive use `check` prints each provider's polling status; pass `--quiet` in cron, launchd, or systemd timers to suppress all output (exit codes still reflect success or failure).
 

@@ -138,8 +138,8 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 			}
 			rows = append(rows, []tableCell{
 				{text: route.Name},
-				{text: chainText(route.Desired)},
-				{text: chainText(route.Effective)},
+				{text: topModel(route.Desired)},
+				{text: topModel(route.Effective)},
 				{text: reason, style: s.dim},
 			})
 		}
@@ -192,6 +192,15 @@ func chainText(chain []string) string {
 		return "none"
 	}
 	return strings.Join(chain, ", ")
+}
+
+// topModel renders only the first model in a route for the compact human table.
+// The complete chain remains available through the report and status JSON.
+func topModel(chain []string) string {
+	if len(chain) == 0 {
+		return "none"
+	}
+	return chain[0]
 }
 
 // formatSkipReasons renders skipped models as "model skipped: reason" joined

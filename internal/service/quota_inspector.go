@@ -44,12 +44,11 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 	configs := map[string]qcfg{}
 	configured := make(map[string][]string, len(in.desired.Providers))
 	for mappingID, m := range in.desired.Providers {
-		if m.Quota == nil {
-			continue
-		}
 		id := string(mappingID)
-		configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter}
 		configured[id] = []string{id}
+		if m.Quota != nil {
+			configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter}
+		}
 	}
 	sorted := aggregateProviderNames(configured, in.observed.Providers)
 	sort.Strings(sorted)

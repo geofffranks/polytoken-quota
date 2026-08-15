@@ -64,7 +64,9 @@ func (p *QuotaPollerImpl) Poll(ctx context.Context, desired policy.Desired, prov
 	for _, id := range sortedMappingIDs(desired) {
 		m := desired.Providers[policy.MappingID(id)]
 		if m.Quota == nil {
-			continue // no quota config: not a routing/polling participant
+			// Normalized unsupported/manual mappings and budgetless Anthropic
+			// remain diagnostic-visible but are not quota-polled.
+			continue
 		}
 		if provider != "" && id != provider {
 			continue

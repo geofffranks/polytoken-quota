@@ -729,8 +729,10 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 			} `json:"windows"`
 		} `json:"providers"`
 		Routes []struct {
-			Name    string `json:"name"`
-			Skipped []struct {
+			Name      string   `json:"name"`
+			Desired   []string `json:"desired"`
+			Effective []string `json:"effective"`
+			Skipped   []struct {
 				Model  string `json:"model"`
 				Reason string `json:"reason"`
 			} `json:"skipped"`
@@ -750,7 +752,10 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 	if win.Name != "5h" || win.Used == nil || *win.Used != 41 || win.Limit == nil || *win.Limit != 80 {
 		t.Fatalf("raw window numbers missing: %+v", win)
 	}
-	if len(parsed.Routes) != 1 || len(parsed.Routes[0].Skipped) != 1 || parsed.Routes[0].Skipped[0].Reason != "quota exhausted" {
+	if len(parsed.Routes) != 1 || len(parsed.Routes[0].Desired) != 2 || len(parsed.Routes[0].Effective) != 1 {
+		t.Fatalf("complete route chains missing: %+v", parsed.Routes)
+	}
+	if len(parsed.Routes[0].Skipped) != 1 || parsed.Routes[0].Skipped[0].Reason != "quota exhausted" {
 		t.Fatalf("routes/skipped wrong: %+v", parsed.Routes)
 	}
 	if len(parsed.PendingTargets) != 1 || parsed.PendingTargets[0] != "work" {

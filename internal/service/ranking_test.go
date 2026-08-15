@@ -72,6 +72,23 @@ func pstate(snap *quota.QuotaSnapshot) state.ProviderState {
 	}
 }
 
+func TestQuotaStatusIncludesUnobservedMappings(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
+		"codex":  {Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: time.Hour}},
+		"legacy": {Models: map[string]policy.ModelBaseline{"legacy/model": {}}},
+	}}
+	coord := &Coordinator{State: staticStateStore{state: state.State{Providers: map[string]state.ProviderState{}}}, Policy: staticPolicyLoader{desired: desired}, Clock: fixedClock{t: now}}
+	report := coord.QuotaStatus(context.Background())
+	seen := map[string]bool{}
+	for _, provider := range report.Providers {
+		seen[provider.MappingID] = true
+	}
+	if !seen["codex"] || !seen["legacy"] {
+		t.Fatalf("providers=%+v, want codex and legacy", report.Providers)
+	}
+}
+
 func TestQuotaStatusUsesMappingID(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	usedB, limitB := 80.0, 100.0
@@ -118,6 +135,23 @@ func TestQuotaStatusSanitizesPersistedAttemptErrorBeforeJSON(t *testing.T) {
 	}
 	if strings.Contains(string(data), "status-secret-token") {
 		t.Fatalf("secret survived quota status JSON: %s", data)
+	}
+}
+
+func TestRankingUnknownManualStablePosition(t *testing.T) {
+	desired := qmap(true,
+		rankMapping{id: "codex", bases: []string{"codex/model"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "default", Weight: 1}},
+		rankMapping{id: "legacy", bases: []string{"legacy/model"}},
+	)
+	observed := state.State{Providers: map[string]state.ProviderState{
+		"codex": pstate(qsnap(10, 100)),
+	}}
+	lookup, ranking := ComputeRanking(desired, observed, rankNow)
+	if _, ok := lookup["legacy"]; ok {
+		t.Fatal("unknown/manual mapping entered RankLookup")
+	}
+	if _, ok := rankEntry(ranking, "legacy"); ok {
+		t.Fatal("raw ranking should not contain an unpollable mapping")
 	}
 }
 

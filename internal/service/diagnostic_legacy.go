@@ -35,11 +35,10 @@ func projectLegacyQuota(desired policy.Desired, observed state.State, asOf time.
 	configured := make(map[string][]string, len(desired.Providers))
 	freshness := make(map[string]time.Duration, len(desired.Providers))
 	for id, mapping := range desired.Providers {
-		if mapping.Quota == nil {
-			continue
-		}
 		configured[string(id)] = []string{string(id)}
-		freshness[string(id)] = mapping.Quota.FreshnessTTL
+		if mapping.Quota != nil {
+			freshness[string(id)] = mapping.Quota.FreshnessTTL
+		}
 	}
 	names := make([]string, 0, len(configured))
 	for name := range configured {

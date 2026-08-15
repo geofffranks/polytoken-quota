@@ -89,7 +89,9 @@ type ResetCreditReport struct {
 	SkippedCount         int                         `json:"skipped_count"`
 }
 
-// ProviderProjection is one exact mapping-level diagnostic projection.
+// ProviderProjection is one exact mapping-level diagnostic projection. Every
+// configured mapping is projected; mappings without a pollable quota config use
+// their observed state and remain visible without fabricated quota data.
 type ProviderProjection struct {
 	MappingID      string              `json:"mapping_id"`
 	Adapter        string              `json:"adapter,omitempty"`
@@ -117,10 +119,7 @@ type StatusViewReport struct {
 
 func projectProviders(desired policy.Desired, observed state.State, asOf time.Time) ([]ProviderProjection, []DiagnosticError) {
 	ids := make([]string, 0, len(desired.Providers))
-	for id, mapping := range desired.Providers {
-		if mapping.Quota == nil {
-			continue
-		}
+	for id := range desired.Providers {
 		ids = append(ids, string(id))
 	}
 	sort.Strings(ids)

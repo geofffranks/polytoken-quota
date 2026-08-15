@@ -111,13 +111,41 @@ func TestMergedStatusTextLayout(t *testing.T) {
 		"zai available 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
 		"minime enabled no data —",
 		"ROUTE DESIRED EFFECTIVE REASON",
-		"global glm-4.6, gpt-5.2, sonnet glm-4.6 gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable",
+		"global glm-4.6 glm-4.6 gpt-5.2 skipped: quota exhausted; sonnet skipped: manual disable",
 		"work-api glm-4.6 glm-4.6",
 		"warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("normalized output missing %q\noutput:\n%s", want, got)
 		}
+	}
+}
+
+func TestMergedStatusTextCompactsLongRouteChains(t *testing.T) {
+	report := service.MergedStatusReport{
+		RoutingEnabled: true,
+		Routes: []service.MergedStatusRoute{{
+			Name: "full",
+			Desired: []string{
+				"codex/gpt-5.6-luna(high)",
+				"neuralwatt/deepseek-v4-flash(high)",
+				"zai/glm-5.2",
+			},
+			Effective: []string{
+				"codex/gpt-5.6-luna(high)",
+				"neuralwatt/deepseek-v4-flash(high)",
+				"zai/glm-5.2",
+			},
+		}},
+	}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
+	if !strings.Contains(got, "full codex/gpt-5.6-luna(high) codex/gpt-5.6-luna(high)") {
+		t.Fatalf("route row did not show top desired/effective models: %q", got)
+	}
+	if strings.Contains(got, "neuralwatt/deepseek-v4-flash(high)") || strings.Contains(got, "zai/glm-5.2") {
+		t.Fatalf("compact row rendered non-top models: %q", got)
 	}
 }
 
