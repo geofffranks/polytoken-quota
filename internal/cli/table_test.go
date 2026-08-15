@@ -155,6 +155,29 @@ func TestMergedStatusTextStatusColors(t *testing.T) {
 	}
 }
 
+func TestMergedStatusTextReasonColors(t *testing.T) {
+	dim := "\x1b[2m"
+	for _, tc := range []struct {
+		reason string
+		dimmed bool
+	}{
+		{"peak, pace 36%", false},
+		{"off-peak", false},
+		{"not configured", true},
+	} {
+		report := service.MergedStatusReport{Providers: []service.MergedStatusProvider{{Provider: "p", Status: "available", Reason: tc.reason}}}
+		var out bytes.Buffer
+		writeMergedStatusText(&out, report, styler{enabled: true})
+		// Styles wrap the padded cell text, so match the dim prefix + reason text.
+		if tc.dimmed && !strings.Contains(out.String(), dim+tc.reason) {
+			t.Fatalf("reason %q not dimmed in output:\n%s", tc.reason, out.String())
+		}
+		if !tc.dimmed && strings.Contains(out.String(), dim+tc.reason) {
+			t.Fatalf("reason %q must render in the normal color, not dim:\n%s", tc.reason, out.String())
+		}
+	}
+}
+
 func TestMergedStatusTextProjectionErrorAndWindowFormats(t *testing.T) {
 	pct := 55.5
 	reset := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
