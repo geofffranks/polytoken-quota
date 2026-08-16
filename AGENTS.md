@@ -73,10 +73,17 @@ Contract tests invoke the real Polytoken binary against complete private staging
   credentials, auth blocks, inherited secrets, or raw unrelated config. Sanitize all
   diagnostics and command output. Transient staging is the sole narrowly scoped
   exception and must be private and always deleted.
-- **No daemon / process control.** Never inspect, restart, signal, or otherwise
-  control a live Polytoken daemon/session. Diagnostics must not imply that this
-  utility inspects or controls live sessions; no unconditional restart/reload
-  advisory is required.
+- **Scoped daemon interaction.** The host binary (`check`, `reconcile`,
+  `init`, `routing`, `state`) never contacts, inspects, or signals any live
+  Polytoken daemon or session. The sole exception is the operator-installed
+  `notice-hook` subcommand: it acts only on its **own** session's daemon, via
+  the documented loopback HTTP API, with that session's own credential, and
+  only between turns (a 409 turn-in-flight reply is skipped, never forced).
+  `on_change` actions are operator-configured absolute executables executed
+  host-side after state commit, outside the mutation lock, in a sanitized
+  environment — strictly opt-in, no shell fragments, no notice-content
+  interpolation. Diagnostics must not imply broader live-session inspection
+  or control than this.
 - **Scoped ownership.** Modify only exact managed fields in explicitly registered
   definition files. Never scan arbitrary workspace roots or adopt new files implicitly.
 - **Validation isolation.** Validate against a complete standalone staging root with

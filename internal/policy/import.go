@@ -523,13 +523,23 @@ func marshalDesired(d Desired) ([]byte, error) {
 			doc.Projects = append(doc.Projects, *ot)
 		}
 	}
-	if d.Operational != (Operational{}) {
-		doc.Operational = &outOperational{
+	if !operationalIsZero(d.Operational) {
+		outOps := outOperational{
 			ValidationTimeout:  d.Operational.ValidationTimeout.String(),
 			LockWait:           d.Operational.LockWait.String(),
 			RecoveredRetention: d.Operational.RecoveredRetention.String(),
 			BackupCount:        d.Operational.BackupCount,
+			NoticePath:         d.Operational.NoticePath,
 		}
+		for _, a := range d.Operational.OnChange {
+			outOps.OnChange = append(outOps.OnChange, outOnChange{
+				Run:            a.Run,
+				Args:           a.Args,
+				Env:            a.Env,
+				TimeoutSeconds: a.TimeoutSeconds,
+			})
+		}
+		doc.Operational = &outOps
 	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
@@ -602,4 +612,27 @@ type outOperational struct {
 	LockWait           string `yaml:"lock_wait"`
 	RecoveredRetention string `yaml:"recovered_retention"`
 	BackupCount        int    `yaml:"backup_count"`
+	NoticePath         string `yaml:"notice_path,omitempty"`
+	// OnChange round-trips operator-configured post-commit actions; omitted
+	// entirely when empty.
+	OnChange []outOnChange `yaml:"on_change,omitempty"`
+}
+
+type outOnChange struct {
+	Run            string            `yaml:"run"`
+	Args           []string          `yaml:"args,omitempty"`
+	Env            map[string]string `yaml:"env,omitempty"`
+	TimeoutSeconds int               `yaml:"timeout_seconds,omitempty"`
+}
+
+// operationalIsZero reports whether every operational field is at its zero
+// value (no durations, zero backup count, no notice path, no actions). It
+// replaces direct struct comparison now that Operational contains a slice.
+func operationalIsZero(op Operational) bool {
+	return op.ValidationTimeout == 0 &&
+		op.LockWait == 0 &&
+		op.RecoveredRetention == 0 &&
+		op.BackupCount == 0 &&
+		op.NoticePath == "" &&
+		len(op.OnChange) == 0
 }

@@ -19,9 +19,16 @@ import (
 )
 
 // bannedAdvisoryFragments are the running-session advisory strings that must be
-// absent from all non-test source. Prose fragments are matched on word
+// absent from diagnostics-facing source. Prose fragments are matched on word
 // boundaries so they do not match legitimate substrings (e.g. "reload" inside
 // "preloaded"); identifiers are matched verbatim.
+//
+// Policy note: under the scoped-daemon-interaction boundary (AGENTS.md), the
+// internal/notice package legitimately implements a session-scoped reload
+// (its own daemon, loopback API, between turns). The advisory ban therefore
+// excludes internal/notice and keeps applying everywhere else — status,
+// doctor, and CLI diagnostics must never tell the user to restart or reload
+// sessions.
 var bannedAdvisoryFragments = []string{
 	"running_session_advisory",
 	"RunningSessionAdvisory",
@@ -31,11 +38,17 @@ var bannedAdvisoryFragments = []string{
 	`may retain pre-reconciliation`,
 }
 
+// advisoryExcludedDirs are the internal/ packages exempt from the advisory
+// scan: internal/notice implements the sanctioned session-scoped reload
+// mechanism and necessarily names it.
+var advisoryExcludedDirs = map[string]bool{
+	"notice": true,
+}
+
 // removedCommandNames are the former top-level commands that must not appear as
 // real commands in the usage/help text, nor be suggested to users as runnable
 // commands anywhere in the source.
 var removedCommandNames = []string{
-	"hook",
 	"sync",
 	"quota",
 	"state",
@@ -179,7 +192,7 @@ func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
 			t.Fatalf("ReadDir %s: %v", internalDir, err)
 		}
 		for _, e := range entries {
-			if !e.IsDir() {
+			if !e.IsDir() || advisoryExcludedDirs[e.Name()] {
 				continue
 			}
 			dir := filepath.Join(internalDir, e.Name())
@@ -231,7 +244,7 @@ func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
 		var stderr bytes.Buffer
 		Run(context.Background(), []string{}, io.Reader(strings.NewReader("")), io.Discard, &stderr, Dependencies{})
 		help := stderr.String()
-		wantCommands := []string{"init", "status", "check", "reconcile", "routing", "doctor"}
+		wantCommands := []string{"init", "status", "check", "reconcile", "routing", "doctor", "history", "notice-hook", "install-hook"}
 		// Isolate the commands-listing line so the program name
 		// ("polytoken-quota") is not mistaken for the removed "quota" command.
 		var commandsLine string
@@ -252,6 +265,12 @@ func TestPublicSurfaceHasNoObsoleteCommandsOrAdvisory(t *testing.T) {
 			if re.MatchString(commandsLine) {
 				t.Errorf("usage must not list removed command %q: %q", c, help)
 			}
+		}
+		// The retired CodexBar-era `hook` command must not return, but its
+		// successor `notice-hook` is a real command: match "hook" only as a
+		// space-delimited token, not inside the hyphenated successor.
+		if re := regexp.MustCompile(`(?i)(^|\s)hook(\s|$)`); re.MatchString(commandsLine) {
+			t.Errorf("usage must not list the removed bare %q command: %q", "hook", help)
 		}
 	})
 }

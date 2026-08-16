@@ -197,6 +197,12 @@ type State struct {
 	// ReconcileHistory is the additive schema-v4 bounded record of qualifying
 	// reconciles, newest revision first.
 	ReconcileHistory ReconcileHistory
+
+	// OnChangeExecutedRevision records the revision whose on_change actions
+	// were last reserved for execution. Additive: zero means never. It is the
+	// durable at-most-once marker — overlapping invocations skip revisions
+	// already reserved.
+	OnChangeExecutedRevision uint64
 }
 
 // RoutingHistory records the last good global provider ranking computed by the

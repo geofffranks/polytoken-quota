@@ -3,6 +3,7 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -251,7 +252,7 @@ func TestLoadOperationalBounds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if d.Operational != defaultOperational {
+		if !reflect.DeepEqual(d.Operational, defaultOperational) {
 			t.Fatalf("operational=%+v want default %+v", d.Operational, defaultOperational)
 		}
 	})

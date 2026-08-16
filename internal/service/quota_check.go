@@ -59,9 +59,11 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	problem := anyAttemptFailed(attempts)
 
 	var outcomes []TargetOutcome
+	var targets []RegisteredTarget
+	var terr error
 	if in.Reconcile {
 		c.step("load-sources")
-		targets, terr := c.Targets.ResolveTargets(desired)
+		targets, terr = c.Targets.ResolveTargets(desired)
 		if terr != nil {
 			// Target resolution failed, but the observations are still accepted:
 			// record the resolution as a pending target outcome and persist the
@@ -78,6 +80,11 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	c.step("save-state")
 	if serr := c.State.Save(next); serr != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports, Error: fmt.Errorf("service: persist quota observations: %w", serr)}
+	}
+	if in.Reconcile {
+		if c.notifyTargets(desired, &next, targets, outcomes) {
+			_ = c.State.Save(next) // best-effort persist of a notice-failure event
+		}
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports}
 }

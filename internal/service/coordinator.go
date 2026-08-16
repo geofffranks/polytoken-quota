@@ -70,6 +70,10 @@ type Coordinator struct {
 	// tracer is the observability seam that records each transaction step. It
 	// is nil in production; tests inject a recording tracer.
 	tracer Tracer
+	// pendingChange is the post-commit on_change work stashed by
+	// notifyTargets during a committed, proven-change transaction. transact
+	// releases the advisory lock and then executes it.
+	pendingChange *pendingChange
 }
 
 // transactionKind identifies which public mutator invoked transact.
@@ -177,11 +181,13 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	if err != nil {
 		return Outcome{Error: fmt.Errorf("service: acquire lock: %w", err)}
 	}
+	unlocked := false
 	defer func() {
-		c.step("unlock")
-		_ = unlock()
+		if !unlocked {
+			c.step("unlock")
+			_ = unlock()
+		}
 	}()
-
 	var initExisting bool
 	if kind == txInit {
 		_, err := c.Policy.LoadPolicy()
@@ -213,6 +219,21 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 		return Outcome{Error: fmt.Errorf("service: recover journal: %w", err)}
 	}
 
+	out := c.dispatchTransact(ctx, recovered, in, kind, initExisting)
+	// Release the advisory lock before post-commit on_change execution so
+	// slow operator-configured actions never hold off concurrent mutating
+	// commands past Operational.LockWait.
+	unlocked = true
+	c.step("unlock")
+	_ = unlock()
+	c.runPendingOnChange(ctx)
+	return out
+}
+
+// dispatchTransact runs the kind-specific handler under the already-held
+// advisory lock and returns its outcome. Post-commit work (on_change) is the
+// caller's responsibility, outside the lock.
+func (c *Coordinator) dispatchTransact(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind, initExisting bool) Outcome {
 	switch kind {
 	case txInit:
 		return c.transactInit(ctx, recovered, in, initExisting)
@@ -272,6 +293,9 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
+	}
+	if c.notifyTargets(desired, &next, initTargets, outcomes) {
+		_ = c.State.Save(next) // best-effort persist of a notice-failure event
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
 }
@@ -350,6 +374,9 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
+	if c.notifyTargets(desired, &next, targets, outcomes) {
+		_ = c.State.Save(next) // best-effort persist of a notice-failure event
+	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }
 
@@ -427,6 +454,9 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
+	if c.notifyTargets(desired, &next, targets, outcomes) {
+		_ = c.State.Save(next) // best-effort persist of a notice-failure event
+	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }
 
@@ -483,6 +513,9 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: err}
+	}
+	if c.notifyTargets(desired, &next, targets, outcomes) {
+		_ = c.State.Save(next) // best-effort persist of a notice-failure event
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes}
 }

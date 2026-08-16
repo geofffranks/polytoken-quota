@@ -1,4 +1,5 @@
 ---
+name: global
 polytoken:
   model: zai/glm
   fallback_models:

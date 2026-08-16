@@ -289,6 +289,7 @@ func main() {
 		Diagnoser:       coord,
 		SnapshotBuilder: coord,
 		HistoryQuerier:  historyReader,
+		Policy:          coord.Policy,
 	})
 	os.Exit(code)
 }
