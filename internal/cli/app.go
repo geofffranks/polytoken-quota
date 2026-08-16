@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
+	"github.com/geofffranks/polytoken-quota/internal/notice"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -49,6 +51,9 @@ type Dependencies struct {
 	Diagnoser       service.Diagnoser
 	SnapshotBuilder service.SnapshotBuilder
 	HistoryQuerier  service.HistoryQuerier
+	// Policy resolves the desired policy for install-hook's notice-path
+	// default. Nil-safe: install-hook falls back to the default location.
+	Policy service.PolicyLoader
 	Environment     func() map[string]string
 }
 
@@ -126,11 +131,93 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runDoctor(ctx, args[1:], deps, stdout, stderr)
 	case "history":
 		return runHistory(args[1:], deps, stdout, stderr)
+	case "notice-hook":
+		return runNoticeHook(args[1:], stdout)
+	case "install-hook":
+		return runInstallHook(args[1:], deps, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		usage(stderr)
 		return ExitRejected
 	}
+}
+
+// --- notice-hook (in-session handler) ---
+
+// runNoticeHook is the Polytoken hook handler entry: the operator installs it
+// via `install-hook` and the daemon invokes it at session boundaries. It is
+// deliberately dependency-free — no coordinator, no state store — and always
+// exits 0: convergence misses and handler errors are silent no-ops and
+// blocking events fail open (see AGENTS.md: Scoped daemon interaction).
+func runNoticeHook(args []string, stdout io.Writer) int {
+	var noticePath string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--notice" && i+1 < len(args):
+			noticePath = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--notice="):
+			noticePath = strings.TrimPrefix(args[i], "--notice=")
+		case args[i] == "--help", args[i] == "-h":
+			fmt.Fprintln(stdout, "usage: polytoken-quota notice-hook [--notice PATH]")
+			fmt.Fprintln(stdout, "Invoked by Polytoken hooks (see polytoken-quota install-hook).")
+			return ExitOK
+		}
+	}
+	return notice.RunHook(notice.HookDeps{
+		NoticePath: noticePath,
+		Stdout:     stdout,
+		Environ:    os.Getenv,
+	})
+}
+
+// --- install-hook ---
+
+// runInstallHook installs or removes the in-session hook entries from the
+// Polytoken hooks.json. The notice path default honors a configured
+// operational.notice_path when a policy loader is available.
+func runInstallHook(args []string, deps Dependencies, stdout, stderr io.Writer) int {
+	var opts notice.InstallOptions
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		take := func() string {
+			if i+1 < len(args) {
+				i++
+				return args[i]
+			}
+			return ""
+		}
+		switch {
+		case arg == "--config-dir":
+			opts.ConfigDir = take()
+		case strings.HasPrefix(arg, "--config-dir="):
+			opts.ConfigDir = strings.TrimPrefix(arg, "--config-dir=")
+		case arg == "--handler-path":
+			opts.HandlerPath = take()
+		case strings.HasPrefix(arg, "--handler-path="):
+			opts.HandlerPath = strings.TrimPrefix(arg, "--handler-path=")
+		case arg == "--notice":
+			opts.NoticePath = take()
+		case strings.HasPrefix(arg, "--notice="):
+			opts.NoticePath = strings.TrimPrefix(arg, "--notice=")
+		case arg == "--dry-run":
+			opts.DryRun = true
+		case arg == "--remove":
+			opts.Remove = true
+		case arg == "--help", arg == "-h":
+			fmt.Fprintln(stdout, "usage: polytoken-quota install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]")
+			return ExitOK
+		default:
+			fmt.Fprintf(stderr, "unknown flag: %s\n", arg)
+			return ExitRejected
+		}
+	}
+	if opts.NoticePath == "" && deps.Policy != nil {
+		if desired, err := deps.Policy.LoadPolicy(); err == nil {
+			opts.NoticePath = desired.Operational.NoticePath
+		}
+	}
+	return notice.Install(opts, stdout, stderr)
 }
 
 // --- init (AC.2) ---
@@ -424,6 +511,6 @@ func parseBoolFlags(args []string, allowed ...string) (present, ok bool) {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
-	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history")
+	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history, notice-hook, install-hook")
 	fmt.Fprintln(w, "run 'polytoken-quota help' or 'polytoken-quota <command> --help' for details")
 }

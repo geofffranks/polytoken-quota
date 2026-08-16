@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -285,7 +286,38 @@ func operationalFromWire(w *operationalWire) (Operational, error) {
 	if vt <= 0 || lw <= 0 || rr <= 0 {
 		return Operational{}, errors.New("policy: operational durations must be positive")
 	}
-	return Operational{ValidationTimeout: vt, LockWait: lw, RecoveredRetention: rr, BackupCount: bc}, nil
+	actions, err := onChangeFromWire(w.OnChange)
+	if err != nil {
+		return Operational{}, err
+	}
+	return Operational{ValidationTimeout: vt, LockWait: lw, RecoveredRetention: rr, BackupCount: bc, NoticePath: w.NoticePath, OnChange: actions}, nil
+}
+
+// onChangeFromWire validates and resolves the optional on_change action list:
+// absolute run paths only, bounded per-action timeouts, at most
+// MaxOnChangeActions entries. An empty list resolves to nil (nothing executes).
+func onChangeFromWire(entries []onChangeWire) ([]OnChangeAction, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	if len(entries) > MaxOnChangeActions {
+		return nil, fmt.Errorf("policy: operational on_change allows at most %d actions, got %d", MaxOnChangeActions, len(entries))
+	}
+	out := make([]OnChangeAction, 0, len(entries))
+	for i, e := range entries {
+		if !filepath.IsAbs(e.Run) {
+			return nil, fmt.Errorf("policy: operational on_change[%d] run must be an absolute path, got %q", i, e.Run)
+		}
+		timeout := DefaultOnChangeTimeoutSeconds
+		if e.TimeoutSeconds != nil {
+			timeout = *e.TimeoutSeconds
+		}
+		if timeout < 1 || timeout > MaxOnChangeTimeoutSeconds {
+			return nil, fmt.Errorf("policy: operational on_change[%d] timeout_seconds must be 1..%d, got %d", i, MaxOnChangeTimeoutSeconds, timeout)
+		}
+		out = append(out, OnChangeAction{Run: e.Run, Args: e.Args, Env: e.Env, TimeoutSeconds: timeout})
+	}
+	return out, nil
 }
 
 func parseDur(field, s string, def time.Duration) (time.Duration, error) {
@@ -364,6 +396,17 @@ type operationalWire struct {
 	// BackupCount is a pointer so an omitted key (nil) can default to 5 while
 	// an explicit zero or negative value is still rejected.
 	BackupCount *int `yaml:"backup_count"`
+	// NoticePath is optional; empty means the default notice location.
+	NoticePath string `yaml:"notice_path"`
+	// OnChange is the optional list of post-commit host actions.
+	OnChange []onChangeWire `yaml:"on_change"`
+}
+
+type onChangeWire struct {
+	Run            string            `yaml:"run"`
+	Args           []string          `yaml:"args"`
+	Env            map[string]string `yaml:"env"`
+	TimeoutSeconds *int              `yaml:"timeout_seconds"`
 }
 
 type targetWire struct {

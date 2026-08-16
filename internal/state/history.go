@@ -233,6 +233,7 @@ const (
 	EventManual        EventCategory = "manual"
 	EventQuotaFailure  EventCategory = "quota-failure"
 	EventRoutingChange EventCategory = "routing-change"
+	EventNotice        EventCategory = "notice"
 )
 
 // EventResult describes whether an event changed state or was intentionally
@@ -723,7 +724,7 @@ func ValidateEventHistory(h EventHistory) error {
 		if e.Result != EventChanged && e.Result != EventIgnored && e.Result != EventFailed && e.Result != EventNoChange {
 			return fmt.Errorf("state: invalid event result %q", e.Result)
 		}
-		if e.Category != EventHook && e.Category != EventManual && e.Category != EventQuotaFailure && e.Category != EventRoutingChange {
+		if e.Category != EventHook && e.Category != EventManual && e.Category != EventQuotaFailure && e.Category != EventRoutingChange && e.Category != EventNotice {
 			return fmt.Errorf("state: invalid event category %q", e.Category)
 		}
 	}

@@ -72,6 +72,26 @@ type Target struct {
 	Classifier  Chain
 }
 
+// OnChange bounds for operator-configured host-side actions. The count and
+// timeout ceilings bound the worst-case post-commit work a desired.yaml edit
+// can introduce.
+const (
+	MaxOnChangeActions            = 16
+	DefaultOnChangeTimeoutSeconds = 10
+	MaxOnChangeTimeoutSeconds     = 60
+)
+
+// OnChangeAction is one operator-configured executable executed by the host
+// binary after a reconciled revision changed managed fields. Run must be an
+// absolute path; Args and Env are literal values passed through verbatim (no
+// shell, no notice-content interpolation).
+type OnChangeAction struct {
+	Run            string
+	Args           []string
+	Env            map[string]string
+	TimeoutSeconds int
+}
+
 // Operational holds bounded operational settings. A valid policy requires every
 // duration to be positive and BackupCount to be at least one.
 type Operational struct {
@@ -79,6 +99,12 @@ type Operational struct {
 	LockWait           time.Duration
 	RecoveredRetention time.Duration
 	BackupCount        int
+	// NoticePath overrides the reconciliation-notice file location. When empty,
+	// notice.ResolvePath defaults to ~/.local/polytoken-quota/notice.json.
+	NoticePath string
+	// OnChange lists opt-in host-side actions executed after a committed
+	// revision changed managed fields. Empty by default: nothing executes.
+	OnChange []OnChangeAction
 }
 
 // QuotaConfig holds per-provider quota/routing configuration (additive on

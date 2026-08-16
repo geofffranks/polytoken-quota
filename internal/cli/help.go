@@ -39,7 +39,7 @@ type helpDoc struct {
 
 // commandOrder is the display order for top-level commands in root help.
 var commandOrder = []string{
-	"init", "status", "check", "reconcile", "routing", "doctor", "history",
+	"init", "status", "check", "reconcile", "routing", "doctor", "history", "notice-hook", "install-hook",
 }
 
 // helpDocs maps each command path to its help content. Top-level commands use
@@ -127,6 +127,26 @@ var helpDocs = map[string]helpDoc{
 			{"--limit N", "Number of recent records (1-100, default 20)"},
 			{"--revision N", "Show detail for a specific revision"},
 			{"--json", "Output JSON"},
+		},
+	},
+	"notice-hook": {
+		short: "Run one in-session hook event (installed by install-hook)",
+		long: "Handle one Polytoken hook event: converge this session's daemon to a newly published reconciliation notice and surface model-drift information. Invoked by the hooks installed with install-hook; not for direct use.",
+		usage: []string{"polytoken-quota notice-hook [--notice PATH]"},
+		flags: []flagDoc{
+			{"--notice PATH", "Notice file to consume (defaults to the published path)"},
+		},
+	},
+	"install-hook": {
+		short: "Install or remove the in-session Polytoken hook entries",
+		long: "Idempotently add (or remove with --remove) the two hooks.json entries that route session events to notice-hook. Backs up hooks.json before writing and never touches unrelated entries.",
+		usage: []string{"polytoken-quota install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]"},
+		flags: []flagDoc{
+			{"--config-dir DIR", "Polytoken config dir (default ~/.config/polytoken)"},
+			{"--handler-path PATH", "Handler binary path as seen inside agent containers"},
+			{"--notice PATH", "Notice path to bake into the handler (default: configured/default notice location)"},
+			{"--dry-run", "Print the diff without writing"},
+			{"--remove", "Remove the installed entries"},
 		},
 	},
 }

@@ -4,7 +4,7 @@
 
 Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires a positive `monthly_budget_usd` before it can be polled. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
-The tool never controls a running Polytoken process, stores provider credentials, or persists raw provider responses, auth headers, or account IDs.
+The tool never contacts a running Polytoken daemon from the host; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). It stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
 
 ## Minimum versions
 
@@ -158,6 +158,8 @@ z.ai allowance. The window resets at the first of each month (UTC).
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
 | `doctor [--json]` | Run configuration, quota, journal, and persisted-error diagnostics. |
 | `history [--limit N] [--revision N] [--json]` | Show the meaningful provider/routing event timeline. `--limit` (1–100, default 20) limits event rows; `--revision` shows all events for one revision; `--json` emits deterministic structured events. |
+| `install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]` | Install or remove the in-session Polytoken hook entries (see below). |
+| `notice-hook [--notice PATH]` | Internal: handle one in-session hook event. Invoked by the installed hooks, not for direct use. |
 
 Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
 
@@ -266,4 +268,48 @@ Example cron entry (run `crontab -e`):
 */30 * * * * /usr/local/bin/polytoken-quota check --reconcile --quiet
 ```
 
-Changing quota policy or enabling routing may change the choices seen by existing Polytoken sessions. The utility never controls those sessions. Quota polling never persists credentials, raw provider responses, auth headers, or account IDs. Only bounded, sanitized quota observations and error summaries are stored in the utility state.
+## Change propagation to running sessions
+
+Host commands never contact Polytoken daemons. Instead, every reconcile that
+changes managed fields publishes a small tool-neutral notice document (schema
+version, revision, effective chains, changed fields, disabled models) at
+`operational.notice_path` (default `~/.local/polytoken-quota/notice.json`,
+atomically written, never containing credentials). Two delivery mechanisms
+consume it:
+
+**In-session convergence (opt-in).** `polytoken-quota install-hook` installs
+two entries into Polytoken's `hooks.json` (backup kept, unrelated entries
+untouched, `--remove` to uninstall, `--dry-run` to preview). The handler is
+the `notice-hook` subcommand, which acts only on its **own** session's daemon
+via the documented loopback API with that session's own credential:
+
+- After each model turn, a session whose notice revision is newer than its
+  consumed marker reloads its daemon's configuration. Reloads are
+  turn-safe (a busy turn defers to the next one), preserve history, and
+  never restart or compact the session. A model whose provider was disabled
+  falls back to the configured chain head; routine quota rebalancing only
+  reorders chains and never forces a switch.
+- When you submit a prompt, a session running a model that dropped out of
+  its configured chain receives one non-blocking reminder per revision —
+  actionable if the model is disabled, informational if you deliberately
+  picked a model outside the chain. A reload-forced model change is reported
+  once (context on the new provider starts uncached). Switching models
+  always remains your choice; nothing compacts or swaps a session.
+
+Because agent containers each run their own loopback-only daemon, the notice
+path must be visible inside them: bind-mount `~/.local/polytoken-quota` at
+the same path (the install output reminds you), or point
+`operational.notice_path` at an already-shared location. The handler binary
+must likewise exist at the `--handler-path` inside containers (for example
+`/home/dev/bin/polytoken-quota`).
+
+**Host-side actions (opt-in).** The `operational.on_change` list (see
+[docs/configuration.md](docs/configuration.md)) runs operator-configured
+absolute executables on the host after a committed change, with the notice
+JSON on stdin — the generic hook for reconfiguring other CLIs or notifying
+yourself. Failures are recorded as events and never affect reconciliation.
+
+Changing quota policy or enabling routing may change the choices seen by
+existing Polytoken sessions; with the hook installed those sessions converge
+on their own, and the drift reminders keep you informed without forcing
+costly model swaps.

@@ -135,6 +135,100 @@ valid.
 | `lock_wait` | `10s` | How long to wait for the state mutation lock. |
 | `recovered_retention` | `168h` | How long recovered-error history is kept. |
 | `backup_count` | `5` | State backups retained. Must be at least 1. |
+| `notice_path` | `~/.local/polytoken-quota/notice.json` | Where the reconciliation notice is published. The path must be visible inside agent containers for the in-session hook to converge (bind-mount it at the same path, or point it at an already-shared location). |
+| `on_change` | none | Opt-in host-side actions run after a committed revision changed managed fields (see below). |
 
 Durations are Go duration strings (`30s`, `10m`, `168h`) and must be
 positive; a negative or zero `backup_count` is rejected at load.
+
+### `on_change`
+
+An optional list of actions executed by the host binary after a reconcile
+commits a revision that changed at least one managed field. Each action is an
+absolute executable invoked directly (no shell) with the notice JSON on
+stdin, literal arguments, and a minimal sanitized environment (only `PATH`
+and `HOME` plus the configured `env`) — provider credentials in the
+environment never reach an action. Actions run after the state commit,
+outside the mutation lock, at most once per revision, inside a 120s
+aggregate budget; unstarted actions past the budget are skipped. Failures
+(non-zero exit, timeout, spawn error, budget skip) are recorded as
+`notice`-category `on-change-failed` events visible in
+`polytoken-quota history` (notice publication failures are recorded as
+`notice`-category `notice-publish`/`notice-render`/`notice-path` events) and
+never change the reconcile's exit code. At most 16 actions, each with a
+1–60s timeout (default 10s).
+
+```yaml
+operational:
+  on_change:
+    - run: /usr/local/bin/reconfigure-other-cli
+      args: ["--scope", "global"]
+      env: { CLI_CONFIG: /etc/cli.conf }
+      timeout_seconds: 10
+```
+
+`run` must be an absolute path; `args` and `env` values are literal strings
+with no interpolation of notice content. With no `on_change` configured,
+nothing executes.
+
+### Notice payload
+
+The same JSON document is used for the notice file and as the `stdin` payload
+for every `on_change` action. There is no additional envelope. A representative
+payload is:
+
+```json
+{
+  "schema": 1,
+  "revision": 43,
+  "published_at": "2026-08-16T02:00:05Z",
+  "routing_enabled": true,
+  "targets": [
+    {
+      "id": "global",
+      "kind": "global",
+      "chains": [
+        {"name": "full", "models": ["codex/gpt-5.6-luna", null]},
+        {"name": "mini", "models": ["minime/gemma-3-27b"]}
+      ],
+      "changed_fields": [["defaults", "full"]]
+    },
+    {
+      "id": "work-api",
+      "kind": "definition",
+      "file": "subagents/work-api.md",
+      "facet": "work-api",
+      "chain": ["codex/gpt-5.6-luna", "zai/glm-4.6"],
+      "changed_fields": [["polytoken", "model"]]
+    }
+  ],
+  "disabled_models": ["zai/glm-5.2"]
+}
+```
+
+Payload fields:
+
+| Field | Meaning |
+|---|---|
+| `schema` | Notice schema version. Current value: `1`. |
+| `revision` | The committed ptq state revision that caused the notice. |
+| `published_at` | UTC publication timestamp in RFC 3339 format. |
+| `routing_enabled` | Whether quota-based routing was enabled for the revision. |
+| `targets` | Changed/effective model facts for the global target and managed definition targets. |
+| `targets[].chains` | Global named chains such as `full`, `mini`, and `nano`. Each model is a Polytoken registry key; `null` means ptq could not resolve the model to a registry key. |
+| `targets[].chain` | Effective chain for a managed definition target. |
+| `targets[].changed_fields` | Managed key paths changed in the revision. Values are never included. |
+| `targets[].facet` | Definition facet name when ptq can derive it from the managed definition path. |
+| `disabled_models` | The standing set of models whose mapped provider is currently disabled, not merely models disabled by this particular revision. |
+
+The notice is written only after a committed reconciliation changes at least
+one managed file. It is written atomically with restrictive permissions. It
+never contains provider credentials, auth values, raw command output, or
+unmanaged configuration. If notice publication fails, ptq records a sanitized
+notice event and does not change the reconciliation result.
+
+For `on_change`, ptq invokes each configured executable directly with the
+complete notice document above on standard input. The process environment is
+limited to `PATH`, `HOME`, and the configured `env` additions. Actions run
+after state commit, outside the mutation lock, and failures do not alter ptq's
+exit code; inspect `polytoken-quota history` for failure events.
