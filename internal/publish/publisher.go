@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/state"
@@ -293,6 +294,19 @@ func (p Publisher) prepareOne(root string, r *Replacement) error {
 		if err := ensureNoSymlink(root, r.LivePath); err != nil {
 			return err
 		}
+	}
+	// Re-check the live bytes immediately before preparing the rename batch. The
+	// coordinator captured OldHash before validation, so this closes the window
+	// where an external writer could otherwise be overwritten by a stale apply.
+	current, err := sha256OfFile(fs, r.LivePath)
+	if err != nil && !os.IsNotExist(err) {
+		return errStep(stepTempWrite, err)
+	}
+	if os.IsNotExist(err) {
+		current = [32]byte{}
+	}
+	if current != r.OldHash {
+		return fmt.Errorf("publish: live file %s changed since preparation", r.LivePath)
 	}
 	// Verify the staged candidate temp content matches NewHash before renaming.
 	data, err := fs.ReadFile(r.TempPath)

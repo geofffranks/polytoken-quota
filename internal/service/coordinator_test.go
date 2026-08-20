@@ -33,6 +33,47 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
+func TestBuildTransactionPublishesOnlyPreparedChanges(t *testing.T) {
+	root := t.TempDir()
+	publishDir := t.TempDir()
+	changedLive := filepath.Join(root, "config.yaml")
+	unchangedLive := filepath.Join(root, "subagents", "same.md")
+	changedTemp := filepath.Join(publishDir, "config.yaml")
+	unchangedTemp := filepath.Join(publishDir, "subagents", "same.md")
+	mustWrite(t, changedLive, "old-config")
+	mustWrite(t, unchangedLive, "same-definition")
+	mustWrite(t, changedTemp, "new-config")
+	mustWrite(t, unchangedTemp, "same-definition")
+
+	plan := reconcile.Plan{Edits: []reconcile.FieldEdit{
+		{File: "config.yaml", Path: []string{"defaults", "full"}, Scalar: strPtr("codex/gpt")},
+		{File: "subagents/same.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
+	}}
+	prepValue, err := BuildPrepareResult("global", plan, root, publishDir)
+	if err != nil {
+		t.Fatalf("BuildPrepareResult: %v", err)
+	}
+	prep := &prepValue
+	rt := RegisteredTarget{
+		Policy:   policy.Target{ID: "global", Global: true},
+		Resolved: target.Resolved{ID: "global", CanonicalRoot: root, Global: true},
+	}
+	candidate := staging.Candidate{PublishDir: publishDir}
+
+	tx, err := (&Coordinator{}).buildTransaction(
+		state.State{Revision: 1}, state.State{Revision: 2}, rt, plan, candidate, prep,
+	)
+	if err != nil {
+		t.Fatalf("buildTransaction: %v", err)
+	}
+	if len(tx.Replacements) != 1 {
+		t.Fatalf("got %d replacements, want 1: %+v", len(tx.Replacements), tx.Replacements)
+	}
+	if tx.Replacements[0].LivePath != changedLive {
+		t.Fatalf("published replacement = %q, want changed file %q", tx.Replacements[0].LivePath, changedLive)
+	}
+}
+
 const validTargetKey = "valid"
 
 type testSourceReader struct{}

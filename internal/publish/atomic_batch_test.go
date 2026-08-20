@@ -9,6 +9,7 @@ package publish
 // intermittently catch as an invalid configuration.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"os"
@@ -177,6 +178,27 @@ func TestApplyUnderLockRenamesAreContiguous(t *testing.T) {
 		if string(got) != p.want {
 			t.Fatalf("live file %s = %q, want %q", p.path, got, p.want)
 		}
+	}
+}
+
+// TestApplyUnderLockRejectsStaleLiveBytesBeforeRename proves publication refuses
+// to overwrite bytes changed after preparation captured OldHash.
+func TestApplyUnderLockRejectsStaleLiveBytesBeforeRename(t *testing.T) {
+	env := newStagedEnv(t, "")
+	newer := []byte("concurrent newer config\n")
+	if err := os.WriteFile(env.LivePath, newer, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.Publisher.ApplyUnderLock(context.Background(), env.Tx); err == nil {
+		t.Fatal("expected stale live bytes to reject publication")
+	}
+	got, err := os.ReadFile(env.LivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, newer) {
+		t.Fatalf("stale publication replaced newer live bytes: got %q want %q", got, newer)
 	}
 }
 

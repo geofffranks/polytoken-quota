@@ -616,7 +616,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	}
 	if publish {
 		step("publish")
-		tx, err := c.buildTransaction(prior, next, rt, plan, candidate)
+		tx, err := c.buildTransaction(prior, next, rt, plan, candidate, prep)
 		if err != nil {
 			step("record-pending")
 			out := pendingOutcome(id, next.Revision, "publish", err)
@@ -720,19 +720,23 @@ func sortedTargetIDs(m map[string]state.TargetState) []string {
 	return ids
 }
 
-// buildTransaction constructs a publish.Transaction from the plan's files mapped
-// to their live and staged paths. Temp paths read from the candidate's
-// PublishDir — the real-content copies with plan edits applied — so the
-// inert placeholders used for validation in ConfigDir never reach live files.
-// The publisher's applyOne re-reads the temp file and asserts sha256(data) ==
-// NewHash before renaming, so NewHash MUST be the SHA-256 of the staged temp
-// content the staging.Builder wrote. OldHash is the SHA-256 of the current live
-// file (zero [32]byte on first publish when no live file exists). Mode is the
-// live file's permission bits (0600 default when no live file exists) so the
-// renamed file preserves it.
-func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate) (publish.Transaction, error) {
+// buildTransaction constructs a publish.Transaction from the prepared plan's
+// changed files, mapped to their live and staged paths. When preparation is
+// available, its hash comparison is authoritative for deciding which files need
+// publication; without it, the equal-hash check below preserves the no-op
+// behavior. Temp paths read from the candidate's PublishDir — the real-content
+// copies with plan edits applied — so validation placeholders never reach live
+// files. Every retained replacement still gets its hashes and mode from
+// buildReplacement before the publisher performs the atomic rename.
+func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTarget, plan reconcile.Plan, candidate staging.Candidate, prep *PrepareResult) (publish.Transaction, error) {
 	var replacements []publish.Replacement
 	seen := map[string]bool{}
+	changedLive := map[string]bool{}
+	if prep != nil {
+		for _, r := range prep.Replacements {
+			changedLive[r.LivePath] = true
+		}
+	}
 	// SourceDir is the real-content publish dir; fall back to ConfigDir when
 	// the publish dir is empty (e.g. a plan with no edits, or an older
 	// candidate constructed without PublishDir).
@@ -746,10 +750,19 @@ func (c *Coordinator) buildTransaction(prior, next state.State, rt RegisteredTar
 		}
 		seen[fe.File] = true
 		livePath := filepath.Join(rt.Resolved.CanonicalRoot, filepath.FromSlash(fe.File))
+		// BuildPrepareResult has already compared the staged bytes with the live
+		// bytes. When available, publish only the files it proved changed. The
+		// equal-hash check below remains a defense for callers without prep data.
+		if prep != nil && !changedLive[livePath] {
+			continue
+		}
 		tempPath := filepath.Join(sourceDir, filepath.FromSlash(fe.File))
 		r, err := buildReplacement(livePath, tempPath)
 		if err != nil {
 			return publish.Transaction{}, err
+		}
+		if r.OldHash == r.NewHash {
+			continue
 		}
 		replacements = append(replacements, r)
 	}
