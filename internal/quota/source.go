@@ -300,6 +300,16 @@ var builtInAdapters = []AdapterDefinition{
 		},
 	},
 	{
+		Name:     anthropicSubscriptionName,
+		Evidence: AnthropicSubscriptionEvidence,
+		// The subscription source resolves its own Claude OAuth credentials
+		// (file/Keychain) rather than the poller's env-based resolver; the
+		// creds and budget parameters are deliberately unused.
+		New: func(id string, client *BoundedClient, _ CredentialResolver, _ float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewAnthropicSubscriptionSource(id, client, nil, reg, now)
+		},
+	},
+	{
 		Name:     neuralwattProviderName,
 		Evidence: NeuralwattEvidence,
 		New: func(id string, client *BoundedClient, creds CredentialResolver, budget float64, reg *EvidenceRegistry, now time.Time) QuotaSource {

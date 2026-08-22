@@ -114,8 +114,10 @@ type Operational struct {
 // FreshnessTTL 30m, BalanceGroup "default", Weight 1 when zero/empty.
 type QuotaConfig struct {
 	// Adapter is the quota adapter name ("codex" | "zai" | "anthropic" |
-	// "neuralwatt"). It is not user-configurable: Load derives it from the
-	// provider mapping key and validates it is a known adapter.
+	// "anthropic-subscription" | "neuralwatt"). It is not user-configurable:
+	// Load derives it from the provider mapping key (and, for anthropic, the
+	// quota `mode` — `subscription` selects the anthropic-subscription
+	// adapter) and validates it is a known adapter.
 	Adapter      string
 	FreshnessTTL time.Duration // default 30m when zero
 	BalanceGroup string        // default "default"

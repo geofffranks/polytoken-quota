@@ -437,6 +437,7 @@ type quotaWire struct {
 	BalanceGroup     string        `yaml:"balance_group"`
 	Weight           int           `yaml:"weight"`
 	MonthlyBudgetUSD float64       `yaml:"monthly_budget_usd"`
+	Mode             string        `yaml:"mode"`
 	Schedule         *scheduleWire `yaml:"schedule"`
 	hasFields        bool
 	monthlyBudgetSet bool
@@ -525,22 +526,43 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	if w == nil {
 		w = &quotaWire{}
 	}
-	if mappingID == "anthropic" && w.hasAnyField() && !w.monthlyBudgetSet {
+	// quota.mode selects the Anthropic source: "api" (default, the Admin
+	// cost-report adapter) or "subscription" (the experimental OAuth usage
+	// adapter). It is only meaningful for anthropic.
+	mode := strings.TrimSpace(w.Mode)
+	if mappingID != "anthropic" && mode != "" {
+		return nil, fmt.Errorf("policy: mapping %q: quota mode is only valid for the anthropic provider", mappingID)
+	}
+	if mode == "" {
+		mode = "api"
+	}
+	if mode != "api" && mode != "subscription" {
+		return nil, fmt.Errorf("policy: mapping %q: unknown quota mode %q (want api or subscription)", mappingID, mode)
+	}
+	if mode == "subscription" {
+		if w.monthlyBudgetSet {
+			return nil, fmt.Errorf("policy: mapping %q: quota mode subscription does not use monthly_budget_usd (the subscription's own session/weekly caps are the quota); remove it", mappingID)
+		}
+	} else if mappingID == "anthropic" && w.hasAnyField() && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
+	adapter := mappingID
+	if mode == "subscription" {
+		adapter = "anthropic-subscription"
+	}
 	qc := &QuotaConfig{
-		Adapter:          mappingID,
+		Adapter:          adapter,
 		FreshnessTTL:     defaultQuotaFreshness,
 		BalanceGroup:     w.BalanceGroup,
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
 	}
-	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 || (mappingID == "anthropic" && w.monthlyBudgetSet && w.MonthlyBudgetUSD == 0) {
+	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 || (mappingID == "anthropic" && mode == "api" && w.MonthlyBudgetUSD == 0) {
 		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be finite and positive", mappingID)
 	}
-	// The anthropic adapter measures month-to-date spend against a
+	// The anthropic api-mode adapter measures month-to-date spend against a
 	// user-defined budget; without one there is nothing to measure against.
-	if mappingID == "anthropic" && !w.monthlyBudgetSet {
+	if mappingID == "anthropic" && mode == "api" && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
 	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)
