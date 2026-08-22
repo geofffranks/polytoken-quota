@@ -19,7 +19,7 @@ import (
 
 func TestBuiltInAdapterRegistry(t *testing.T) {
 	definitions := AdapterDefinitions()
-	want := []string{"anthropic", "codex", "neuralwatt", "zai"}
+	want := []string{"anthropic", "anthropic-subscription", "codex", "neuralwatt", "zai"}
 	if len(definitions) != len(want) {
 		t.Fatalf("definitions=%d want %d", len(definitions), len(want))
 	}

@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires a positive `monthly_budget_usd` before it can be polled. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
+Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires either a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription-window polling. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
 The tool never contacts a running Polytoken daemon from the host; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). It stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
 
@@ -77,7 +77,7 @@ The file is versioned YAML and is created by `polytoken-quota init`. Its main se
 - `providers.<id>` is the provider mapping identity, enumerates the exact concrete models managed by that mapping, and optionally carries a `quota` block that enrolls the provider in quota polling and routing. The mapping key selects the quota adapter (`codex`, `zai`, `anthropic`, or `neuralwatt`).
 - `global` defines the global Polytoken root, default chains (`full`, `mini`, `nano`, `classifier`), and the definition files whose `polytoken.model` or `polytoken.fallback_models` fields are managed.
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
-- `routing`, `operational`, and quota fields are optional with sane defaults for supported non-Anthropic mappings. Anthropic may omit `quota` or use `quota: {}` to remain visible but unpollable; set a positive `monthly_budget_usd` to enable its spend adapter.
+- `routing`, `operational`, and quota fields are optional with sane defaults for supported non-Anthropic mappings. Anthropic may omit `quota` or use `quota: {}` to remain visible but unpollable; set a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription polling.
 
 A complete minimal shape is:
 
@@ -110,11 +110,10 @@ The `neuralwatt` adapter polls Neuralwatt Cloud's read-only quota endpoint (`GET
 
 The adapter reports the selected provider boundary as one routing window. Usage and energy totals are retained only as provider diagnostics in the response contract; they are not used as a synthetic quota when no enforceable allowance or balance is available. The account balance path does not invent a reset time when the provider does not report one.
 
-### Anthropic adapter
+### Anthropic adapters
 
-The `anthropic` adapter is for pay-as-you-go Anthropic **API** accounts
-(Claude subscription plans expose no usable API and are not supported). A
-metered API has no token allowance to deplete — the meaningful quota is the
+The default `anthropic` API mode is for pay-as-you-go Anthropic **API** accounts.
+A metered API has no token allowance to deplete — the meaningful quota is the
 money you are willing to spend. The adapter therefore polls the Admin API
 cost report (`GET /v1/organizations/cost_report`, read-only) for the
 organization's month-to-date spend and reports it against your
@@ -139,9 +138,18 @@ z.ai allowance. The window resets at the first of each month (UTC).
   demotes the provider in your model chains *before* that happens. Set it
   comfortably below the enforced ceiling so routing steers away from
   Anthropic instead of sessions slamming into request errors.
-- Anthropic's per-minute rate limits are deliberately not polled: they refill
-  in about a minute, so a scheduled snapshot of them carries no
-  session-start routing signal.
+- Anthropic's per-minute API rate limits are deliberately not polled: they
+  refill in about a minute, so a scheduled snapshot carries no session-start
+  routing signal.
+
+For Claude Pro/Max subscription accounts, set `providers.anthropic.quota.mode:
+subscription`. This experimental mode reads Claude Code OAuth credentials
+transiently from the active config directory or macOS Keychain, calls the
+undocumented OAuth usage endpoint, and reports its five-hour and seven-day
+windows as `session` and `weekly`. It never reads or writes the refresh token.
+Because the endpoint is undocumented and can return 429, poll conservatively
+(15–30 minutes), honor the default freshness window, and expect future contract
+review. A 401 fails closed and requires Claude Code to re-authenticate.
 
 `routing.enabled` defaults to `true` (an omitted `routing` section means enabled). Disabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
 

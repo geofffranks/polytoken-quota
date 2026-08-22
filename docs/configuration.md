@@ -65,7 +65,8 @@ There is no `adapter` field; the mapping key selects the adapter.
 
 | Field | Default | When to set it |
 |-------|---------|----------------|
-| `monthly_budget_usd` | none | Required and positive for `anthropic`: the monthly spend ceiling treated as that provider's quota. Unused by the other adapters. |
+| `mode` | `api` | Anthropic only. `api` (default) polls the Admin cost report against `monthly_budget_usd`. `subscription` is the experimental Claude-subscription source: it reads the Claude Code OAuth session (`.credentials.json` in `$CLAUDE_CONFIG_DIR` or `~/.claude`, or the macOS Keychain item `Claude Code-credentials`, read-only) and reports the plan's five-hour session and seven-day weekly utilization as `session` (300m) and `weekly` (10080m) windows. `subscription` forbids `monthly_budget_usd`. |
+| `monthly_budget_usd` | none | Required and positive for `anthropic` in `api` mode: the monthly spend ceiling treated as that provider's quota. Unused by the other adapters and forbidden in `subscription` mode. |
 | `freshness_ttl` | `30m` | How long a successful snapshot stays eligible for ranking. Raise it if you check less often than every 30 minutes. |
 | `balance_group` | `default` | Providers are only ranked against others in the same group. Use to keep, say, a paid and a free provider from competing. |
 | `weight` | `1` | Deterministic tie-break between providers otherwise ranked equal. Higher wins. |
