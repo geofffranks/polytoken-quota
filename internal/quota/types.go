@@ -212,26 +212,60 @@ func (s QuotaSnapshot) EffectiveRemaining() *float64 {
 	return min
 }
 
-// NextResetAt returns the earliest future ResetAt among windows that report one.
-// "Future" is relative to CheckedAt (the observation time); a ResetAt already in
-// the past at observation time is ignored. It returns nil when no window reports
-// a reset time.
+// NextResetAt returns the quota-cycle reset: the ResetAt of the longest window
+// whose Period is at least MinQuotaCyclePeriod and whose ResetAt is future
+// relative to CheckedAt, falling back to the earliest future ResetAt among all
+// windows when no quota-cycle window qualifies (providers that only report
+// short rate-limit windows). A zero CheckedAt disables the future filter. It
+// returns nil when no window reports a usable reset time.
 func (s QuotaSnapshot) NextResetAt() *time.Time {
-	var earliest *time.Time
-	for _, w := range s.Windows {
+	return NextQuotaResetAt(s.Windows, s.CheckedAt)
+}
+
+// MinQuotaCyclePeriod is the minimum window period eligible to be treated as a
+// quota cycle rather than a short rate limit. It matches the routing policy's
+// projection floor (computePace) so pace calculations and the status display
+// agree on which window is "the quota": windows shorter than one day (e.g.
+// codex's 5h session window) are rate limits, not quota cycles, and never drive
+// next-reset or pace.
+const MinQuotaCyclePeriod = 24 * time.Hour
+
+// NextQuotaResetAt returns the reset time of the quota-cycle anchor: the window
+// with the longest Period of at least MinQuotaCyclePeriod that reports a ResetAt
+// in the future relative to asOf (a zero asOf disables the future filter). Ties
+// on period keep the first such window in slice order, so a provider's primary
+// quota windows (decoded before additional product limits — e.g. codex "weekly"
+// before "spark-weekly") win over equally long additional limits. Windows
+// without a Period (e.g. codex spend-control) are never anchors. When no window
+// qualifies as a quota cycle, it falls back to the earliest future ResetAt
+// among all windows. It returns nil when no window reports a future reset.
+func NextQuotaResetAt(windows []QuotaWindow, asOf time.Time) *time.Time {
+	var anchorReset, fallback *time.Time
+	var anchorPeriod time.Duration
+	for i := range windows {
+		w := &windows[i]
 		if w.ResetAt == nil {
 			continue
 		}
 		rt := *w.ResetAt
-		if !s.CheckedAt.IsZero() && !rt.After(s.CheckedAt) {
-			continue // not future relative to the observation
+		if !asOf.IsZero() && !rt.After(asOf) {
+			continue // not future relative to the reference time
 		}
-		if earliest == nil || rt.Before(*earliest) {
+		if w.Period != nil && *w.Period >= MinQuotaCyclePeriod {
+			if anchorReset == nil || *w.Period > anchorPeriod {
+				t := rt
+				anchorReset = &t
+				anchorPeriod = *w.Period
+			}
+		} else if fallback == nil || rt.Before(*fallback) {
 			t := rt
-			earliest = &t
+			fallback = &t
 		}
 	}
-	return earliest
+	if anchorReset != nil {
+		return anchorReset
+	}
+	return fallback
 }
 
 // Class derives the quota bucket from the snapshot's usable windows: exhausted

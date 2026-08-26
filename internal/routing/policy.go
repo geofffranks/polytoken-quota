@@ -350,9 +350,11 @@ func (a rankItem) less(b rankItem) bool {
 }
 
 // minProjectionPeriod is the minimum window duration eligible to be a projection
-// anchor. Windows shorter than one day (e.g. codex's 5h session window) are rate
-// limits, not quota cycles, and are excluded from projection.
-const minProjectionPeriod = 24 * time.Hour
+// anchor. It is quota.MinQuotaCyclePeriod — windows shorter than one day (e.g.
+// codex's 5h session window) are rate limits, not quota cycles — shared with the
+// status display's next-reset selection so pace and NEXT RESET cannot disagree
+// about which window is "the quota".
+const minProjectionPeriod = quota.MinQuotaCyclePeriod
 
 // computePace calculates the projection pace for a provider from its anchor
 // window — the longest window with Period + ResetAt + a usable remaining that

@@ -513,6 +513,34 @@ func TestStatusResetAfterAsOfOnly(t *testing.T) {
 	}
 }
 
+func TestStatusNextResetUsesQuotaCycleAnchor(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	fiveHours := 5 * time.Hour
+	week := 7 * 24 * time.Hour
+	sparkReset := diagnosticAsOf.Add(1 * time.Hour)
+	sessionReset := diagnosticAsOf.Add(2 * time.Hour)
+	sparkWeeklyReset := diagnosticAsOf.Add(2 * 24 * time.Hour)
+	weeklyReset := diagnosticAsOf.Add(3 * 24 * time.Hour)
+	pct := 20.0
+	d.observed.Providers["alpha"].QuotaSnapshot.Windows = []quota.QuotaWindow{
+		{Name: "session", UsagePercent: &pct, Period: &fiveHours, ResetAt: &sessionReset},
+		{Name: "weekly", UsagePercent: &pct, Period: &week, ResetAt: &weeklyReset},
+		{Name: "spark", UsagePercent: &pct, Period: &fiveHours, ResetAt: &sparkReset},
+		{Name: "spark-weekly", UsagePercent: &pct, Period: &week, ResetAt: &sparkWeeklyReset},
+	}
+	report := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background()).StatusView()
+	for _, provider := range report.Providers {
+		if provider.MappingID != "alpha" {
+			continue
+		}
+		if provider.NextResetAt == nil || !provider.NextResetAt.Equal(weeklyReset) {
+			t.Fatalf("alpha next reset=%v want weekly quota-cycle reset %v", provider.NextResetAt, weeklyReset)
+		}
+		return
+	}
+	t.Fatal("alpha missing from status view")
+}
+
 func TestStatusCommandResponsibility(t *testing.T) {
 	d, _ := diagnosticFixture(t, false)
 	snapshot := diagnosticCoordinator(d).BuildDiagnosticSnapshot(context.Background())

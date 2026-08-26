@@ -144,6 +144,91 @@ func TestNextResetAtNilWhenNone(t *testing.T) {
 	}
 }
 
+func TestNextResetAtPrefersQuotaCycleOverRateLimit(t *testing.T) {
+	checked := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	fiveHours := 5 * time.Hour
+	week := 7 * 24 * time.Hour
+	sessionReset := checked.Add(2 * time.Hour)
+	weeklyReset := checked.Add(3 * 24 * time.Hour)
+	s := QuotaSnapshot{
+		CheckedAt: checked,
+		Windows: []QuotaWindow{
+			{Name: "session", Period: &fiveHours, ResetAt: &sessionReset},
+			{Name: "weekly", Period: &week, ResetAt: &weeklyReset},
+		},
+	}
+	got := s.NextResetAt()
+	if got == nil || !got.Equal(weeklyReset) {
+		t.Fatalf("next reset=%v want weekly quota-cycle reset %v", got, weeklyReset)
+	}
+}
+
+func TestNextResetAtAnchorSkipsAdditionalLimits(t *testing.T) {
+	// Codex shape: the primary quota windows (session/weekly) are decoded
+	// before additional_rate_limits products (spark/spark-weekly). The weekly
+	// quota cycle must win even though the spark 5h window resets soonest and
+	// the spark weekly window resets earlier than the primary weekly window.
+	checked := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	fiveHours := 5 * time.Hour
+	week := 7 * 24 * time.Hour
+	sparkReset := checked.Add(1 * time.Hour)
+	sessionReset := checked.Add(2 * time.Hour)
+	sparkWeeklyReset := checked.Add(2 * 24 * time.Hour)
+	weeklyReset := checked.Add(3 * 24 * time.Hour)
+	spendReset := checked.Add(10 * 24 * time.Hour)
+	s := QuotaSnapshot{
+		CheckedAt: checked,
+		Windows: []QuotaWindow{
+			{Name: "session", Period: &fiveHours, ResetAt: &sessionReset},
+			{Name: "weekly", Period: &week, ResetAt: &weeklyReset},
+			{Name: "spend-control", ResetAt: &spendReset}, // no period: not an anchor candidate
+			{Name: "spark", Period: &fiveHours, ResetAt: &sparkReset},
+			{Name: "spark-weekly", Period: &week, ResetAt: &sparkWeeklyReset}, // same period, decoded later
+		},
+	}
+	got := s.NextResetAt()
+	if got == nil || !got.Equal(weeklyReset) {
+		t.Fatalf("next reset=%v want primary weekly quota reset %v", got, weeklyReset)
+	}
+}
+
+func TestNextResetAtFallsBackToEarliestWhenOnlyRateLimits(t *testing.T) {
+	checked := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	fiveHours := 5 * time.Hour
+	soon := checked.Add(1 * time.Hour)
+	later := checked.Add(3 * time.Hour)
+	s := QuotaSnapshot{
+		CheckedAt: checked,
+		Windows: []QuotaWindow{
+			{Name: "session", Period: &fiveHours, ResetAt: &later},
+			{Name: "spark", Period: &fiveHours, ResetAt: &soon},
+		},
+	}
+	got := s.NextResetAt()
+	if got == nil || !got.Equal(soon) {
+		t.Fatalf("next reset=%v want earliest future reset %v", got, soon)
+	}
+}
+
+func TestNextResetAtSkipsStaleAnchor(t *testing.T) {
+	checked := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	week := 7 * 24 * time.Hour
+	month := 30 * 24 * time.Hour
+	stale := checked.Add(-1 * time.Hour)
+	monthlyReset := checked.Add(20 * 24 * time.Hour)
+	s := QuotaSnapshot{
+		CheckedAt: checked,
+		Windows: []QuotaWindow{
+			{Name: "weekly", Period: &week, ResetAt: &stale}, // past at observation time
+			{Name: "monthly", Period: &month, ResetAt: &monthlyReset},
+		},
+	}
+	got := s.NextResetAt()
+	if got == nil || !got.Equal(monthlyReset) {
+		t.Fatalf("next reset=%v want next-longest future anchor %v", got, monthlyReset)
+	}
+}
+
 func TestResetCreditObservationMergeMatrix(t *testing.T) {
 	asOf := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	future := asOf.Add(time.Hour)

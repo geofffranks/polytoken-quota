@@ -143,7 +143,7 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			entry.QuotaClass = ps.QuotaSnapshot.Class()
 			entry.Freshness = classifyFreshness(ps.QuotaSnapshot.CheckedAt, ttl, asOf)
 			entry.Windows = windowsReport(ps.QuotaSnapshot)
-			entry.NextResetAt = nextResetAfter(ps.QuotaSnapshot.Windows, asOf)
+			entry.NextResetAt = quota.NextQuotaResetAt(ps.QuotaSnapshot.Windows, asOf)
 		}
 		if ps.QuotaAttempt != nil {
 			entry.LatestAttempt = &QuotaAttemptReport{
@@ -204,19 +204,6 @@ func windowsReport(s *quota.QuotaSnapshot) []QuotaWindowReport {
 		})
 	}
 	return out
-}
-
-func nextResetAfter(windows []quota.QuotaWindow, asOf time.Time) *time.Time {
-	var earliest *time.Time
-	for _, window := range windows {
-		if window.ResetAt == nil || !window.ResetAt.After(asOf) {
-			continue
-		}
-		if earliest == nil || window.ResetAt.Before(*earliest) {
-			earliest = cloneTime(window.ResetAt)
-		}
-	}
-	return earliest
 }
 
 func usageSummaryReport(summary *quota.CodexUsageSummary) *UsageSummaryReport {
