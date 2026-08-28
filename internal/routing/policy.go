@@ -314,12 +314,15 @@ type RankingResult struct {
 	Entries []RankEntry // sorted by rank
 }
 
+const underPaceThreshold = 0.90
+
 // rankItem is the per-provider data computed before sorting within a group.
 type rankItem struct {
 	policy  ProviderPolicy
 	offPeak bool
 	pace    *float64 // projection pace; nil when not computable
-	cluster int      // pace cluster index; -1 when no pace
+	tier    int      // pace tier: 0 under pace, 1 at/over pace, -1 without pace
+	cluster int      // pace cluster index within the at/over-pace tier
 	weight  int
 }
 
@@ -331,11 +334,18 @@ type entry struct {
 }
 
 // less compares two items within a balance group by the lexicographic key
-// sequence: pace cluster (pairwise) → off-peak → weight → mapping ID.
+// sequence: pace tier/cluster (pairwise) → off-peak → weight → mapping ID.
 func (a rankItem) less(b rankItem) bool {
-	// Key 1: projection pace cluster (pairwise: both must have a pace).
-	if a.cluster >= 0 && b.cluster >= 0 && a.cluster != b.cluster {
-		return a.cluster < b.cluster
+	// Key 1: pace tier and cluster (pairwise: both must have a pace). All
+	// under-pace providers share tier 0; at/over-pace providers use their
+	// ascending cluster in tier 1. Providers without pace skip this key.
+	if a.pace != nil && b.pace != nil {
+		if a.tier != b.tier {
+			return a.tier < b.tier
+		}
+		if a.tier == 1 && a.cluster != b.cluster {
+			return a.cluster < b.cluster
+		}
 	}
 	// Key 2: off-peak before peak.
 	if a.offPeak != b.offPeak {
@@ -413,9 +423,10 @@ func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok boo
 	return usedFrac / elapsedFrac, true
 }
 
-// assignPaceClusters assigns cluster indices to entries within a balance group.
-// Items without a pace get cluster -1. Among projecting items, connected
-// components of the "within 10% absolute pace" relation form clusters,
+// assignPaceClusters assigns pace tiers and cluster indices to entries within
+// a balance group. Items without a pace get tier -1 and cluster -1. Providers
+// below the underPaceThreshold share tier 0. At/over-threshold providers get
+// tier 1 and connected components of the "within 10% absolute pace" relation,
 // indexed in ascending pace order.
 func assignPaceClusters(items []entry) {
 	type paced struct {
@@ -424,9 +435,17 @@ func assignPaceClusters(items []entry) {
 	}
 	var ps []paced
 	for i := range items {
-		if items[i].item.pace != nil {
-			ps = append(ps, paced{idx: i, pace: *items[i].item.pace})
+		items[i].item.tier = -1
+		items[i].item.cluster = -1
+		if items[i].item.pace == nil {
+			continue
 		}
+		if *items[i].item.pace < underPaceThreshold {
+			items[i].item.tier = 0
+			continue
+		}
+		items[i].item.tier = 1
+		ps = append(ps, paced{idx: i, pace: *items[i].item.pace})
 	}
 	sort.Slice(ps, func(i, j int) bool {
 		return ps[i].pace < ps[j].pace

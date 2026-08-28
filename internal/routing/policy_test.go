@@ -11,8 +11,8 @@ import (
 
 // ----- shared test helpers -------------------------------------------------
 
-func fptr(v float64) *float64     { x := v; return &x }
-func tptr(t time.Time) *time.Time { x := t; return &x }
+func fptr(v float64) *float64               { x := v; return &x }
+func tptr(t time.Time) *time.Time           { x := t; return &x }
 func durptr(d time.Duration) *time.Duration { x := d; return &x }
 
 func floatClose(a, b float64) bool {
@@ -666,7 +666,7 @@ func TestRankLexicalTieBreak(t *testing.T) {
 func TestRankPaceLowerFirst(t *testing.T) {
 	// A: pace 0.6 (under-utilized), B: pace 1.4 (over-utilized). Gap > 10%.
 	in := RankingInput{
-		Now: rankNow,
+		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
 		Obs: []ProviderObs{
 			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
@@ -693,6 +693,65 @@ func TestRankPaceWithinTenPercentOffPeakDecides(t *testing.T) {
 	eqOrder(t, Rank(in), "a", "b")
 }
 
+func TestRankPaceUnderNinetyPercentIsEqualTier(t *testing.T) {
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "low", Weight: 1},
+			{MappingID: "high", Weight: 5},
+		},
+		Obs: []ProviderObs{
+			// These paces are far more than 10 percentage points apart. The
+			// under-90% policy must nevertheless treat them as one tier, so
+			// configured weight decides.
+			{MappingID: "low", Mode: "normal", Snapshot: paceSnap("low", 0.05714285714285714, 0.5)},
+			{MappingID: "high", Mode: "normal", Snapshot: paceSnap("high", 0.45714285714285713, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "high", "low")
+}
+
+func TestRankPaceNinetyPercentIsOutsideEqualTier(t *testing.T) {
+	period := 10 * 24 * time.Hour
+	atReset := rankNow.Add(5 * 24 * time.Hour)
+	atSnapshot := func(id string, used float64) *quota.QuotaSnapshot {
+		return &quota.QuotaSnapshot{
+			MappingID: id, CheckedAt: rankNow, Status: quota.SourceFresh,
+			Availability: quota.QuotaAvailable,
+			Windows: []quota.QuotaWindow{{
+				Used: fptr(used), Limit: fptr(1), ResetAt: tptr(atReset), Period: durptr(period),
+			}},
+		}
+	}
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "under"}, {MappingID: "at"}},
+		Obs: []ProviderObs{
+			{MappingID: "under", Mode: "normal", Snapshot: atSnapshot("under", 0.44)}, // pace 0.88
+			{MappingID: "at", Mode: "normal", Snapshot: atSnapshot("at", 0.46)},       // pace 0.92
+		},
+	}
+	// A pace at or above 0.90 is not under pace; it remains in the
+	// pace-ranked tier.
+	eqOrder(t, Rank(in), "under", "at")
+}
+
+func TestRankPaceAtOrAboveNinetyRetainsPaceOrdering(t *testing.T) {
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "slower", Weight: 5},
+			{MappingID: "faster", Weight: 1},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "slower", Mode: "normal", Snapshot: paceSnap("slower", 0.75, 0.5)}, // pace 1.50
+			{MappingID: "faster", Mode: "normal", Snapshot: paceSnap("faster", 0.50, 0.5)}, // pace 1.00
+		},
+	}
+	// Weight cannot override distinct pace clusters in the at/over-90% tier.
+	eqOrder(t, Rank(in), "faster", "slower")
+}
+
 func TestRankPacePairwiseSkip(t *testing.T) {
 	// A has pace (qualifying window), B has no pace (remSnap: no Period).
 	// Pace skipped for this pair → weight decides. B has higher weight.
@@ -711,9 +770,11 @@ func TestRankPacePairwiseSkip(t *testing.T) {
 }
 
 func TestRankPaceClusterChain(t *testing.T) {
-	// A: pace 0.0, B: pace 0.08, C: pace 0.25.
+	// A: pace 1.0, B: pace 1.08, C: pace 1.25.
 	// A-B gap 0.08 < 10% → same cluster. B-C gap 0.17 > 10% → new cluster.
-	// Within cluster 0: weight decides (B=3 before A=1).
+	// Within cluster 0: weight decides (B=3 before A=1). These fixtures are
+	// deliberately at/above the under-pace threshold so this test continues to
+	// exercise the 10% clustering behavior.
 	in := RankingInput{
 		Now: rankNow,
 		Policies: []ProviderPolicy{
@@ -722,9 +783,9 @@ func TestRankPaceClusterChain(t *testing.T) {
 			{MappingID: "c", Weight: 2},
 		},
 		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
-			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.125, 0.5)},
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 4.0/7.0, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.6171428571428571, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 5.0/7.0, 0.5)},
 		},
 	}
 	eqOrder(t, Rank(in), "b", "a", "c")
@@ -750,10 +811,9 @@ func TestRankPaceBeatsOffPeak(t *testing.T) {
 	eqOrder(t, Rank(in), "a", "b")
 }
 
-func TestRankPaceTransitiveCluster(t *testing.T) {
-	// Transitive closure: A-B gap 0.08 < 10%, B-C gap 0.08 < 10%, but A-C gap
-	// 0.16 > 10%. Connected-components puts all three in cluster 0, so weight
-	// decides — the behavior that distinguishes clustering from fixed buckets.
+func TestRankPaceUnderNinetyIgnoresTransitiveClusterGaps(t *testing.T) {
+	// All three providers are under pace, so even gaps larger than the old 10%
+	// cluster threshold do not affect their order; weight decides.
 	in := RankingInput{
 		Now: rankNow,
 		Policies: []ProviderPolicy{
@@ -821,7 +881,7 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 
 func TestRankExplainPace(t *testing.T) {
 	in := RankingInput{
-		Now: rankNow,
+		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nopace"}},
 		Obs: []ProviderObs{
 			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},

@@ -235,10 +235,11 @@ Routing uses a deterministic lexicographic ranking, not a blended score:
 
 1. Providers must be eligible: their mode is `normal` or `reserve`, their snapshot is fresh, and it contains usable remaining quota.
 2. Eligible providers stay grouped by `balance_group`; groups appear in their first configured order and do not interleave.
-3. Within each group, providers are ranked by **projection pace** — the ratio of used-fraction to elapsed-fraction of their quota window. Lower pace ranks first (under-utilized providers catch up; over-utilized ones ease back). Providers within 10% absolute pace are treated as tied. Pace is computed from each provider's longest qualifying quota window (period + reset + remaining, minimum one day). Ties break by off-peak before peak, then higher `weight`, then alphabetical provider ID.
-4. If either provider in a pair cannot compute a pace (no qualifying window), the pace comparison is skipped for that pair. Ineligible providers remain at the end and are never disabled by routing.
+3. Within each group, providers are first separated into two pace tiers. Providers with **projection pace below 90%** are treated as equally under-paced: their exact pace does not differentiate them. They rank ahead of providers at or above 90%, and ties break by off-peak before peak, then higher `weight`, then alphabetical provider ID.
+4. Among providers at or above 90%, lower projection pace ranks first. Providers within 10% absolute pace are treated as tied, with off-peak, `weight`, and provider ID breaking ties. Pace is the ratio of used-fraction to elapsed-fraction from each provider's longest qualifying quota window (period + reset + remaining, minimum one day).
+5. If either provider in a pair cannot compute a pace (no qualifying window), the pace comparison is skipped for that pair. Ineligible providers remain at the end and are never disabled by routing.
 
-For example, if `codex` and `zai` are both eligible in the same balance group and `codex` is burning its weekly quota faster than `zai` (higher pace), `zai` ranks first to balance depletion. If both are within 10% on pace, the off-peak provider wins; if both are in the same schedule state, weight and provider ID decide the tie.
+For example, if `codex` and `zai` are both eligible in the same balance group and both have pace below 90%, neither's exact pace wins: off-peak, then weight and provider ID decide. If one is below 90% and the other is at or above 90%, the under-paced provider ranks first. Among providers at or above 90%, lower pace still wins unless the 10% tie rule applies.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 
