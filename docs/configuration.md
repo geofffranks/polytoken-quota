@@ -69,7 +69,7 @@ There is no `adapter` field; the mapping key selects the adapter.
 | `monthly_budget_usd` | none | Required and positive for `anthropic` in `api` mode: the monthly spend ceiling treated as that provider's quota. Unused by the other adapters and forbidden in `subscription` mode. |
 | `freshness_ttl` | `30m` | How long a successful snapshot stays eligible for ranking. Raise it if you check less often than every 30 minutes. |
 | `balance_group` | `default` | Providers are only ranked against others in the same group. Use to keep, say, a paid and a free provider from competing. |
-| `weight` | `1` | Deterministic tie-break between providers otherwise ranked equal. Higher wins. |
+| `weight` | `1` | Deterministic tie-break between providers otherwise ranked equal. Higher wins. All eligible providers below 90% pace are tied on pace, so weight can choose between them. |
 | `schedule` | none (never off-peak) | Off-peak windows for ranking; see below. |
 
 ### `schedule`
