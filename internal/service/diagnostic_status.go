@@ -157,8 +157,8 @@ func skippedModels(desired policy.Desired, observed state.State, route RouteProj
 		reason := StatusDisabled
 		if ref, err := reconcile.ParseModelRef(entry); err == nil {
 			if mid, err := desired.ResolveModel(ref.Base); err == nil {
-				if ps, ok := observed.Providers[string(mid)]; ok {
-					reason = dropCondition(ps)
+				if _, ok := observed.Providers[string(mid)]; ok {
+					reason = dropCondition(aggregateMappingState(string(mid), observed.Providers))
 				}
 			}
 		}

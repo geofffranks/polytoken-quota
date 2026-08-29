@@ -18,6 +18,7 @@ import (
 	"sort"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -113,7 +114,17 @@ func MappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mod
 	if !seen {
 		return state.ModeNormal
 	}
-	return state.EffectiveMode(ps)
+	mode := state.EffectiveMode(ps)
+	// A successful quota poll is an additional, fail-closed availability
+	// boundary. The state axes may still reflect their last hook event while the
+	// latest snapshot reports explicit exhaustion/unavailability.
+	if ps.QuotaSnapshot != nil {
+		rem := ps.QuotaSnapshot.EffectiveRemaining()
+		if ps.QuotaSnapshot.Availability != quota.QuotaAvailable || rem == nil || *rem <= 0 {
+			return state.ModeDisabled
+		}
+	}
+	return mode
 }
 
 // RankLookup maps a provider mapping ID to its global rank (0 = best). A mapping

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -74,6 +75,22 @@ func TestMergedStatusSkipsUnavailableModel(t *testing.T) {
 	full := mergedRouteByName(t, report, "full")
 	if !reflect.DeepEqual(full.Skipped, []SkippedModel{{Model: "beta/full", Reason: "unavailable"}}) {
 		t.Fatalf("full skipped = %+v, want [beta/full: unavailable]", full.Skipped)
+	}
+}
+
+func TestMergedStatusSnapshotUnavailableRemovesModelAndReportsReason(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	ps := d.observed.Providers["beta"]
+	ps.QuotaSnapshot.Availability = quota.QuotaUnavailable
+	d.observed.Providers["beta"] = ps
+	report := mergedView(t, d)
+
+	full := mergedRouteByName(t, report, "full")
+	if !reflect.DeepEqual(full.Skipped, []SkippedModel{{Model: "beta/full", Reason: "unavailable"}}) {
+		t.Fatalf("full skipped = %+v, want [beta/full: unavailable]", full.Skipped)
+	}
+	if len(full.Effective) != 1 || full.Effective[0] != "alpha/full" {
+		t.Fatalf("full effective = %v, want [alpha/full]", full.Effective)
 	}
 }
 

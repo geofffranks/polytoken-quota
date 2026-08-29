@@ -85,7 +85,7 @@ func aggregateMappingObs(mappingID string, providers map[string]state.ProviderSt
 	if ps.QuotaSnapshot == nil {
 		return state.ModeDisabled, nil
 	}
-	if ps.QuotaSnapshot.Availability == quota.QuotaUnknown || ps.QuotaSnapshot.EffectiveRemaining() == nil {
+	if rem := ps.QuotaSnapshot.EffectiveRemaining(); ps.QuotaSnapshot.Availability != quota.QuotaAvailable || rem == nil || *rem <= 0 {
 		mode = state.ModeDisabled
 	}
 	return mode, ps.QuotaSnapshot

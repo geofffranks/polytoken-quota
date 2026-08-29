@@ -296,6 +296,89 @@ func TestComputeRankingMapsObs(t *testing.T) {
 	})
 }
 
+// TestUnavailableSnapshotIsRemovedFromEffectiveRoute proves the quota snapshot's
+// explicit unavailable signal is applied to reconciliation, not only ranking.
+// The raw state axes intentionally remain available/normal to reproduce the
+// polling boundary where the snapshot is the only exhaustion signal.
+func TestUnavailableSnapshotIsRemovedFromEffectiveRoute(t *testing.T) {
+	d := qmap(true, rankMapping{
+		id: "zai", bases: []string{"zai/model"},
+		quota: &policy.QuotaConfig{Adapter: "zai", BalanceGroup: "g", Weight: 1},
+	})
+	snap := qsnap(100, 100)
+	snap.Availability = quota.QuotaUnavailable
+	s := state.State{Providers: map[string]state.ProviderState{
+		"zai": {Quota: state.QuotaNormal, Availability: state.Available, QuotaSnapshot: snap},
+	}}
+	ranks, result := ComputeRanking(d, s, rankNow)
+	entry, ok := rankEntry(result, "zai")
+	if !ok || entry.Eligible {
+		t.Fatalf("unavailable snapshot ranking=%+v, want ineligible", entry)
+	}
+	got, err := reconcile.EffectiveOrder(d, s, policy.Chain{"zai/model"}, ranks)
+	if err != nil {
+		t.Fatalf("EffectiveOrder: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("effective route=%v, want unavailable model removed", got)
+	}
+}
+
+// TestZeroOrOverLimitSnapshotRemainingDisablesReconciliation proves that the
+// zero remaining value produced by quota exhaustion is treated consistently by
+// ranking and model reconciliation, including baseline enablement.
+func TestZeroOrOverLimitSnapshotRemainingDisablesReconciliation(t *testing.T) {
+	for name, used := range map[string]float64{
+		"exactly exhausted": 100,
+		"over limit":        125,
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := qmap(true,
+				rankMapping{id: "zai", bases: []string{"zai/model"}, quota: &policy.QuotaConfig{Adapter: "zai", BalanceGroup: "g", Weight: 1}},
+				rankMapping{id: "codex", bases: []string{"codex/model"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
+			)
+			snap := qsnap(used, 100)
+			s := state.State{Providers: map[string]state.ProviderState{
+				"zai":   {Quota: state.QuotaNormal, Availability: state.Available, QuotaSnapshot: snap},
+				"codex": pstate(qsnap(10, 100)),
+			}}
+
+			ranks, result := ComputeRanking(d, s, rankNow)
+			entry, ok := rankEntry(result, "zai")
+			if !ok || entry.Eligible {
+				t.Fatalf("ranking=%+v, want zai ineligible", entry)
+			}
+
+			chain := policy.Chain{"zai/model", "codex/model"}
+			got, err := reconcile.EffectiveOrder(d, s, chain, ranks)
+			if err != nil {
+				t.Fatalf("EffectiveOrder: %v", err)
+			}
+			if len(got) != 1 || got[0] != "codex/model" {
+				t.Fatalf("effective route=%v, want [codex/model]", got)
+			}
+
+			plan, err := reconcile.Build(d, s, policy.Target{
+				ID: "target", Root: "/root",
+				Definitions: []policy.Definition{{Path: "agent.md", Chain: chain}},
+			}, ranks)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			var disabled *bool
+			for _, edit := range plan.Edits {
+				if len(edit.Path) == 3 && edit.Path[0] == "models" && edit.Path[1] == "zai/model" && edit.Path[2] == "enabled" {
+					disabled = edit.Enabled
+					break
+				}
+			}
+			if disabled == nil || *disabled {
+				t.Fatalf("zai baseline enabled edit=%v, want false", disabled)
+			}
+		})
+	}
+}
+
 // TestComputeRankingHeadroom verifies larger effective headroom ranks first
 // within a balance group (off-peak aside).
 func TestComputeRankingHeadroom(t *testing.T) {
