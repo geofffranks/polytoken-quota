@@ -379,9 +379,9 @@ func TestZeroOrOverLimitSnapshotRemainingDisablesReconciliation(t *testing.T) {
 	}
 }
 
-// TestComputeRankingHeadroom verifies larger effective headroom ranks first
-// within a balance group (off-peak aside).
-func TestComputeRankingHeadroom(t *testing.T) {
+// TestComputeRankingNoPaceSharesRank verifies raw headroom does not invent a
+// preference when neither provider has a qualifying pace window.
+func TestComputeRankingNoPaceSharesRank(t *testing.T) {
 	d := qmap(true,
 		rankMapping{id: "full", bases: []string{"full/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
 		rankMapping{id: "sparse", bases: []string{"sparse/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
@@ -393,10 +393,10 @@ func TestComputeRankingHeadroom(t *testing.T) {
 	lookup, res := ComputeRanking(d, s, rankNow)
 	full, _ := rankEntry(res, "full")
 	sparse, _ := rankEntry(res, "sparse")
-	if full.Rank != 0 || sparse.Rank != 1 {
-		t.Fatalf("want full (80%%) rank 0 before sparse (20%%) rank 1; got full=%d sparse=%d", full.Rank, sparse.Rank)
+	if full.Rank != 0 || sparse.Rank != 0 {
+		t.Fatalf("want shared rank without pace; got full=%d sparse=%d", full.Rank, sparse.Rank)
 	}
-	if lookup["full"] != 0 || lookup["sparse"] != 1 {
+	if lookup["full"] != 0 || lookup["sparse"] != 0 {
 		t.Fatalf("RankLookup mismatch: got full=%d sparse=%d", lookup["full"], lookup["sparse"])
 	}
 }
@@ -454,17 +454,16 @@ func TestComputeRankingUsageAbsent(t *testing.T) {
 	}
 }
 
-// TestComputeRankingLookupReordersBuild proves the produced RankLookup, when
-// passed to reconcile.Build with routing enabled, reorders a definition chain by
-// global rank (headroom tie-break).
-func TestComputeRankingLookupReordersBuild(t *testing.T) {
+// TestComputeRankingLookupPreservesChainTie proves a shared semantic rank lets
+// reconcile.Build preserve the definition's authored provider preference.
+func TestComputeRankingLookupPreservesChainTie(t *testing.T) {
 	d := qmap(true,
 		rankMapping{id: "full", bases: []string{"full/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
 		rankMapping{id: "sparse", bases: []string{"sparse/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
 	)
 	s := state.State{Providers: map[string]state.ProviderState{
-		"full":   pstate(qsnap(20, 100)), // 80% headroom → rank 0
-		"sparse": pstate(qsnap(80, 100)), // 20% headroom → rank 1
+		"full":   pstate(qsnap(20, 100)), // no qualifying pace window
+		"sparse": pstate(qsnap(80, 100)), // no qualifying pace window
 	}}
 	ranks, _ := ComputeRanking(d, s, rankNow)
 	target := policy.Target{
@@ -476,8 +475,8 @@ func TestComputeRankingLookupReordersBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := modelScalar(plan, "agent.md")
-	if got != "full/x" {
-		t.Fatalf("with routing enabled the higher-headroom provider should lead; got model=%q want %q", got, "full/x")
+	if got != "sparse/x" {
+		t.Fatalf("shared routing rank should preserve authored head; got model=%q want %q", got, "sparse/x")
 	}
 }
 

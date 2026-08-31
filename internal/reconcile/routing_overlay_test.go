@@ -240,6 +240,25 @@ func TestRoutingOverlayNoDesiredMutation(t *testing.T) {
 	}
 }
 
+func TestRoutingOverlaySharedRankPreservesEachChainOrder(t *testing.T) {
+	ranks := RankLookup{"codex": 0, "neuralwatt": 0}
+	for name, entries := range map[string][]string{
+		"codex first":      {"codex/x", "neuralwatt/x"},
+		"neuralwatt first": {"neuralwatt/x", "codex/x"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, s, target := routingFixture(true, entries, map[string]string{"codex": "g1", "neuralwatt": "g1"})
+			got, err := EffectiveOrder(d, s, target.Definitions[0].Chain, ranks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got, entries) {
+				t.Fatalf("got=%v want authored order %v", got, entries)
+			}
+		})
+	}
+}
+
 // TestEffectiveOrderRouting proves the EffectiveOrder helper returns the
 // post-overlay order when routing is enabled, and equals the survivor order when
 // disabled.

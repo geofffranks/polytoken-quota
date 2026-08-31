@@ -649,7 +649,7 @@ func TestRankWeightTieBreak(t *testing.T) {
 	eqOrder(t, Rank(in), "high", "low")
 }
 
-func TestRankLexicalTieBreak(t *testing.T) {
+func TestRankExactTieSharesRank(t *testing.T) {
 	in := RankingInput{
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "zebra"}, {MappingID: "alpha"}},
@@ -658,7 +658,13 @@ func TestRankLexicalTieBreak(t *testing.T) {
 			{MappingID: "alpha", Mode: "normal", Snapshot: remSnap("alpha", 0.5, rankNow)},
 		},
 	}
-	eqOrder(t, Rank(in), "alpha", "zebra")
+	got := Rank(in)
+	// Mapping ID may stabilize diagnostic presentation, but it must not create a
+	// semantic preference between otherwise equal providers.
+	eqOrder(t, got, "alpha", "zebra")
+	if got.Entries[0].Rank != got.Entries[1].Rank {
+		t.Fatalf("exact tie ranks = %d, %d; want shared rank", got.Entries[0].Rank, got.Entries[1].Rank)
+	}
 }
 
 // ----- Part 5: pace projection ranking -------------------------------------
@@ -691,6 +697,22 @@ func TestRankPaceWithinTenPercentOffPeakDecides(t *testing.T) {
 		},
 	}
 	eqOrder(t, Rank(in), "a", "b")
+}
+
+func TestRankPaceUnderNinetyPercentSharesRankWhenOtherwiseEqual(t *testing.T) {
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "codex"}, {MappingID: "neuralwatt"}},
+		Obs: []ProviderObs{
+			{MappingID: "codex", Mode: "normal", Snapshot: paceSnap("codex", 0.035, 0.5)},
+			{MappingID: "neuralwatt", Mode: "normal", Snapshot: paceSnap("neuralwatt", 0.27, 0.5)},
+		},
+	}
+	got := Rank(in)
+	codex, neuralwatt := got.Entries[0], got.Entries[1]
+	if codex.Rank != neuralwatt.Rank {
+		t.Fatalf("under-pace ranks = %d, %d; want shared rank", codex.Rank, neuralwatt.Rank)
+	}
 }
 
 func TestRankPaceUnderNinetyPercentIsEqualTier(t *testing.T) {
@@ -752,21 +774,32 @@ func TestRankPaceAtOrAboveNinetyRetainsPaceOrdering(t *testing.T) {
 	eqOrder(t, Rank(in), "faster", "slower")
 }
 
-func TestRankPacePairwiseSkip(t *testing.T) {
-	// A has pace (qualifying window), B has no pace (remSnap: no Period).
-	// Pace skipped for this pair → weight decides. B has higher weight.
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "a", Weight: 1},
-			{MappingID: "b", Weight: 5},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: remSnap("b", 0.5, rankNow)},
-		},
+func TestRankPaceGroupSkipWhenAnyProviderLacksPace(t *testing.T) {
+	policies := map[string]ProviderPolicy{
+		"a": {MappingID: "a"},
+		"m": {MappingID: "m"},
+		"z": {MappingID: "z"},
 	}
-	eqOrder(t, Rank(in), "b", "a")
+	observations := map[string]ProviderObs{
+		"a": {MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.75, 0.5)},
+		"m": {MappingID: "m", Mode: "normal", Snapshot: remSnap("m", 0.5, rankNow)},
+		"z": {MappingID: "z", Mode: "normal", Snapshot: paceSnap("z", 0.50, 0.5)},
+	}
+	for _, ids := range [][]string{
+		{"a", "m", "z"}, {"a", "z", "m"}, {"m", "a", "z"},
+		{"m", "z", "a"}, {"z", "a", "m"}, {"z", "m", "a"},
+	} {
+		in := RankingInput{Now: rankNow}
+		for _, id := range ids {
+			in.Policies = append(in.Policies, policies[id])
+			in.Obs = append(in.Obs, observations[id])
+		}
+		got := Rank(in)
+		eqOrder(t, got, "a", "m", "z")
+		if got.Entries[0].Rank != got.Entries[1].Rank || got.Entries[1].Rank != got.Entries[2].Rank {
+			t.Fatalf("input %v ranks = %d, %d, %d; want shared rank after group pace skip", ids, got.Entries[0].Rank, got.Entries[1].Rank, got.Entries[2].Rank)
+		}
+	}
 }
 
 func TestRankPaceClusterChain(t *testing.T) {
@@ -879,7 +912,7 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 
 // ----- Part 7: ineligible placement ----------------------------------------
 
-func TestRankExplainPace(t *testing.T) {
+func TestRankExplainOmitsGroupSkippedPace(t *testing.T) {
 	in := RankingInput{
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nopace"}},
@@ -888,20 +921,9 @@ func TestRankExplainPace(t *testing.T) {
 			{MappingID: "nopace", Mode: "normal", Snapshot: remSnap("nopace", 0.5, rankNow)},
 		},
 	}
-	r := Rank(in)
-	for _, e := range r.Entries {
-		if !e.Eligible {
-			continue
-		}
-		if e.MappingID == "proj" {
-			if !strings.Contains(e.Explanation, "pace") {
-				t.Fatalf("projecting entry %s explanation %q must reference pace", e.MappingID, e.Explanation)
-			}
-		}
-		if e.MappingID == "nopace" {
-			if strings.Contains(e.Explanation, "pace") {
-				t.Fatalf("non-projecting entry %s explanation %q must not reference pace", e.MappingID, e.Explanation)
-			}
+	for _, e := range Rank(in).Entries {
+		if e.Eligible && strings.Contains(e.Explanation, "pace") {
+			t.Fatalf("group-skipped pace leaked into %s explanation %q", e.MappingID, e.Explanation)
 		}
 	}
 }
@@ -919,10 +941,12 @@ func TestRankIneligiblePlacement(t *testing.T) {
 	}
 	r := Rank(in)
 	eqOrder(t, r, "e1", "e2", "d1", "d3") // eligible by ID, then ineligible by ID
-	// Verify eligible/ineligible flags and contiguous 0-based ranks.
+	// Exact eligible ties share rank 0; ineligible entries remain strictly after
+	// every eligible priority class and retain deterministic lexical ordering.
+	wantRanks := []int{0, 0, 1, 2}
 	for i, e := range r.Entries {
-		if e.Rank != i {
-			t.Fatalf("entry %d rank = %d, want %d", i, e.Rank, i)
+		if e.Rank != wantRanks[i] {
+			t.Fatalf("entry %d rank = %d, want %d", i, e.Rank, wantRanks[i])
 		}
 		wantEligible := i < 2
 		if e.Eligible != wantEligible {

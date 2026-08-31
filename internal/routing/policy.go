@@ -335,6 +335,8 @@ type entry struct {
 
 // less compares two items within a balance group by the lexicographic key
 // sequence: pace tier/cluster (pairwise) → off-peak → weight → mapping ID.
+// Mapping ID stabilizes presentation only; semanticRankEqual deliberately omits
+// it so an exact routing tie can preserve each chain's authored order.
 func (a rankItem) less(b rankItem) bool {
 	// Key 1: pace tier and cluster (pairwise: both must have a pace). All
 	// under-pace providers share tier 0; at/over-pace providers use their
@@ -355,8 +357,19 @@ func (a rankItem) less(b rankItem) bool {
 	if a.weight != b.weight {
 		return a.weight > b.weight
 	}
-	// Key 4: lexical mapping ID ascending (stable final tie-breaker).
+	// Key 4: lexical mapping ID ascending (stable presentation tie-breaker).
 	return a.policy.MappingID < b.policy.MappingID
+}
+
+// semanticRankEqual reports whether two eligible items have the same routing
+// priority. Mapping ID is intentionally excluded: it orders diagnostics but does
+// not override a chain's authored preference. Pace is either present for every
+// item in a group or cleared from the entire group before sorting.
+func (a rankItem) semanticRankEqual(b rankItem) bool {
+	if a.pace != nil && (a.tier != b.tier || (a.tier == 1 && a.cluster != b.cluster)) {
+		return false
+	}
+	return a.offPeak == b.offPeak && a.weight == b.weight
 }
 
 // minProjectionPeriod is the minimum window duration eligible to be a projection
@@ -424,11 +437,21 @@ func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok boo
 }
 
 // assignPaceClusters assigns pace tiers and cluster indices to entries within
-// a balance group. Items without a pace get tier -1 and cluster -1. Providers
-// below the underPaceThreshold share tier 0. At/over-threshold providers get
-// tier 1 and connected components of the "within 10% absolute pace" relation,
-// indexed in ascending pace order.
+// a balance group. If any member lacks pace, pace is cleared for the whole group
+// so sorting remains transitive and no comparison is invented against missing
+// data. Otherwise providers below the underPaceThreshold share tier 0, while
+// at/over-threshold providers get tier 1 and connected pace clusters.
 func assignPaceClusters(items []entry) {
+	for i := range items {
+		if items[i].item.pace == nil {
+			for j := range items {
+				items[j].item.pace = nil
+				items[j].item.tier = -1
+				items[j].item.cluster = -1
+			}
+			return
+		}
+	}
 	type paced struct {
 		idx  int
 		pace float64
@@ -459,14 +482,15 @@ func assignPaceClusters(items []entry) {
 	}
 }
 
-// Rank computes the deterministic global ranking for the given input.
+// Rank computes deterministic global routing priority classes for the input.
 //
 // Eligible providers are grouped by balance group (in first-appearance order;
 // groups never interleave) and sorted within each group by the lexicographic
-// keys. Ineligible providers are placed after all eligible ones, sorted by
-// mapping ID. Within a balance group the pace-projection key is compared
-// pairwise: two providers compare on pace only when both can project; if
-// either cannot, that pair falls through to off-peak → weight → ID.
+// keys. Providers equal on semantic keys share a rank so each desired chain can
+// preserve its authored order; mapping ID stabilizes only this result's display
+// order. Ineligible providers are placed after all eligible ones, sorted by
+// mapping ID. Pace is compared only when every eligible provider in the balance
+// group can project; otherwise the group falls through to off-peak → weight.
 func Rank(in RankingInput) RankingResult {
 	obsBy := make(map[string]ProviderObs, len(in.Obs))
 	for _, o := range in.Obs {
@@ -532,13 +556,23 @@ func Rank(in RankingInput) RankingResult {
 	})
 
 	result := RankingResult{Entries: make([]RankEntry, 0, len(entries))}
+	nextRank := 0
 	for _, name := range groupOrder {
+		var previous *rankItem
+		rank := nextRank
 		for _, e := range groups[name].items {
-			result.Entries = append(result.Entries, e.toRankEntry(len(result.Entries)))
+			if previous != nil && !previous.semanticRankEqual(e.item) {
+				rank++
+			}
+			result.Entries = append(result.Entries, e.toRankEntry(rank))
+			item := e.item
+			previous = &item
 		}
+		nextRank = rank + 1
 	}
 	for _, e := range ineligible {
-		result.Entries = append(result.Entries, e.toRankEntry(len(result.Entries)))
+		result.Entries = append(result.Entries, e.toRankEntry(nextRank))
+		nextRank++
 	}
 	return result
 }
