@@ -501,7 +501,7 @@ func TestRoutingDefinitionMetadataIncludesAllCoreRoutes(t *testing.T) {
 	writeDefinition("facets/no-name.md", "polytoken:\n  model: live/fallback")
 
 	desired := policy.Desired{
-		Global: policy.Target{ID: "global", Root: root,
+		Global: policy.Target{ID: "global", Global: true, Root: root,
 			Full: policy.Chain{"full/a"}, Mini: policy.Chain{"mini/a"}, Nano: policy.Chain{"nano/a"}, Classifier: policy.Chain{"classifier/a"},
 			Definitions: []policy.Definition{
 				{Path: "subagents/zeta.md", Chain: policy.Chain{"desired/zeta"}},
@@ -543,7 +543,7 @@ func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
 	if err := os.WriteFile(path, []byte("---\nname: 'Agent\\napi_key=CANARY-NAME-SECRET'\npolytoken:\n  model: codex/gpt\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	desired := policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/agent.md", Chain: policy.Chain{"codex/gpt"}}}}}
+	desired := policy.Desired{Global: policy.Target{ID: "global", Global: true, Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/agent.md", Chain: policy.Chain{"codex/gpt"}}}}}
 	resolved, err := NewTargetRegistry().ResolveTargets(desired)
 	if err != nil {
 		t.Fatal(err)
@@ -566,7 +566,7 @@ func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
 		t.Fatalf("metadata lacks safe location: %s", output)
 	}
 
-	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: filepath.Join(secretRoot, "missing.md")}}}})
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Global: true, Root: secretRoot, Definitions: []policy.Definition{{Path: filepath.Join(secretRoot, "missing.md")}}}})
 	if err == nil {
 		t.Fatal("absolute definition path accepted")
 	}
@@ -574,7 +574,7 @@ func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
 		t.Fatalf("resolution error leaked canonical root: %v", err)
 	}
 
-	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/missing.md"}}}})
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Global: true, Root: secretRoot, Definitions: []policy.Definition{{Path: "subagents/missing.md"}}}})
 	if err == nil {
 		t.Fatal("missing definition accepted")
 	}
@@ -583,7 +583,7 @@ func TestRoutingOutputNeverLeaksCanonicalRoots(t *testing.T) {
 	}
 
 	missingRoot := filepath.Join(t.TempDir(), "home", "victim", ".config", "CANARY-MISSING-ROOT")
-	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Root: missingRoot}})
+	_, err = NewTargetRegistry().ResolveTargets(policy.Desired{Global: policy.Target{ID: "global", Global: true, Root: missingRoot}})
 	if err == nil {
 		t.Fatal("missing root accepted")
 	}

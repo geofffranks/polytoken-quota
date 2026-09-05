@@ -11,6 +11,7 @@ package target
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,6 +69,25 @@ func Resolve(in policy.Target) (Resolved, error) {
 	if err != nil {
 		return Resolved{}, rootError(in.ID, "stat root failed")
 	}
+	if !in.Global {
+		// Project roots may be registered at the project directory; the
+		// configuration directory is the root, or its .polytoken subdirectory
+		// when the root itself holds no config.yaml.
+		canonical, cerr := policy.CanonicalProjectRoot(realRoot)
+		if cerr != nil {
+			return Resolved{}, rootError(in.ID, policy.ErrNotConfigDir.Error())
+		}
+		if canonical != realRoot {
+			realRoot, err = filepath.EvalSymlinks(canonical)
+			if err != nil {
+				return Resolved{}, rootError(in.ID, "resolve root failed")
+			}
+			rootInfo, err = os.Stat(realRoot)
+			if err != nil {
+				return Resolved{}, rootError(in.ID, "stat root failed")
+			}
+		}
+	}
 
 	out := Resolved{ID: in.ID, CanonicalRoot: realRoot, Global: in.Global}
 	seen := map[string]bool{}
@@ -117,6 +137,12 @@ func resolveDefinition(root, rel string) (string, string, error) {
 	// Symlink rejection (default): Lstat catches a symlink at the entry itself.
 	li, err := os.Lstat(abs)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if stripped, ok := redundantPolytokenPrefix(root, cleaned); ok {
+				return "", "", fmt.Errorf("definition file does not exist; definition paths are relative to the configuration directory - did you mean %q (without the .polytoken/ prefix)?", stripped)
+			}
+			return "", "", errors.New("definition file does not exist")
+		}
 		return "", "", errors.New("stat failed")
 	}
 	if li.Mode()&os.ModeSymlink != 0 {
@@ -130,6 +156,21 @@ func resolveDefinition(root, rel string) (string, string, error) {
 		return "", "", errors.New("path outside root")
 	}
 	return policyPath, real, nil
+}
+
+// redundantPolytokenPrefix reports that rel (already cleaned) carries a leading
+// .polytoken/ element that resolves against the configuration directory even
+// though the stripped path exists. The suggestion is policy-relative only.
+func redundantPolytokenPrefix(root, rel string) (stripped string, ok bool) {
+	const elem = ".polytoken"
+	if rel == elem || !strings.HasPrefix(rel, elem+string(filepath.Separator)) {
+		return "", false
+	}
+	candidate := strings.TrimPrefix(rel, elem+string(filepath.Separator))
+	if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(candidate))); err != nil {
+		return "", false
+	}
+	return filepath.ToSlash(candidate), true
 }
 
 func rootError(targetID, classification string) error {

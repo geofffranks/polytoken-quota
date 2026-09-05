@@ -15,6 +15,7 @@ import (
 func TestResolveRejectsTraversalAndSymlink(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
+	writeRootConfig(t, root)
 	link := filepath.Join(root, "agent.md")
 	if err := os.Symlink(filepath.Join(outside, "agent.md"), link); err != nil {
 		t.Fatal(err)
@@ -60,6 +61,7 @@ func TestResolveGlobalTarget(t *testing.T) {
 // TestResolveDuplicateFiles proves duplicate managed definition files are rejected.
 func TestResolveDuplicateFiles(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	agent := filepath.Join(root, "agent.md")
 	if err := os.WriteFile(agent, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
@@ -77,6 +79,7 @@ func TestResolveDuplicateFiles(t *testing.T) {
 func TestResolveRejectsOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
+	writeRootConfig(t, root)
 	other := filepath.Join(outside, "agent.md")
 	if err := os.WriteFile(other, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
@@ -91,6 +94,7 @@ func TestResolveRejectsOutsideRoot(t *testing.T) {
 // registered on the target are collected; Resolve never scans the root.
 func TestResolveExplicitProjectsOnly(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	registered := filepath.Join(root, "registered.md")
 	// An unregistered model-bearing file that must NOT be collected.
 	extra := filepath.Join(root, "extra", "unmanaged.md")
@@ -121,6 +125,7 @@ func TestResolvedDefinitionsRetainPathIdentity(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(definitionPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	writeRootConfig(t, secretRoot)
 	if err := os.WriteFile(definitionPath, []byte("---\nname: Build Agent\npolytoken:\n  model: codex/gpt\n  fallback_models: [zai/glm]\n---\nbody\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +167,7 @@ func TestResolvedDefinitionsRetainPathIdentity(t *testing.T) {
 // a reason to reject an otherwise valid registered reconciliation target.
 func TestResolveDoesNotParseDefinitionMetadata(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	path := filepath.Join(root, "agent.md")
 	if err := os.WriteFile(path, []byte("---\nname: [invalid\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -211,7 +217,7 @@ func TestReadDefinitionMetadataRejectsPostResolveSymlinkSwap(t *testing.T) {
 			base := t.TempDir()
 			root := filepath.Join(base, "home", "victim", ".config", "CANARY-ROOT")
 			outside := filepath.Join(base, "outside", "CANARY-OUTSIDE")
-			for _, file := range []string{filepath.Join(root, "subagents", "agent.md"), filepath.Join(outside, "agent.md")} {
+			for _, file := range []string{filepath.Join(root, "config.yaml"), filepath.Join(root, "subagents", "agent.md"), filepath.Join(outside, "agent.md")} {
 				if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -286,6 +292,7 @@ func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
 
 func TestDefinitionIdentityPreservesMarkerSubstrings(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	definitionPath := filepath.Join(root, "secretariat", "tokenizer.md")
 	if err := os.MkdirAll(filepath.Dir(definitionPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -316,6 +323,7 @@ func TestDefinitionIdentityPreservesMarkerSubstrings(t *testing.T) {
 
 func TestDefinitionDisplayNameRedactsSecretMaterial(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	definitionPath := filepath.Join(root, "agent.md")
 	if err := os.WriteFile(definitionPath, []byte("---\nname: 'Agent token=CANARY-SECRET'\n---\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -335,6 +343,7 @@ func TestDefinitionDisplayNameRedactsSecretMaterial(t *testing.T) {
 
 func TestDefinitionPathFallbackIsNeverEmpty(t *testing.T) {
 	root := t.TempDir()
+	writeRootConfig(t, root)
 	definitionPath := filepath.Join(root, ".md")
 	if err := os.WriteFile(definitionPath, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
@@ -360,6 +369,7 @@ func TestRoutingDefinitionsExplicitPathsOnly(t *testing.T) {
 	root := filepath.Join(base, "home", "registered", ".polytoken")
 	outside := filepath.Join(base, "home", "unregistered-project", ".polytoken")
 	for _, path := range []string{
+		filepath.Join(root, "config.yaml"),
 		filepath.Join(root, "subagents", "registered.md"),
 		filepath.Join(root, "subagents", "unregistered.md"),
 		filepath.Join(outside, "subagents", "sibling.md"),
@@ -455,6 +465,15 @@ func TestDiscoverSkipsSymlinkedDirs(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("discover followed symlink out of root: %v", got)
+	}
+}
+
+// writeRootConfig marks root as a Polytoken configuration directory so
+// project-target fixtures satisfy the root canonicalization contract.
+func writeRootConfig(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("defaults: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

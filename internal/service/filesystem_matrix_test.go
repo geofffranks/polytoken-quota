@@ -114,6 +114,7 @@ func fsSymlinkRefused(t *testing.T) {
 	real := filepath.Join(root, "real.md")
 	outside := filepath.Join(root, "outside", "escape.md")
 	testutil.WriteFile(t, real, "---\n---\n")
+	testutil.WriteFile(t, filepath.Join(root, "config.yaml"), "defaults: {}\n")
 	testutil.WriteFile(t, outside, "escaped\n")
 	link := filepath.Join(root, "link.md")
 	if err := os.Symlink(real, link); err != nil {

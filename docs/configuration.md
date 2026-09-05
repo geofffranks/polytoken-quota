@@ -103,10 +103,10 @@ discovered or adopted unless it is listed.
 
 | Field | Set it | Meaning |
 |-------|-------|---------|
-| `root` | always | Canonical Polytoken configuration root for the target; reconciliation has nothing to apply to without it. |
+| `root` | always | Configuration root for the target. The global root is the Polytoken configuration directory (for example `~/.config/polytoken`). A project root may be the project directory: when the root itself holds no `config.yaml`, its `.polytoken` subdirectory is used as the configuration root automatically. A root with neither is rejected with a clear error. |
 | `id` | projects | Target identifier used in output. |
 | `full`, `mini`, `nano`, `classifier` | when you want default chains | Default chains for the target. Every entry must resolve to a model some mapping owns; reasoning suffixes like `codex/gpt-5(medium)` are allowed. |
-| `definitions` | when managing facet/subagent files | Managed files. Each entry has `path` (relative to the target root) and `chain`, validated like the default chains. |
+| `definitions` | when managing facet/subagent files | Managed files. Each entry has `path` (relative to the target's configuration root, so a project registered at its project directory needs no `.polytoken/` prefix) and `chain`, validated like the default chains. |
 
 Only the enumerated chains and definition fields are managed; everything
 else in those files is preserved byte-for-byte.
