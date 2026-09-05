@@ -769,6 +769,57 @@ func TestZaiContractFixtures(t *testing.T) {
 		}
 	})
 
+	// credit_limit.json: live-shaped CREDIT_LIMIT-only response. Counts are
+	// present, so the counts-derived used/limit/percentage must win over the
+	// deliberately stale server `percentage` fields; the weekly entry sorts
+	// last as primary and carries the epoch-millis reset; the 5-hour entry
+	// has none.
+	t.Run("credit_limit", func(t *testing.T) {
+		src := newZaiFixtureSource(t, loadZaiFixture(t, "credit_limit.json"))
+		snap, err := src.Fetch(context.Background())
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if snap.Status != quota.SourceFresh {
+			t.Fatalf("status = %s, want fresh", snap.Status)
+		}
+		if snap.Availability != quota.QuotaAvailable {
+			t.Fatalf("availability = %s, want available", snap.Availability)
+		}
+		s := contractFindWindow(snap.Windows, "session")
+		if s == nil {
+			t.Fatal("missing session (5-hour credit) window")
+		}
+		if s.Used == nil || *s.Used != 2500000 || s.Limit == nil || *s.Limit != 10000000 {
+			t.Fatalf("session used/limit = %v/%v, want 2500000/10000000", s.Used, s.Limit)
+		}
+		if s.UsagePercent == nil || *s.UsagePercent != 25 {
+			t.Fatalf("session usage_percent = %v, want 25 (counts-derived; server says 40)", s.UsagePercent)
+		}
+		if s.Period == nil || *s.Period != 5*time.Hour {
+			t.Fatalf("session period = %v, want 5h", s.Period)
+		}
+		if s.ResetAt != nil {
+			t.Fatalf("session reset_at = %v, want nil (no nextResetTime)", s.ResetAt)
+		}
+		p := contractFindWindow(snap.Windows, "primary")
+		if p == nil {
+			t.Fatal("missing primary (weekly credit) window")
+		}
+		if p.Used == nil || *p.Used != 10000000 || p.Limit == nil || *p.Limit != 50000000 {
+			t.Fatalf("primary used/limit = %v/%v, want 10000000/50000000", p.Used, p.Limit)
+		}
+		if p.UsagePercent == nil || *p.UsagePercent != 20 {
+			t.Fatalf("primary usage_percent = %v, want 20 (counts-derived; server says 33)", p.UsagePercent)
+		}
+		if p.Period == nil || *p.Period != 168*time.Hour {
+			t.Fatalf("primary period = %v, want 168h (unit=6 weeks × number=1)", p.Period)
+		}
+		if p.ResetAt == nil || p.ResetAt.UnixMilli() != 1789101788998 {
+			t.Fatalf("primary reset_at = %v, want epoch millis 1789101788998", p.ResetAt)
+		}
+	})
+
 	// auth_failure.json: envelope code 1001 → sanitized auth-failure error.
 	t.Run("auth_failure", func(t *testing.T) {
 		src := newZaiFixtureSource(t, loadZaiFixture(t, "auth_failure.json"))

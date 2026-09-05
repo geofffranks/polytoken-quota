@@ -485,19 +485,41 @@ func TestZaiLiveCreditLimitsParse(t *testing.T) {
 	if snap.Status != SourceFresh {
 		t.Fatalf("status = %s, want fresh", snap.Status)
 	}
+	if snap.Availability != QuotaAvailable {
+		t.Fatalf("availability = %s, want available", snap.Availability)
+	}
 	if len(snap.Windows) != 2 {
 		t.Fatalf("windows = %d, want 2", len(snap.Windows))
 	}
-	if findWindow(snap.Windows, "session") == nil {
+	session := findWindow(snap.Windows, "session")
+	if session == nil {
 		t.Fatal("missing session CREDIT_LIMIT window")
+	}
+	if session.Used == nil || *session.Used != 0 || session.Limit == nil || *session.Limit != 1000000 {
+		t.Fatalf("session used/limit = %v/%v, want 0/1000000", session.Used, session.Limit)
+	}
+	if session.Period == nil || *session.Period != 5*time.Hour {
+		t.Fatalf("session period = %v, want 5h (unit=3 hours × number=5)", session.Period)
+	}
+	if session.ResetAt != nil {
+		t.Fatalf("session reset_at = %v, want nil (no nextResetTime)", session.ResetAt)
 	}
 	primary := findWindow(snap.Windows, "primary")
 	if primary == nil {
 		t.Fatal("missing primary CREDIT_LIMIT window")
 	}
-	if primary.ResetAt == nil {
-		t.Fatal("primary reset time missing")
+	if primary.Used == nil || *primary.Used != 0 || primary.Limit == nil || *primary.Limit != 10000000 {
+		t.Fatalf("primary used/limit = %v/%v, want 0/10000000", primary.Used, primary.Limit)
 	}
+	if primary.Period == nil || *primary.Period != 168*time.Hour {
+		t.Fatalf("primary period = %v, want 168h (unit=6 weeks × number=1)", primary.Period)
+	}
+	if primary.ResetAt == nil || !primary.ResetAt.Equal(millisToTime(1789101788998)) {
+		t.Fatalf("primary reset_at = %v, want epoch millis 1789101788998", primary.ResetAt)
+	}
+	// The live body's percentage is 0 and its derived percent is 0, so this
+	// assertion cannot distinguish the counts-derived path from the server
+	// fallback; credit_limit.json in the contract suite covers that split.
 	if primary.UsagePercent == nil || *primary.UsagePercent != 0 {
 		t.Fatalf("primary usage_percent = %v, want 0", primary.UsagePercent)
 	}

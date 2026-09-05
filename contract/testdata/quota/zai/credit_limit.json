@@ -1,0 +1,29 @@
+{
+  "code": 200,
+  "msg": "Operation successful",
+  "success": true,
+  "data": {
+    "limits": [
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 3,
+        "number": 5,
+        "percentage": 40,
+        "usage": 10000000,
+        "currentValue": 2500000,
+        "remaining": 7500000
+      },
+      {
+        "type": "CREDIT_LIMIT",
+        "unit": 6,
+        "number": 1,
+        "percentage": 33,
+        "usage": 50000000,
+        "currentValue": 10000000,
+        "remaining": 40000000,
+        "nextResetTime": 1789101788998
+      }
+    ],
+    "planName": "Pro"
+  }
+}
