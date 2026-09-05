@@ -118,7 +118,7 @@ func staged(t *testing.T, globalDir, projectDir string, plan reconcile.Plan, res
 		AuthMode: staging.AuthInert,
 		Sources:  staging.FSMaterializer{GlobalDir: globalDir},
 	}
-	c, err := b.Build(context.Background(), res, plan)
+	c, err := b.Build(context.Background(), res, plan, nil)
 	if err != nil {
 		t.Fatalf("staging build: %v", err)
 	}

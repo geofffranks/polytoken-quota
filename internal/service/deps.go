@@ -70,9 +70,11 @@ type Reconciler interface {
 }
 
 // Stager materializes an isolated validation staging candidate for one target.
-// It wraps staging.Builder.Build.
+// It wraps staging.Builder.Build. globalPlan is the global target's rendered
+// plan when res is a project target, passed so the project candidate's global
+// layer mirrors the reconciled global view (nil otherwise).
 type Stager interface {
-	Stage(ctx context.Context, res target.Resolved, plan reconcile.Plan) (staging.Candidate, error)
+	Stage(ctx context.Context, res target.Resolved, plan reconcile.Plan, globalPlan *reconcile.Plan) (staging.Candidate, error)
 }
 
 // Validator runs the bounded startup-equivalent validation against one staged

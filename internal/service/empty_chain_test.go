@@ -104,7 +104,7 @@ func TestEmptyChainFailurePreservesByteIdenticalLKG(t *testing.T) {
 		TempRoot: t.TempDir(),
 		AuthMode: staging.AuthInert,
 		Sources:  staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, zeroPlan)
+	}.Build(context.Background(), res, zeroPlan, nil)
 	if err != nil {
 		t.Fatalf("stage zero-edit plan: %v", err)
 	}

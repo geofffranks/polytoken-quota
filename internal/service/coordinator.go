@@ -445,9 +445,10 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	}
 	timeout := c.validationTimeout(desired)
 	c.step("publish-targets")
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false, gp))
 	}
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
@@ -506,9 +507,10 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	// The coarse path reports a single reconcile and publish-targets step for
 	// the whole batch; processOneTarget emits no per-target steps (detailed=false).
 	c.step("publish-targets")
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false, gp))
 	}
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
@@ -538,15 +540,35 @@ func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, 
 	return next, c.processTargets(ctx, desired, prior, next, targets, publish)
 }
 
+// globalPlan renders the global target's plan once, for sharing the reconciled
+// global layer into project staging. It returns nil when there is no global
+// target or its plan cannot be rendered; project candidates then fall back to
+// the live global layer (pq-m4k9).
+func (c *Coordinator) globalPlan(desired policy.Desired, next state.State, targets []RegisteredTarget) *reconcile.Plan {
+	ranks, _ := ComputeRanking(desired, next, c.now())
+	for _, rt := range targets {
+		if !rt.Policy.Global {
+			continue
+		}
+		p, err := c.Builder.Build(desired, next, rt.Policy, ranks)
+		if err != nil {
+			return nil
+		}
+		return &p
+	}
+	return nil
+}
+
 // processTargets runs the detailed per-target pipeline (render → stage →
 // validate → publish), emitting a trace step for each stage and target. When
 // publish is false (dry-run) no publish or state mutation occurs.
 func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool, retain ...bool) []TargetOutcome {
 	keepStaging := len(retain) > 0 && retain[0]
 	timeout := c.validationTimeout(desired)
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false, gp))
 	}
 	return outcomes
 }
@@ -558,7 +580,7 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 // (render:/stage:/validate:/publish:/record-pending: suffixed with the target
 // id); the coarse Set/Clear path passes false so the whole batch reports only
 // the batch-level reconcile/publish-targets steps emitted by its caller.
-func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging, verbose bool) TargetOutcome {
+func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging, verbose bool, globalPlan *reconcile.Plan) TargetOutcome {
 	id := targetID(rt)
 	step := func(name string) {
 		if detailed {
@@ -577,7 +599,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		return out
 	}
 	step("stage")
-	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan)
+	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan, globalPlan)
 	if err != nil {
 		step("record-pending")
 		out := pendingOutcome(id, next.Revision, "stage", err)

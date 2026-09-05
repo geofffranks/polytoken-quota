@@ -184,7 +184,7 @@ func canaryStage(t *testing.T, sourceDir, stageTmp string, res target.Resolved) 
 	c, err := staging.Builder{
 		TempRoot: stageTmp, AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: sourceDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID}, nil)
 	if err != nil {
 		t.Fatalf("stage: %v", err)
 	}

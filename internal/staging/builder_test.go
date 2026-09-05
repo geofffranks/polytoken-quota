@@ -193,7 +193,7 @@ func TestBuildSkipsSymlinkedLayerFiles(t *testing.T) {
 	if err := os.Symlink(secretPath, filepath.Join(globalDir, "subagents", "notes.md")); err != nil {
 		t.Fatal(err)
 	}
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestBuildRejectsSymlinkedConfig(t *testing.T) {
 	if err := os.Symlink(moved, real); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan); err == nil {
+	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil); err == nil {
 		t.Fatal("build accepted a symlinked config.yaml")
 	}
 }
@@ -244,7 +244,7 @@ func TestBuildClearsStaleStagingRoot(t *testing.T) {
 	b := builderWith(t, live, AuthInert)
 	stale := stageRoot(b.TempRoot, live.Target.ID)
 	testutil.WriteFile(t, filepath.Join(stale, "config", "leftover.md"), "stale-bytes")
-	c, err := b.Build(context.Background(), live.Target, live.Plan)
+	c, err := b.Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestBuildClearsStaleStagingRoot(t *testing.T) {
 // edits only in staging, and records a separate neutral ConfigDir/WorkingDir.
 func TestBuildCompleteRootAndNeutralWorkdir(t *testing.T) {
 	live := layeredFixture(t)
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestBuildCompleteRootAndNeutralWorkdir(t *testing.T) {
 func TestBuildDoesNotMutateLive(t *testing.T) {
 	live := layeredFixture(t)
 	before := testutil.Snapshot(t, live.Root)
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestBuildDoesNotMutateLive(t *testing.T) {
 // root and that a second call is a no-op.
 func TestCleanupRemovesRootAndIsIdempotent(t *testing.T) {
 	live := layeredFixture(t)
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestCleanupOnEveryExit(t *testing.T) {
 	// success: build then explicit cleanup. The Builder that runs the build is
 	// the same one whose TempRoot we predict the root from.
 	b := builderWith(t, live, AuthInert)
-	c, err := b.Build(context.Background(), live.Target, live.Plan)
+	c, err := b.Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +383,7 @@ func TestCleanupOnEveryExit(t *testing.T) {
 	renderPlan := reconcile.Plan{TargetID: live.Target.ID, Edits: []reconcile.FieldEdit{
 		{File: "ghost/missing.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
 	}}
-	if _, err := rb.Build(context.Background(), live.Target, renderPlan); err == nil {
+	if _, err := rb.Build(context.Background(), live.Target, renderPlan, nil); err == nil {
 		t.Fatal("expected render error")
 	}
 	assertGone(t, "render", root)
@@ -398,7 +398,7 @@ func TestCleanupOnEveryExit(t *testing.T) {
 	root = stageRoot(cb.TempRoot, live.Target.ID)
 	ctx, cancel := context.WithCancel(context.Background())
 	cb.Sources = cancelDuringProject{inner: live.Sources, cancel: cancel}
-	if _, err := cb.Build(ctx, live.Target, live.Plan); err == nil {
+	if _, err := cb.Build(ctx, live.Target, live.Plan, nil); err == nil {
 		t.Fatal("expected cancel error")
 	}
 	assertGone(t, "cancel", root)
@@ -414,7 +414,7 @@ func TestCleanupOnEveryExit(t *testing.T) {
 	tctx, tcancel := context.WithDeadline(context.Background(), time.Now().Add(10*time.Millisecond))
 	defer tcancel()
 	tb.Sources = deadlineDuringProject{inner: live.Sources}
-	if _, err := tb.Build(tctx, live.Target, live.Plan); err == nil {
+	if _, err := tb.Build(tctx, live.Target, live.Plan, nil); err == nil {
 		t.Fatal("expected timeout error")
 	}
 	assertGone(t, "timeout", root)
@@ -468,7 +468,7 @@ func assertGone(t *testing.T, stage, root string) {
 // TestPrivatePermissions asserts dirs are 0700 and files 0600 in staging.
 func TestPrivatePermissions(t *testing.T) {
 	live := layeredFixture(t)
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestConflictingLiveIsolation(t *testing.T) {
 	// (outside .polytoken) that must never appear in staging.
 	testutil.WriteFile(t, filepath.Join(live.ProjectRoot, "stray.md"),
 		"---\npolytoken:\n  model: evil/stray\n---\nbody\n")
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,14 +534,14 @@ func TestAuthInertRejectsSecretBearingAuxiliaryFile(t *testing.T) {
 	live := layeredFixture(t)
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "credentials.json"), `{"token":"secret"}`)
 	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
-	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan); err == nil {
+	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil); err == nil {
 		t.Fatal("AuthInert accepted secret-bearing auxiliary file")
 	}
 }
 
 func TestAuthInertRedactsSecrets(t *testing.T) {
 	live := layeredFixture(t)
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestAuthInertRedactsSecrets(t *testing.T) {
 // auth values verbatim (no expansion) under restrictive permissions.
 func TestAuthTransientSourceRetainsSecrets(t *testing.T) {
 	live := layeredFixture(t)
-	c, err := builderWith(t, live, AuthTransientSource).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthTransientSource).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestAuthTransientSourceRetainsSecrets(t *testing.T) {
 func TestAuthUndecidedErrors(t *testing.T) {
 	live := layeredFixture(t)
 	b := Builder{TempRoot: t.TempDir(), AuthMode: AuthUndecided, Sources: live.Sources}
-	_, err := b.Build(context.Background(), live.Target, live.Plan)
+	_, err := b.Build(context.Background(), live.Target, live.Plan, nil)
 	if err == nil {
 		t.Fatal("expected error for AuthUndecided")
 	}
@@ -608,7 +608,7 @@ func TestNoEnvSecretExpansion(t *testing.T) {
 		TempRoot: t.TempDir(),
 		AuthMode: AuthTransientSource,
 		Sources:  FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: "p"})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: "p"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestGlobalTargetNoProjectLayer(t *testing.T) {
 		TempRoot: t.TempDir(),
 		AuthMode: AuthInert,
 		Sources:  FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestTimeoutContextIsHonored(t *testing.T) {
 	time.Sleep(2 * time.Millisecond) // ensure deadline passed
 	root := stageRoot(t.TempDir(), live.Target.ID)
 	b := Builder{TempRoot: filepath.Dir(root), AuthMode: AuthInert, Sources: live.Sources}
-	_, err := b.Build(ctx, live.Target, live.Plan)
+	_, err := b.Build(ctx, live.Target, live.Plan, nil)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -764,7 +764,7 @@ func TestStagingAcceptsPolytokenNamedFiles(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "polytoken-tools.md"), "# tools")
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "superpowers", "session-start-polytoken"), "#!/bin/sh")
 	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatalf("staging rejected benign polytoken-named file: %v", err)
 	}
@@ -779,7 +779,7 @@ func TestStagingExcludesBackupWithSecrets(t *testing.T) {
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "config.yaml.bak"),
 		"providers:\n  codex:\n    api_key: "+leaked+"\n")
 	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
-	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan)
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatalf("staging failed: %v", err)
 	}
@@ -841,7 +841,7 @@ func buildCatalogStage(t *testing.T) Candidate {
 		TempRoot: t.TempDir(),
 		AuthMode: AuthInert,
 		Sources:  FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{}, nil)
 	if err != nil {
 		t.Fatalf("build candidate: %v", err)
 	}
@@ -909,7 +909,7 @@ func TestNoCatalogProviderYieldsNoEnvRefs(t *testing.T) {
 		TempRoot: t.TempDir(),
 		AuthMode: AuthInert,
 		Sources:  FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	}.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{}, nil)
 	if err != nil {
 		t.Fatalf("build candidate: %v", err)
 	}

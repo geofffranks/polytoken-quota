@@ -43,7 +43,7 @@ func buildCandidate(t *testing.T, globalDir, stageTmp string, res target.Resolve
 	c, err := staging.Builder{
 		TempRoot: stageTmp, AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID}, nil)
 	if err != nil {
 		t.Fatalf("stage: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestAssertNoStagingRootsAfterExits(t *testing.T) {
 	if _, err := (staging.Builder{
 		TempRoot: stageTmp3, AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(ctx, res, reconcile.Plan{TargetID: res.ID})); err == nil {
+	}.Build(ctx, res, reconcile.Plan{TargetID: res.ID}, nil)); err == nil {
 		t.Fatal("expected cancelled build to fail")
 	}
 	assertNoStagingUnderRoot(t, stageTmp3)
@@ -116,7 +116,7 @@ func TestAssertNoStagingRootsAfterExits(t *testing.T) {
 	if _, err := (staging.Builder{
 		TempRoot: stageTmp4, AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(tctx, res, reconcile.Plan{TargetID: res.ID})); err == nil {
+	}.Build(tctx, res, reconcile.Plan{TargetID: res.ID}, nil)); err == nil {
 		t.Fatal("expected timed-out build to fail")
 	}
 	assertNoStagingUnderRoot(t, stageTmp4)
