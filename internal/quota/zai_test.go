@@ -126,6 +126,20 @@ const zaiAuthFailureBody = `{"code":1001,"msg":"Authorization Token Missing","su
 
 const zaiEmptyLimitsBody = `{"code":200,"msg":"Operation successful","success":true,"data":{"limits":[],"planName":"Pro"}}`
 
+// Live z.ai responses currently use CREDIT_LIMIT for both short and long
+// windows. The second entry also carries the epoch-millisecond reset time.
+const zaiLiveCreditLimitBody = `{
+  "code": 200,
+  "success": true,
+  "data": {
+    "limits": [
+      {"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":0,"usage":1000000,"currentValue":0,"remaining":1000000},
+      {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":0,"usage":10000000,"currentValue":0,"remaining":10000000,"nextResetTime":1789101788998}
+    ],
+    "level": "pro"
+  }
+}`
+
 // A valid token limit, a malformed (string) entry, then a valid MCP time limit:
 // the two good siblings must survive and the snapshot downgrades to partial.
 const zaiMalformedLimitBody = `{
@@ -457,6 +471,35 @@ func TestZaiMissingCountsParse(t *testing.T) {
 	}
 	if primary.Limit != nil {
 		t.Fatalf("primary limit should be nil when counts absent, got %v", *primary.Limit)
+	}
+}
+
+func TestZaiLiveCreditLimitsParse(t *testing.T) {
+	doer := &recordingDoer{resp: bodyResponse(200, []byte(zaiLiveCreditLimitBody))}
+	src := freshZai(t, doer)
+
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if snap.Status != SourceFresh {
+		t.Fatalf("status = %s, want fresh", snap.Status)
+	}
+	if len(snap.Windows) != 2 {
+		t.Fatalf("windows = %d, want 2", len(snap.Windows))
+	}
+	if findWindow(snap.Windows, "session") == nil {
+		t.Fatal("missing session CREDIT_LIMIT window")
+	}
+	primary := findWindow(snap.Windows, "primary")
+	if primary == nil {
+		t.Fatal("missing primary CREDIT_LIMIT window")
+	}
+	if primary.ResetAt == nil {
+		t.Fatal("primary reset time missing")
+	}
+	if primary.UsagePercent == nil || *primary.UsagePercent != 0 {
+		t.Fatalf("primary usage_percent = %v, want 0", primary.UsagePercent)
 	}
 }
 

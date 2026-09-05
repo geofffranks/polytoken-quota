@@ -266,6 +266,8 @@ type zaiQuotaData struct {
 // zaiLimitRaw is one entry of data.limits. Raw counts (usage/currentValue/
 // remaining) are optional pointers; percentage is the always-present server
 // value (percent USED, 0..100); nextResetTime is epoch milliseconds.
+// z.ai currently returns CREDIT_LIMIT for live accounts, while older contract
+// responses used TOKENS_LIMIT and TIME_LIMIT.
 type zaiLimitRaw struct {
 	Type          string   `json:"type"`
 	Unit          int      `json:"unit"`
@@ -326,7 +328,9 @@ func parseZaiQuota(body []byte) (windows []QuotaWindow, partial bool, err error)
 			continue
 		}
 		switch dl.limitType {
-		case "TOKENS_LIMIT":
+		case "TOKENS_LIMIT", "CREDIT_LIMIT":
+			// CREDIT_LIMIT is the live z.ai response type. Its unit/number
+			// fields have the same window semantics as TOKENS_LIMIT.
 			tokenLimits = append(tokenLimits, dl)
 		case "TIME_LIMIT":
 			timeLimits = append(timeLimits, dl)
