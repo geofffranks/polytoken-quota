@@ -103,12 +103,16 @@ func IsAmbiguous(err error) bool {
 // doc is the parsed representation of a YAML byte slice: the yaml.v3 node tree
 // and the byte offset of each 1-based line start. Line offsets account for a
 // leading UTF-8 BOM so that a (line, column) pair maps to the correct byte
-// even when the document begins with a BOM.
+// even when the document begins with a BOM. When scoped is set, parse-time
+// whole-tree ambiguity validation is skipped in favor of per-edit-path
+// validation (validateEditPath), tolerating anchors and other ambiguity that
+// does not involve the edited path.
 type doc struct {
 	root    *yaml.Node
 	lines   []int // lines[line] = byte offset of that line's first byte (1-based)
 	raw     []byte
 	newline []byte
+	scoped  bool
 }
 
 // utf8BOM is the 3-byte UTF-8 byte-order mark.
@@ -116,8 +120,18 @@ const utf8BOM = "\xef\xbb\xbf"
 
 // parseDoc parses raw YAML into a doc, recording line offsets (BOM-aware) and
 // detecting a leading BOM. The first parse runs yaml.v3 over raw; a second
-// validation pass over the node tree rejects ambiguous structures.
+// validation pass over the node tree rejects ambiguous structures. Strict
+// (whole-tree) validation is the default; see parseDocMode.
 func parseDoc(raw []byte) (*doc, error) {
+	return parseDocMode(raw, false)
+}
+
+// parseDocMode parses raw YAML like parseDoc. When scopedAmbiguity is false the
+// whole tree is validated up front and any anchor, alias, merge key, or
+// duplicate key refuses the document. When it is true, the up-front pass is
+// skipped; callers validate ambiguity per edit path via validateEditPath, so
+// ambiguity far from the edited path is tolerated.
+func parseDocMode(raw []byte, scopedAmbiguity bool) (*doc, error) {
 	var root yaml.Node
 	dec := yaml.NewDecoder(newReader(raw))
 	dec.KnownFields(false)
@@ -132,9 +146,12 @@ func parseDoc(raw []byte) (*doc, error) {
 		raw:     raw,
 		newline: detectNewline(raw),
 		lines:   lineOffsets(raw),
+		scoped:  scopedAmbiguity,
 	}
-	if err := d.validate(d.root); err != nil {
-		return nil, err
+	if !scopedAmbiguity {
+		if err := d.validate(d.root); err != nil {
+			return nil, err
+		}
 	}
 	return d, nil
 }

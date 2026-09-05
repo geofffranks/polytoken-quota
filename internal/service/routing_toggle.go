@@ -4,7 +4,10 @@ package service
 // change ONLY the top-level routing.enabled field. The raw bytes are edited with
 // the document package (comments, key order, quoting, and unmanaged content are
 // preserved) and written back with an atomic temp+rename+fsync. This is NOT a
-// whole-file reserialization.
+// whole-file reserialization. Because desired.yaml is operator-authored and may
+// use YAML anchors for shared blocks, ambiguity (anchors, aliases, merge keys,
+// duplicate keys) is tolerated unless it involves the routing.enabled edit path
+// itself, which is still refused as ambiguous.
 
 import (
 	"context"
@@ -64,7 +67,7 @@ func (c *Coordinator) SetRoutingEnabled(ctx context.Context, enabled bool) error
 		Path: []string{"routing", "enabled"},
 		Kind: document.Boolean,
 		Bool: &b,
-	}})
+	}}, document.EditScopedAmbiguity())
 	if err != nil {
 		return fmt.Errorf("routing: edit routing.enabled: %w", err)
 	}

@@ -479,6 +479,118 @@ func TestIsAmbiguousDuplicateKeyIsStructural(t *testing.T) {
 	}
 }
 
+// routingEdit returns a routing.enabled boolean edit set to v.
+func routingEdit(v bool) Edit {
+	return Edit{Path: []string{"routing", "enabled"}, Kind: Boolean, Bool: boolPtr(v)}
+}
+
+// TestEditScopedAmbiguityToleratesDistantStructures proves that with the
+// EditScopedAmbiguity option, anchors, aliases, merge keys, and duplicate keys
+// that do not involve the edited path are ignored, and the edit remains
+// byte-local: every byte outside the managed span, including the anchor
+// syntax itself, is preserved.
+func TestEditScopedAmbiguityToleratesDistantStructures(t *testing.T) {
+	cases := map[string]struct {
+		in, want string
+		edit     Edit
+	}{
+		"distant anchor and alias": {
+			in:   "providers:\n  openai: &base\n    models:\n      - gpt\n  anthropic: *base\nrouting:\n  enabled: true\n",
+			want: "providers:\n  openai: &base\n    models:\n      - gpt\n  anthropic: *base\nrouting:\n  enabled: false\n",
+			edit: routingEdit(false),
+		},
+		"distant merge key": {
+			in:   "defaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n",
+			want: "defaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: false\n",
+			edit: routingEdit(false),
+		},
+		"distant duplicate keys": {
+			in:   "a: 1\na: 2\nrouting:\n  enabled: true\n",
+			want: "a: 1\na: 2\nrouting:\n  enabled: false\n",
+			edit: routingEdit(false),
+		},
+		"distant alias value": {
+			in:   "a: &v 1\nb: *v\nrouting:\n  enabled: true\n",
+			want: "a: &v 1\nb: *v\nrouting:\n  enabled: false\n",
+			edit: routingEdit(false),
+		},
+		"distant anchor with CRLF": {
+			in:   "providers:\n  openai: &base\n    quota: 1\nrouting:\r\n  enabled: true\r\n",
+			want: "providers:\n  openai: &base\n    quota: 1\nrouting:\r\n  enabled: false\r\n",
+			edit: routingEdit(false),
+		},
+		"distant anchor scalar edit": {
+			in:   "a: &v 1\nb: *v\nrouting:\n  note: 'old'\n",
+			want: "a: &v 1\nb: *v\nrouting:\n  note: 'new'\n",
+			edit: Edit{Path: []string{"routing", "note"}, Kind: Scalar, Scalar: strPtr("new")},
+		},
+		"insertion with distant anchor": {
+			in:   "p: &p\n  x: 1\nrouting:\n  other: 1\n",
+			want: "p: &p\n  x: 1\nrouting:\n  other: 1\n  enabled: false\n",
+			edit: routingEdit(false),
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			out, err := EditYAML([]byte(tc.in), []Edit{tc.edit}, EditScopedAmbiguity())
+			if err != nil {
+				t.Fatalf("scoped edit rejected distant ambiguity: %v", err)
+			}
+			if string(out) != tc.want {
+				t.Fatalf("edit was not byte-local:\n got=%q\nwant=%q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestEditScopedAmbiguityRefusesOnEditPath proves the scoped mode still refuses
+// — as structurally ambiguous — any anchor, alias, merge key, or duplicate key
+// that involves the edited path itself. An edit there would change or depend on
+// alias-visible values, so the fail-closed contract holds on the path.
+func TestEditScopedAmbiguityRefusesOnEditPath(t *testing.T) {
+	cases := map[string][]byte{
+		"anchor on routing value": []byte("routing: &r\n  enabled: true\n"),
+		"anchor on enabled value": []byte("routing:\n  enabled: &e true\n"),
+		"anchor on routing key":   []byte("&r routing:\n  enabled: true\n"),
+		"alias value for enabled": []byte("d: &d true\nrouting:\n  enabled: *d\n"),
+		"duplicate routing keys":  []byte("routing:\n  enabled: true\nrouting:\n  enabled: false\n"),
+		"duplicate enabled keys":  []byte("routing:\n  enabled: true\n  enabled: false\n"),
+		"merge key in routing":    []byte("b: &b {enabled: true}\nrouting:\n  <<: *b\n"),
+		"merge key at root":       []byte("b: &b {routing: {enabled: true}}\n<<: *b\n"),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			out, err := EditYAML(in, []Edit{routingEdit(false)}, EditScopedAmbiguity())
+			if err == nil {
+				t.Fatalf("path-involved ambiguity was accepted:\n%s", out)
+			}
+			if out != nil {
+				t.Fatalf("refused edit returned non-nil bytes:\n got=%q", out)
+			}
+			if !IsAmbiguous(err) {
+				t.Fatalf("path-involved ambiguity not classified ambiguous: %v", err)
+			}
+		})
+	}
+}
+
+// TestEditScopedAmbiguityStrictDefaultUnchanged proves the option is opt-in:
+// without it, the same distant-ambiguity documents are still refused whole.
+func TestEditScopedAmbiguityStrictDefaultUnchanged(t *testing.T) {
+	cases := map[string][]byte{
+		"anchor and alias":   []byte("providers:\n  openai: &base\n    quota: 1\nrouting:\n  enabled: true\n"),
+		"merge key":          []byte("defaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n"),
+		"distant duplicate keys": []byte("a: 1\na: 2\nrouting:\n  enabled: true\n"),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := EditYAML(in, []Edit{routingEdit(false)}); !IsAmbiguous(err) {
+				t.Fatalf("strict mode no longer refuses %s: %v", name, err)
+			}
+		})
+	}
+}
+
 // TestBoolInsertMissingModelWideIndent reproduces the bug where inserting a
 // boolean under a model absent from a 4-space-indented document placed the key
 // at the model-key indentation (4) instead of the model-child indentation (8).

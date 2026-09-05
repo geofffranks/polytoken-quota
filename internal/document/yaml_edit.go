@@ -9,21 +9,47 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// EditOption configures EditYAML.
+type EditOption func(*editOptions)
+
+type editOptions struct {
+	scopedAmbiguity bool
+}
+
+// EditScopedAmbiguity relaxes the ambiguity refusal from whole-document to
+// per-edit-path: anchors, aliases, merge keys, and duplicate keys that do not
+// involve an edited path are tolerated, while anything on the path itself — an
+// anchor on a key or value node, an alias value, a duplicate key, or a merge
+// key in a mapping on the path — is still refused with an ambiguous error (see
+// IsAmbiguous). This exists for editors of operator-authored files that use
+// YAML anchors for shared blocks (e.g. desired.yaml); byte-preserving editors
+// of tool-managed files should keep the strict default.
+func EditScopedAmbiguity() EditOption {
+	return func(o *editOptions) { o.scopedAmbiguity = true }
+}
+
 // EditYAML applies edits to raw YAML bytes using parser-assisted, exact span
 // location and minimal byte-level replacement/insertion/removal. It never
 // round-trips the document through a generic serializer. Every byte outside the
 // addressed spans — comments, key order, quoting, siblings, line endings, and a
 // leading BOM — is preserved. Ambiguous structures (duplicate keys,
 // aliases/anchors, merge keys) are refused with a structural error; see
-// IsAmbiguous.
+// IsAmbiguous. Pass EditScopedAmbiguity to refuse only ambiguity that involves
+// an edited path.
 //
 // Edits are applied in order; later edits operate on the bytes produced by
 // earlier ones, so each edit's path is resolved against the current (possibly
 // already-edited) text. Callers that want deterministic results for a set of
 // independent edits should pass them in a stable order.
-func EditYAML(raw []byte, edits []Edit) ([]byte, error) {
+func EditYAML(raw []byte, edits []Edit, opts ...EditOption) ([]byte, error) {
+	var o editOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&o)
+		}
+	}
 	for _, e := range edits {
-		out, err := applyOne(raw, e)
+		out, err := applyOne(raw, e, o.scopedAmbiguity)
 		if err != nil {
 			return nil, err
 		}
@@ -33,14 +59,20 @@ func EditYAML(raw []byte, edits []Edit) ([]byte, error) {
 }
 
 // applyOne parses raw fresh, resolves e.Path, and performs the single edit.
-// Re-parsing each edit keeps span offsets correct after prior mutations.
-func applyOne(raw []byte, e Edit) ([]byte, error) {
+// Re-parsing each edit keeps span offsets correct after prior mutations. When
+// scopedAmbiguity is set, ambiguity validation runs along the edit path only.
+func applyOne(raw []byte, e Edit, scopedAmbiguity bool) ([]byte, error) {
 	if len(e.Path) == 0 {
 		return nil, newError("document: edit with empty path")
 	}
-	d, err := parseDoc(raw)
+	d, err := parseDocMode(raw, scopedAmbiguity)
 	if err != nil {
 		return nil, err
+	}
+	if scopedAmbiguity {
+		if err := d.validateEditPath(e.Path); err != nil {
+			return nil, err
+		}
 	}
 	switch {
 	case e.Remove:
@@ -60,6 +92,66 @@ func applyOne(raw []byte, e Edit) ([]byte, error) {
 	default:
 		return nil, newError("document: edit %q has unknown kind", strings.Join(e.Path, "."))
 	}
+}
+
+// validateEditPath runs the ambiguity refusal along the resolved edit path
+// only. It is the scoped-mode counterpart of doc.validate: anchors, aliases,
+// merge keys, and duplicate keys elsewhere in the document are tolerated,
+// while anything the edit itself would touch or depend on is refused because
+// the edit would change or depend on alias-visible values. Specifically,
+// refused on the path: an anchor on any key or value node, an alias value, a
+// duplicate of a path key within the mapping holding it, an alias key whose
+// target name equals a path key, and any merge key in a mapping on the path.
+// A path whose prefix is absent (insertion) validates only what resolved.
+func (d *doc) validateEditPath(path []string) error {
+	cur := d.root
+	for cur != nil && cur.Kind == yaml.DocumentNode && len(cur.Content) > 0 {
+		cur = cur.Content[0]
+	}
+	for i, seg := range path {
+		if cur == nil || cur.Kind != yaml.MappingNode {
+			// Not a mapping: resolveValue/setters produce the ordinary
+			// wrong-kind error later; nothing ambiguous to report here.
+			return nil
+		}
+		var found, foundKey *yaml.Node
+		seen := false
+		for j := 0; j+1 < len(cur.Content); j += 2 {
+			k := cur.Content[j]
+			v := cur.Content[j+1]
+			if k == nil {
+				continue
+			}
+			if k.Kind == yaml.ScalarNode && k.Value == "<<" {
+				return newAmbiguousError("document: merge key (<<) on the edit path is ambiguous")
+			}
+			if k.Kind == yaml.AliasNode && k.Alias != nil && k.Alias.Value == seg {
+				return newAmbiguousError("document: alias key *%s duplicates edit path key %q", aliasName(d.raw, k), strings.Join(path[:i+1], "."))
+			}
+			if k.Kind == yaml.ScalarNode && k.Value == seg {
+				if seen {
+					return newAmbiguousError("document: duplicate key %q on the edit path is ambiguous", strings.Join(path[:i+1], "."))
+				}
+				seen = true
+				found, foundKey = v, k
+			}
+		}
+		if found == nil {
+			// Absent: the edit inserts it; nothing further to validate.
+			return nil
+		}
+		if foundKey.Anchor != "" {
+			return newAmbiguousError("document: anchor &%s on the edit path is ambiguous", foundKey.Anchor)
+		}
+		if found.Anchor != "" {
+			return newAmbiguousError("document: anchor &%s on the edit path is ambiguous", found.Anchor)
+		}
+		if found.Kind == yaml.AliasNode {
+			return newAmbiguousError("document: alias value (*%s) on the edit path is ambiguous", aliasName(d.raw, found))
+		}
+		cur = found
+	}
+	return nil
 }
 
 // resolveValue walks the node tree following path and returns the value node at
@@ -211,7 +303,7 @@ func (d *doc) insertSequenceKey(raw []byte, path []string, items []string) ([]by
 				return nil, err
 			}
 			raw = out
-			d2, err := parseDoc(raw)
+			d2, err := parseDocMode(raw, d.scoped)
 			if err != nil {
 				return nil, err
 			}
@@ -462,7 +554,7 @@ func (d *doc) insertKey(raw []byte, path []string, value []byte) ([]byte, error)
 				return nil, err
 			}
 			raw = out
-			d2, err := parseDoc(raw)
+			d2, err := parseDocMode(raw, d.scoped)
 			if err != nil {
 				return nil, err
 			}
