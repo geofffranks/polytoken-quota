@@ -21,6 +21,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
@@ -559,6 +561,67 @@ func (c *Coordinator) globalPlan(desired policy.Desired, next state.State, targe
 	return nil
 }
 
+// staleDisabledRefs scans a failed candidate's definition files for references
+// to models this target disables (mode-disabled mappings or baseline
+// enabled:false) and returns remediation text naming the offending file(s) and
+// model(s). It turns a doctor failure like "subagent 'x' references unknown
+// model 'y'" into an actionable pointer. Relative staged paths and model base
+// names only; the output is bounded to a handful of files (pq-m4k9).
+func (c *Coordinator) staleDisabledRefs(candidate staging.Candidate, desired policy.Desired, observed state.State) string {
+	var disabled []string
+	for mid, m := range desired.Providers {
+		mode := reconcile.MappingMode(desired, observed, mid)
+		for base, b := range m.Models {
+			if mode == state.ModeDisabled || !b.Enabled {
+				disabled = append(disabled, base)
+			}
+		}
+	}
+	if len(disabled) == 0 {
+		return ""
+	}
+	sort.Strings(disabled)
+
+	hits := map[string][]string{} // relative path -> disabled model bases referenced
+	_ = filepath.WalkDir(candidate.ConfigDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		body, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		for _, base := range disabled {
+			if bytes.Contains(body, []byte(base)) {
+				rel, _ := filepath.Rel(candidate.ConfigDir, p)
+				rel = filepath.ToSlash(rel)
+				hits[rel] = append(hits[rel], base)
+			}
+		}
+		return nil
+	})
+	if len(hits) == 0 {
+		return ""
+	}
+
+	rels := make([]string, 0, len(hits))
+	for rel := range hits {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	const maxNamed = 6
+	parts := make([]string, 0, min(maxNamed, len(rels)))
+	for _, rel := range rels[:min(maxNamed, len(rels))] {
+		ms := hits[rel]
+		sort.Strings(ms)
+		parts = append(parts, rel+" references "+strings.Join(ms, ", "))
+	}
+	if len(rels) > maxNamed {
+		parts = append(parts, fmt.Sprintf("%d more file(s)", len(rels)-maxNamed))
+	}
+	return "stale reference to disabled/unknown model: " + strings.Join(parts, "; ")
+}
+
 // processTargets runs the detailed per-target pipeline (render → stage →
 // validate → publish), emitting a trace step for each stage and target. When
 // publish is false (dry-run) no publish or state mutation occurs.
@@ -633,6 +696,13 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	if !result.StartupValid {
 		step("record-pending")
 		outcome := pendingValidate(id, next.Revision, c.now(), result)
+		// Name the offending file when doctor rejects a reference to a
+		// disabled/unknown model, instead of only looping on keep-staging.
+		if result.Error != nil && result.Error.Stage == validate.Doctor {
+			if advice := c.staleDisabledRefs(candidate, desired, next); advice != "" {
+				outcome.Pending.Remediation = advice + "; " + outcome.Pending.Remediation
+			}
+		}
 		if keepStaging {
 			cleanupCandidate = false
 			// Move the failed candidate out of the deterministic
