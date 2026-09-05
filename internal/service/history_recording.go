@@ -29,12 +29,7 @@ func (c *Coordinator) recordHistoryIfQualified(
 	}
 
 	// Collect preparation results from outcomes.
-	prepResults := make([]PrepareResult, 0, len(outcomes))
-	for i := range outcomes {
-		if outcomes[i].Prepare != nil {
-			prepResults = append(prepResults, *outcomes[i].Prepare)
-		}
-	}
+	prepResults := prepareResultsOf(outcomes)
 
 	// Qualify: at least one target must have a proven file change.
 	if !HasProvenChangeAcrossTargets(prepResults) {
