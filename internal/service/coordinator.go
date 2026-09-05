@@ -613,7 +613,14 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		outcome := pendingValidate(id, next.Revision, c.now(), result)
 		if keepStaging {
 			cleanupCandidate = false
+			// Move the failed candidate out of the deterministic
+			// quota-stage-<id> claim path so the next build cannot destroy
+			// the retained diagnostic (pq-m4k7). Fall back to the in-place
+			// path only if the move itself fails.
 			outcome.StagingRoot = candidate.Root
+			if retained, err := candidate.Retain(); err == nil {
+				outcome.StagingRoot = retained
+			}
 		}
 		if verbose {
 			outcome.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
