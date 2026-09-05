@@ -74,9 +74,10 @@ func (s *commandSpy) Run(ctx context.Context, name string, args []string, max in
 // self-describing.
 var sanitize = DefaultSanitize
 
-// newRunner wires a Runner with the default output cap and production redactor.
+// newRunner wires a Runner with the default output cap and the runner's
+// default unbounded redactor, so failure summaries exercise head+tail bounding.
 func newRunner(c CommandRunner) Runner {
-	return Runner{Binary: "/opt/polytoken", Commands: c, MaxOutput: 4096, Sanitize: sanitize}
+	return Runner{Binary: "/opt/polytoken", Commands: c, MaxOutput: 4096}
 }
 
 // TestExecRunnerDoesNotInheritParentEnvironment proves the validation

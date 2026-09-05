@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"unicode/utf8"
 )
 
 // Stage names the validation step a result refers to.
@@ -62,7 +63,8 @@ type Result struct {
 // Runner validates a single staged candidate. Binary is the Polytoken executable
 // path; Commands runs each command; MaxOutput bounds combined captured output
 // (defaults to 4096); Sanitize redacts captured output before persistence
-// (defaults to DefaultSanitize).
+// without applying a length bound (defaults to sanitizeOutput) — the runner
+// composes the redactor with the head+tail summary bound itself.
 type Runner struct {
 	Binary    string
 	Commands  CommandRunner
@@ -91,6 +93,39 @@ const defaultMaxOutput int64 = 4096
 
 // maxSummaryBytes bounds the length of a persisted sanitized summary.
 const maxSummaryBytes = 1024
+
+// summaryElision marks elided middle content in a bounded summary.
+const summaryElision = "\n…[truncated]…\n"
+
+// boundSummary keeps the head and the tail of an over-long summary: the head
+// identifies the command context, while the tail carries where failing
+// commands report their actual error. Cuts respect UTF-8 rune boundaries and
+// the result never exceeds maxSummaryBytes.
+func boundSummary(s string) string {
+	if len(s) <= maxSummaryBytes {
+		return s
+	}
+	tailLen := maxSummaryBytes - maxSummaryBytes/4 - len(summaryElision)
+	head := trimTrailingPartialRune(s[:maxSummaryBytes/4])
+	tail := trimLeadingPartialRune(s[len(s)-tailLen:])
+	return head + summaryElision + tail
+}
+
+// trimTrailingPartialRune drops trailing bytes until the string is valid UTF-8.
+func trimTrailingPartialRune(s string) string {
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// trimLeadingPartialRune drops leading bytes until the string is valid UTF-8.
+func trimLeadingPartialRune(s string) string {
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[1:]
+	}
+	return s
+}
 
 // Validate runs `config validate` then (on success) `doctor` against the staged
 // candidate and returns a sanitized Result. Both commands share one timeout
@@ -123,12 +158,13 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	return Result{ConfigValid: true, StartupValid: true}
 }
 
-// fail builds a sanitized CommandError for one failed stage.
+// fail builds a sanitized CommandError for one failed stage. The summary bound
+// applies to the final composed string so the coarse command prefix fits.
 func (r Runner) fail(stage Stage, stdout, stderr []byte, exit int, timedOut bool) *CommandError {
 	combined := append(append([]byte(nil), stdout...), stderr...)
 	return &CommandError{
 		Stage:       stage,
-		Summary:     summarize(stage, r.sanitizer()(combined), exit),
+		Summary:     boundSummary(summarize(stage, r.sanitizer()(combined), exit)),
 		TimedOut:    timedOut,
 		Remediation: remediation(stage, timedOut),
 	}
@@ -145,7 +181,7 @@ func (r Runner) sanitizer() func([]byte) string {
 	if r.Sanitize != nil {
 		return r.Sanitize
 	}
-	return DefaultSanitize
+	return sanitizeOutput
 }
 
 // configValidateArgs and doctorArgs are the exact, ordered argv passed to the
@@ -208,11 +244,11 @@ func remediation(stage Stage, timedOut bool) string {
 	case stage == ConfigValidate && timedOut:
 		return "increase the validation timeout or reduce startup config cost"
 	case stage == ConfigValidate:
-		return "inspect the staged config.yaml for schema or startup errors"
+		return "re-run with `reconcile --dry-run --keep-staging` to inspect the retained staged config.yaml"
 	case stage == Doctor && timedOut:
 		return "increase the validation timeout or reduce startup check cost"
 	case stage == Doctor:
-		return "run `polytoken doctor` against the staged config and working dirs"
+		return "re-run with `reconcile --dry-run --keep-staging` and run `polytoken doctor` against the retained staged config and working dirs"
 	}
 	return ""
 }
@@ -311,7 +347,24 @@ func (w *boundedWriter) bytes() []byte { return w.buf.Bytes() }
 // and temp paths, account identifiers, and long opaque blobs are replaced with
 // placeholders, and the result is bounded in length.
 func DefaultSanitize(b []byte) string {
-	s := string(b)
+	return truncateSummary(sanitizeOutput(b))
+}
+
+// truncateSummary hard-bounds a sanitized string at maxSummaryBytes.
+func truncateSummary(s string) string {
+	if len(s) > maxSummaryBytes {
+		s = s[:maxSummaryBytes]
+	}
+	return s
+}
+
+// sanitizeOutput redacts secret-bearing and path-identifying content from
+// captured command output without applying a length bound. ANSI escape
+// sequences are stripped first so color codes cannot fragment the other
+// patterns. The summary bound is a separate concern (boundSummary) so a
+// failure summary can keep both the head and the tail of long output.
+func sanitizeOutput(b []byte) string {
+	s := reANSI.ReplaceAllString(string(b), "")
 	// Redact URL userinfo (scheme://user:pass@host) before anything else can
 	// split the credential across other patterns.
 	s = reURLCred.ReplaceAllString(s, "${1}<redacted>@")
@@ -326,13 +379,11 @@ func DefaultSanitize(b []byte) string {
 	s = reHome.ReplaceAllString(s, "<home>")
 	s = reTemp.ReplaceAllString(s, "<tmp>")
 	s = reBlob.ReplaceAllString(s, "<redacted>")
-	if len(s) > maxSummaryBytes {
-		s = s[:maxSummaryBytes]
-	}
 	return s
 }
 
 var (
+	reANSI  = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 	reEmail = regexp.MustCompile(`(?i)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`)
 	// reCredAssign matches credential-shaped key/value assignments in plain,
 	// quoted, and JSON/YAML spellings: the key may be bare or quoted, the
