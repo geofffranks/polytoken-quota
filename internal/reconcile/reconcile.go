@@ -276,6 +276,17 @@ func resolveSurvivors(desired policy.Desired, observed state.State, chain policy
 		if err != nil {
 			return nil, err
 		}
+		// A baseline-disabled model is unusable: Build writes enabled=false
+		// for it into the candidate's models block, and polytoken's registry
+		// rejects any subagent reference to a disabled model (the
+		// disabled-fallback contract fixture). Drop it exactly like a
+		// mode-disabled mapping so a survivor is always a model the same
+		// candidate enables (pq-m4k8).
+		if mapping, ok := desired.Providers[mid]; ok {
+			if baseline, ok := mapping.Models[ref.Base]; ok && !baseline.Enabled {
+				continue
+			}
+		}
 		switch mode := MappingMode(desired, observed, mid); mode {
 		case state.ModeDisabled:
 			continue
