@@ -261,12 +261,14 @@ func TestDoctorRetainsCompleteLastError(t *testing.T) {
 		"stage=render",
 		"attempted_revision=3",
 		`summary="render failed: empty chain"`,
-		"reproduces=true",
 		"live_status=last-known-good",
 	} {
 		if !strings.Contains(f.Message, want) {
 			t.Errorf("pending message missing %q\nmessage: %s", want, f.Message)
 		}
+	}
+	if strings.Contains(f.Message, "reproduces=") {
+		t.Errorf("pending message reports a never-computed reproduces flag: %s", f.Message)
 	}
 	if f.Remediation == "" {
 		t.Errorf("pending finding lost remediation")

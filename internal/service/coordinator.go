@@ -287,7 +287,7 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	if next.Revision == 0 {
 		next.Revision = 1
 	}
-	outcomes := c.reconcileAll(ctx, desired, observed, next, true)
+	next, outcomes := c.reconcileAll(ctx, desired, observed, next, true)
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.recordHistoryIfQualified(&next, txInit, in, outcomes, initTargets, desired)
 	c.step("save-state")
@@ -368,6 +368,7 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	next := observed
 	next.Revision = observed.Revision + 1
 	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
+	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.recordHistoryIfQualified(&next, txReconcile, in, outcomes, targets, desired)
 	c.step("save-state")
@@ -433,7 +434,8 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	c.step("reconcile")
 	targets, err := c.Targets.ResolveTargets(desired)
 	if err != nil {
-		pending := pendingOutcome("manual-resolution", next.Revision, "resolve_targets", err)
+		next = c.retireSyntheticPendings(next)
+		pending := pendingOutcome(pendingTargetManual, next.Revision, "resolve_targets", err)
 		outcomes := []TargetOutcome{pending}
 		next = c.recordTargetOutcomes(next, outcomes)
 		if saveErr := c.State.Save(next); saveErr != nil {
@@ -447,6 +449,7 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	for _, rt := range targets {
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
+	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
 	next = appendManualEvent(next, observed, kind, in, c.now())
 	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
@@ -507,6 +510,7 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	for _, rt := range targets {
 		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
 	}
+	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
 	next = appendManualEvent(next, observed, kind, in, c.now())
 	c.recordHistoryIfQualified(&next, kind, in, outcomes, targets, desired)
@@ -521,14 +525,17 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 }
 
 // reconcileAll is the detailed per-target pipeline used by Init. It emits
-// render/stage/validate and (when publish is true) publish per target.
-func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, prior, next state.State, publish bool) []TargetOutcome {
+// render/stage/validate and (when publish is true) publish per target, and
+// returns the next state (with stale synthetic resolution pendings retired on
+// successful resolution) together with the per-target outcomes.
+func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, prior, next state.State, publish bool) (state.State, []TargetOutcome) {
 	c.step("load-sources")
 	targets, err := c.Targets.ResolveTargets(desired)
 	if err != nil {
-		return nil
+		return next, nil
 	}
-	return c.processTargets(ctx, desired, prior, next, targets, publish)
+	next = c.retireSyntheticPendings(next)
+	return next, c.processTargets(ctx, desired, prior, next, targets, publish)
 }
 
 // processTargets runs the detailed per-target pipeline (render → stage →
@@ -868,6 +875,26 @@ func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcom
 
 func sanitizeFailure(s string) string {
 	return validate.DefaultSanitize([]byte(s))
+}
+
+// Synthetic target IDs under which a failed target resolution is persisted.
+// quota-reconcile records a failed check --reconcile resolution;
+// manual-resolution records a failed manual-command resolution. A later
+// successful resolution retires both so doctor stops reporting errors that no
+// longer reproduce.
+const (
+	pendingTargetQuotaCheck = "quota-reconcile"
+	pendingTargetManual     = "manual-resolution"
+)
+
+// retireSyntheticPendings removes stale synthetic resolution-failure entries
+// from the next state before per-target outcomes are folded in.
+func (c *Coordinator) retireSyntheticPendings(s state.State) state.State {
+	if s.Targets != nil {
+		delete(s.Targets, pendingTargetQuotaCheck)
+		delete(s.Targets, pendingTargetManual)
+	}
+	return s
 }
 
 func validationRemediation(result validate.Result) string {

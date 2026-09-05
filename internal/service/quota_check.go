@@ -68,10 +68,12 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 			// Target resolution failed, but the observations are still accepted:
 			// record the resolution as a pending target outcome and persist the
 			// observations (mirrors the transactManual resolution-failure path).
-			pending := pendingOutcome("quota-reconcile", next.Revision, "resolve_targets", terr)
+			next = c.retireSyntheticPendings(next)
+			pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
 			outcomes = []TargetOutcome{pending}
 		} else {
 			outcomes = c.processTargets(ctx, desired, observed, next, targets, true)
+			next = c.retireSyntheticPendings(next)
 			c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
 		}
 		next = c.recordTargetOutcomes(next, outcomes)

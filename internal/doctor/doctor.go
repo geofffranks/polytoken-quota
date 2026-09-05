@@ -187,7 +187,9 @@ func safeIdentifier(value string) string {
 // pendingTargetFinding builds a target-pending finding from a persisted
 // ApplyFailure. The Message carries the full persisted-error detail: last
 // successful and latest attempted revision/timestamp, failure stage, affected
-// chain/file, sanitized command error, current reproducibility, and live status.
+// chain/file, sanitized command error, and live status. The persisted
+// Reproduces field is deliberately omitted: nothing computes it, so reporting
+// it would present a constant as a diagnostic fact.
 //
 // ApplyFailure fields are documented as sanitized at ingestion, but the state
 // file is long-lived and hand-editable, so every free-text field is
@@ -196,10 +198,10 @@ func safeIdentifier(value string) string {
 func pendingTargetFinding(id string, ts state.TargetState) Finding {
 	af := ts.Pending
 	msg := fmt.Sprintf(
-		"target %s pending: stage=%s attempted_revision=%d attempted_at=%s last_successful_revision=%d last_successful_at=%s summary=%q reproduces=%v live_status=%s",
+		"target %s pending: stage=%s attempted_revision=%d attempted_at=%s last_successful_revision=%d last_successful_at=%s summary=%q live_status=%s",
 		safeIdentifier(id), quota.SanitizeText(af.Stage), af.AttemptedRevision, af.AttemptedAt,
 		af.LastSuccessfulRevision, af.LastSuccessfulAt,
-		quota.SanitizeText(af.Summary), af.Reproduces, quota.SanitizeText(af.LiveStatus),
+		quota.SanitizeText(af.Summary), quota.SanitizeText(af.LiveStatus),
 	)
 	remediation := quota.SanitizeText(af.Remediation)
 	if remediation == "" {
