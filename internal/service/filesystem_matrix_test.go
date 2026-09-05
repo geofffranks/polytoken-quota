@@ -91,7 +91,7 @@ func fsUnregisteredUntouched(t *testing.T) {
 	c, err := staging.Builder{
 		TempRoot: t.TempDir(), AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func fsRestrictiveModes(t *testing.T) {
 	c, err := staging.Builder{
 		TempRoot: t.TempDir(), AuthMode: staging.AuthInert,
 		Sources: staging.FSMaterializer{GlobalDir: globalDir},
-	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"})
+	}.Build(context.Background(), res, reconcile.Plan{TargetID: "global"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,14 +14,14 @@ var noticeAt = time.Date(2026, 8, 16, 2, 0, 5, 0, time.UTC)
 
 func fixtureDesired() policy.Desired {
 	codex := policy.Mapping{Models: map[string]policy.ModelBaseline{
-		"codex/gpt-5.6-luna": {},
-		"codex/gpt-5.6-sol":  {},
+		"codex/gpt-5.6-luna": {Enabled: true},
+		"codex/gpt-5.6-sol":  {Enabled: true},
 	}}
 	zai := policy.Mapping{Models: map[string]policy.ModelBaseline{
-		"zai/glm-4.6": {},
+		"zai/glm-4.6": {Enabled: true},
 	}}
 	minime := policy.Mapping{Models: map[string]policy.ModelBaseline{
-		"minime/off-model": {},
+		"minime/off-model": {Enabled: true},
 	}}
 	return policy.Desired{
 		Version:   1,

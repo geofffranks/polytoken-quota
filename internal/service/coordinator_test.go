@@ -223,7 +223,7 @@ func (s *coordinatorSpy) Build(_ policy.Desired, _ state.State, t policy.Target,
 }
 
 // --- Stager ---
-func (s *coordinatorSpy) Stage(_ context.Context, res target.Resolved, plan reconcile.Plan) (staging.Candidate, error) {
+func (s *coordinatorSpy) Stage(_ context.Context, res target.Resolved, plan reconcile.Plan, _ *reconcile.Plan) (staging.Candidate, error) {
 	id := res.ID
 	if id == "" {
 		id = plan.TargetID

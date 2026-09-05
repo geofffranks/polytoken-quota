@@ -21,6 +21,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -29,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
@@ -445,9 +447,10 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 	}
 	timeout := c.validationTimeout(desired)
 	c.step("publish-targets")
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false, gp))
 	}
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
@@ -506,9 +509,10 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	// The coarse path reports a single reconcile and publish-targets step for
 	// the whole batch; processOneTarget emits no per-target steps (detailed=false).
 	c.step("publish-targets")
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, observed, next, rt, timeout, true, false, false, false, gp))
 	}
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
@@ -538,15 +542,96 @@ func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, 
 	return next, c.processTargets(ctx, desired, prior, next, targets, publish)
 }
 
+// globalPlan renders the global target's plan once, for sharing the reconciled
+// global layer into project staging. It returns nil when there is no global
+// target or its plan cannot be rendered; project candidates then fall back to
+// the live global layer (pq-m4k9).
+func (c *Coordinator) globalPlan(desired policy.Desired, next state.State, targets []RegisteredTarget) *reconcile.Plan {
+	ranks, _ := ComputeRanking(desired, next, c.now())
+	for _, rt := range targets {
+		if !rt.Policy.Global {
+			continue
+		}
+		p, err := c.Builder.Build(desired, next, rt.Policy, ranks)
+		if err != nil {
+			return nil
+		}
+		return &p
+	}
+	return nil
+}
+
+// staleDisabledRefs scans a failed candidate's definition files for references
+// to models this target disables (mode-disabled mappings or baseline
+// enabled:false) and returns remediation text naming the offending file(s) and
+// model(s). It turns a doctor failure like "subagent 'x' references unknown
+// model 'y'" into an actionable pointer. Relative staged paths and model base
+// names only; the output is bounded to a handful of files (pq-m4k9).
+func (c *Coordinator) staleDisabledRefs(candidate staging.Candidate, desired policy.Desired, observed state.State) string {
+	var disabled []string
+	for mid, m := range desired.Providers {
+		mode := reconcile.MappingMode(desired, observed, mid)
+		for base, b := range m.Models {
+			if mode == state.ModeDisabled || !b.Enabled {
+				disabled = append(disabled, base)
+			}
+		}
+	}
+	if len(disabled) == 0 {
+		return ""
+	}
+	sort.Strings(disabled)
+
+	hits := map[string][]string{} // relative path -> disabled model bases referenced
+	_ = filepath.WalkDir(candidate.ConfigDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		body, rerr := os.ReadFile(p)
+		if rerr != nil {
+			return nil
+		}
+		for _, base := range disabled {
+			if bytes.Contains(body, []byte(base)) {
+				rel, _ := filepath.Rel(candidate.ConfigDir, p)
+				rel = filepath.ToSlash(rel)
+				hits[rel] = append(hits[rel], base)
+			}
+		}
+		return nil
+	})
+	if len(hits) == 0 {
+		return ""
+	}
+
+	rels := make([]string, 0, len(hits))
+	for rel := range hits {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	const maxNamed = 6
+	parts := make([]string, 0, min(maxNamed, len(rels)))
+	for _, rel := range rels[:min(maxNamed, len(rels))] {
+		ms := hits[rel]
+		sort.Strings(ms)
+		parts = append(parts, rel+" references "+strings.Join(ms, ", "))
+	}
+	if len(rels) > maxNamed {
+		parts = append(parts, fmt.Sprintf("%d more file(s)", len(rels)-maxNamed))
+	}
+	return "stale reference to disabled/unknown model: " + strings.Join(parts, "; ")
+}
+
 // processTargets runs the detailed per-target pipeline (render → stage →
 // validate → publish), emitting a trace step for each stage and target. When
 // publish is false (dry-run) no publish or state mutation occurs.
 func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool, retain ...bool) []TargetOutcome {
 	keepStaging := len(retain) > 0 && retain[0]
 	timeout := c.validationTimeout(desired)
+	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false, gp))
 	}
 	return outcomes
 }
@@ -558,7 +643,7 @@ func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired
 // (render:/stage:/validate:/publish:/record-pending: suffixed with the target
 // id); the coarse Set/Clear path passes false so the whole batch reports only
 // the batch-level reconcile/publish-targets steps emitted by its caller.
-func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging, verbose bool) TargetOutcome {
+func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desired, prior, next state.State, rt RegisteredTarget, timeout time.Duration, publish, detailed, keepStaging, verbose bool, globalPlan *reconcile.Plan) TargetOutcome {
 	id := targetID(rt)
 	step := func(name string) {
 		if detailed {
@@ -577,7 +662,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		return out
 	}
 	step("stage")
-	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan)
+	candidate, err := c.Stage.Stage(ctx, rt.Resolved, plan, globalPlan)
 	if err != nil {
 		step("record-pending")
 		out := pendingOutcome(id, next.Revision, "stage", err)
@@ -611,6 +696,13 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	if !result.StartupValid {
 		step("record-pending")
 		outcome := pendingValidate(id, next.Revision, c.now(), result)
+		// Name the offending file when doctor rejects a reference to a
+		// disabled/unknown model, instead of only looping on keep-staging.
+		if result.Error != nil && result.Error.Stage == validate.Doctor {
+			if advice := c.staleDisabledRefs(candidate, desired, next); advice != "" {
+				outcome.Pending.Remediation = advice + "; " + outcome.Pending.Remediation
+			}
+		}
 		if keepStaging {
 			cleanupCandidate = false
 			// Move the failed candidate out of the deterministic

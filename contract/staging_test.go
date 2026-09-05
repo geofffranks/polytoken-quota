@@ -90,7 +90,7 @@ func TestContractStagingFoldsLayers(t *testing.T) {
 		AuthMode: staging.AuthInert,
 		Sources:  staging.FSMaterializer{GlobalDir: globalDir},
 	}
-	c, err := b.Build(context.Background(), res, plan)
+	c, err := b.Build(context.Background(), res, plan, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestContractStagingConflictingLiveIsolation(t *testing.T) {
 		AuthMode: staging.AuthInert,
 		Sources:  staging.FSMaterializer{GlobalDir: globalDir},
 	}
-	c, err := b.Build(context.Background(), res, reconcile.Plan{TargetID: "project"})
+	c, err := b.Build(context.Background(), res, reconcile.Plan{TargetID: "project"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -128,7 +128,7 @@ func (stubSources) Project(context.Context, target.Resolved) (staging.Layer, boo
 func realCandidate(t *testing.T) staging.Candidate {
 	t.Helper()
 	b := staging.Builder{TempRoot: t.TempDir(), AuthMode: staging.AuthInert, Sources: stubSources{}}
-	c, err := b.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{})
+	c, err := b.Build(context.Background(), target.Resolved{ID: "global", Global: true}, reconcile.Plan{}, nil)
 	if err != nil {
 		t.Fatalf("build candidate: %v", err)
 	}

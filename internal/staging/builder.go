@@ -159,7 +159,13 @@ type Builder struct {
 // neutral (no .polytoken) and never the live project root. On any failure
 // (render error, cancellation, timeout) the partial staging root is removed
 // before the error is returned.
-func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.Plan) (Candidate, error) {
+//
+// globalPlan, when non-nil and res is a project target, is the global target's
+// rendered plan. Its edits are applied to the validation copies so a project
+// candidate sees the same reconciled global layer the global target validates,
+// not stale live files (pq-m4k9). It is never applied to the project's publish
+// dir, which stays project-scoped.
+func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.Plan, globalPlan *reconcile.Plan) (Candidate, error) {
 	if b.AuthMode == AuthUndecided {
 		return Candidate{}, errors.New("staging: auth mode is undecided")
 	}
@@ -201,7 +207,7 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 	}
 	cleanup := newCleanup(root)
 	var authEnvRefs []string
-	if err := b.stage(ctx, configDir, userConfigDir, publishDir, workDir, res, plan, &authEnvRefs); err != nil {
+	if err := b.stage(ctx, configDir, userConfigDir, publishDir, workDir, res, plan, globalPlan, &authEnvRefs); err != nil {
 		_ = cleanup()
 		return Candidate{}, err
 	}
@@ -222,7 +228,7 @@ func (b Builder) Build(ctx context.Context, res target.Resolved, plan reconcile.
 // real-content copies of managed files (no secret redaction) with plan edits
 // applied, so publication never publishes the inert placeholders from configDir.
 // Any error leaves the caller responsible for removing root.
-func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir, workDir string, res target.Resolved, plan reconcile.Plan, authEnvRefs *[]string) error {
+func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir, workDir string, res target.Resolved, plan reconcile.Plan, globalPlan *reconcile.Plan, authEnvRefs *[]string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -266,6 +272,18 @@ func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	// A project candidate's global layer must mirror the reconciled global view
+	// the global target validates, not stale live files that polytoken will
+	// reject (pq-m4k9). Apply the global plan to the validation copies only;
+	// the project's own publish dir stays project-scoped.
+	if globalPlan != nil && !res.Global {
+		if err := applyPlanEdits(configDir, *globalPlan); err != nil {
+			return fmt.Errorf("apply global edits: %w", err)
+		}
+		if err := applyPlanEdits(filepath.Join(userConfigDir, "polytoken"), *globalPlan); err != nil {
+			return fmt.Errorf("apply global user edits: %w", err)
+		}
 	}
 	if err := applyPlanEdits(configDir, plan); err != nil {
 		return fmt.Errorf("apply edits: %w", err)

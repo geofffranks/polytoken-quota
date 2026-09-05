@@ -73,8 +73,8 @@ type StagingStager struct {
 }
 
 // Stage delegates to staging.Builder.Build.
-func (s StagingStager) Stage(ctx context.Context, res target.Resolved, plan reconcile.Plan) (staging.Candidate, error) {
-	return s.Builder.Build(ctx, res, plan)
+func (s StagingStager) Stage(ctx context.Context, res target.Resolved, plan reconcile.Plan, globalPlan *reconcile.Plan) (staging.Candidate, error) {
+	return s.Builder.Build(ctx, res, plan, globalPlan)
 }
 
 // ValidateRunner adapts validate.Runner to the Validator interface.
