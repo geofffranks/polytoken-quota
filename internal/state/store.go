@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 )
@@ -61,6 +62,35 @@ func PruneUsageHistory(s State, now time.Time) State {
 	return next
 }
 
+// sanitizeRoutingDecision re-sanitizes the persisted routing decision's free-
+// text explanation so a stale or hand-edited state file cannot carry control
+// characters or oversized text into the next process lifetime. It never
+// mutates its input.
+func sanitizeRoutingDecision(d *RoutingDecision) (*RoutingDecision, bool) {
+	if d == nil {
+		return nil, false
+	}
+	cleaned := quota.SanitizeText(d.Explanation)
+	if hasControl(cleaned) {
+		runes := []rune(cleaned)
+		kept := make([]rune, 0, len(runes))
+		for _, r := range runes {
+			if r == 0 || unicode.IsControl(r) {
+				continue
+			}
+			kept = append(kept, r)
+		}
+		cleaned = string(kept)
+	}
+	cleaned = truncateUTF8(cleaned, HistoryFreeTextBytes)
+	if cleaned == d.Explanation {
+		return d, false
+	}
+	out := *d
+	out.Explanation = cleaned
+	return &out, true
+}
+
 // sanitizeSnapshots runs quota.SanitizeError over every provider snapshot's
 // Error field so no raw secret-bearing string can reach the persisted file. It
 // never mutates the input state.
@@ -71,7 +101,8 @@ func sanitizeSnapshots(s State) State {
 		snap, snapChanged := sanitizeSnap(ps.QuotaSnapshot)
 		attempt, attemptChanged := sanitizeSnap(ps.QuotaAttempt)
 		credits, creditsChanged := sanitizeResetCredits(ps.ResetCredits)
-		if !snapChanged && !attemptChanged && !creditsChanged {
+		decision, decisionChanged := sanitizeRoutingDecision(ps.Routing.Decision)
+		if !snapChanged && !attemptChanged && !creditsChanged && !decisionChanged {
 			continue
 		}
 		if !changed {
@@ -85,6 +116,7 @@ func sanitizeSnapshots(s State) State {
 		ps.QuotaSnapshot = snap
 		ps.QuotaAttempt = attempt
 		ps.ResetCredits = credits
+		ps.Routing.Decision = decision
 		providers[k] = ps
 	}
 	if !changed {
