@@ -58,8 +58,8 @@ func TestLoadOnChangeActions(t *testing.T) {
 // more than 16 actions are policy errors at load time.
 func TestLoadOnChangeValidation(t *testing.T) {
 	cases := map[string]string{
-		"relative run": baseOnChangeYAML + "operational:\n  on_change:\n    - run: bin/reconfigure\n",
-		"zero timeout": baseOnChangeYAML + "operational:\n  on_change:\n    - run: /abs/bin/x\n      timeout_seconds: 0\n",
+		"relative run":     baseOnChangeYAML + "operational:\n  on_change:\n    - run: bin/reconfigure\n",
+		"zero timeout":     baseOnChangeYAML + "operational:\n  on_change:\n    - run: /abs/bin/x\n      timeout_seconds: 0\n",
 		"oversize timeout": baseOnChangeYAML + "operational:\n  on_change:\n    - run: /abs/bin/x\n      timeout_seconds: 61\n",
 	}
 	for name, yaml := range cases {

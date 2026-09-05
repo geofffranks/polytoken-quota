@@ -544,6 +544,7 @@ func sanitizeIdentifierOptional(s string) string {
 	}
 	return sanitizeIdentifier(s)
 }
+
 // unsafeIdentifier is the redaction sentinel emitted by sanitizeIdentifier when
 // a required identifier is empty, invalid UTF-8, or contains control characters.
 // It is never a real provider or mapping identifier.

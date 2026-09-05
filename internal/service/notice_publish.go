@@ -275,10 +275,10 @@ func (c *Coordinator) recordNoticeFailure(s *state.State, revision uint64, stage
 		s.EventHistory.Events = []state.EventRecord{}
 	}
 	h, aerr := state.AppendEvent(s.EventHistory, state.EventRecord{
-		Sequence: nextEventSequence(s),
-		Revision: revision,
-		Ordinal:  0,
-		At:       c.now(),
+		Sequence:   nextEventSequence(s),
+		Revision:   revision,
+		Ordinal:    0,
+		At:         c.now(),
 		RecordedAt: c.now(),
 		Category:   state.EventNotice,
 		Action:     "notice-" + stage,

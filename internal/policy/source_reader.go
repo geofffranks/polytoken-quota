@@ -58,6 +58,16 @@ func (r FilesystemSourceReader) readSet(ctx context.Context, root, id string, gl
 	if root == "" {
 		return SourceSet{}, errors.New("policy: source root is empty")
 	}
+	if !global {
+		// Project roots may be registered at the project directory; the
+		// configuration layer lives in its .polytoken subdirectory unless the
+		// root itself is already the configuration directory.
+		canonical, err := CanonicalProjectRoot(root)
+		if err != nil {
+			return SourceSet{}, fmt.Errorf("policy: project %s: %w", id, err)
+		}
+		root = canonical
+	}
 	root, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
 		return SourceSet{}, fmt.Errorf("policy: source root: %w", err)

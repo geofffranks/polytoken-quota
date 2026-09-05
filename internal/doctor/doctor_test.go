@@ -359,7 +359,8 @@ func TestDoctorFindingsAndPersistedErrorFields(t *testing.T) {
 			t.Errorf("empty %s", name)
 		}
 	}
-	// Every persisted-error detail token appears in the message.
+	// Every persisted-error detail token appears in the message; the
+	// never-computed reproduces flag must not.
 	for _, want := range []string{
 		"stage=render",
 		"attempted_revision=3",
@@ -367,12 +368,14 @@ func TestDoctorFindingsAndPersistedErrorFields(t *testing.T) {
 		"last_successful_revision=2",
 		"last_successful_at=2026-07-19 10:00:00 +0000 UTC",
 		`summary="render failed: empty chain"`,
-		"reproduces=true",
 		"live_status=last-known-good",
 	} {
 		if !strings.Contains(f.Message, want) {
 			t.Errorf("message missing %q\nmessage: %s", want, f.Message)
 		}
+	}
+	if strings.Contains(f.Message, "reproduces=") {
+		t.Errorf("message reports a never-computed reproduces flag: %s", f.Message)
 	}
 }
 

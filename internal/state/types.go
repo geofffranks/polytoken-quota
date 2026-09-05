@@ -157,8 +157,12 @@ type ApplyFailure struct {
 	LastSuccessfulAt       time.Time
 	AttemptedAt            time.Time
 	ResolvedAt             time.Time
-	Reproduces             bool
-	LiveStatus             string
+	// Reproduces is deprecated and never computed: no production code path
+	// sets it, so it is always false for newly recorded failures. It remains
+	// in the schema so old state files keep loading, and doctor no longer
+	// surfaces it.
+	Reproduces bool
+	LiveStatus string
 }
 
 // TargetState records the last attempted and applied reconciliation outcome for

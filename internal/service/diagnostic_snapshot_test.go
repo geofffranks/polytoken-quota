@@ -66,6 +66,7 @@ func diagnosticFixture(t *testing.T, routingEnabled bool) (*diagnosticDeps, stri
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "private", "CANARY-CANONICAL-ROOT")
 	for rel, body := range map[string]string{
+		"config.yaml":        "defaults: {}\n",
 		"subagents/zeta.md":  "---\nname: Shared\npolytoken:\n  model: live/zeta\n---\n",
 		"subagents/alpha.md": "---\nname: Shared\npolytoken:\n  model: live/alpha\n---\n",
 	} {
