@@ -69,7 +69,7 @@ func ZaiEvidence(_ time.Time) Evidence {
 		Endpoint:    zaiGlobalEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "api-key",
-		SchemaNote:  "envelope {code,success,data:{limits[]}} with percentage always present, optional raw counts, millis resets",
+		SchemaNote:  "envelope {code,success,data:{limits[]}} with percentage always present, optional raw counts, millis resets; live accounts currently report CREDIT_LIMIT entries (token-equivalent window semantics)",
 		FixturePath: "contract/testdata/quota/zai/pro.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
