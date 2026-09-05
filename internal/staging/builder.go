@@ -87,6 +87,34 @@ func (c Candidate) Cleanup() error {
 	return c.cleanup()
 }
 
+// retainPrefix marks a retained diagnostic snapshot. It deliberately does not
+// match the build claim prefix ("quota-stage-", see stageRoot): a retained
+// candidate must be invisible to Build's deterministic stale-root claim, which
+// RemoveAll's quota-stage-<id> at the start of every build. Retention that a
+// subsequent reconcile silently destroys is not retention (pq-m4k7).
+const retainPrefix = "quota-retain-"
+
+// Retain moves the candidate's staging root out of the deterministic build
+// claim path to quota-retain-<target-id> in the same parent directory, and
+// returns the retained path. A prior retained snapshot for the same target is
+// replaced, so repeated keep-staging runs leave at most one retained root per
+// target. After Retain, Cleanup still targets the now-vacated build path and
+// the retained snapshot survives it; the caller must not Retain a candidate
+// twice.
+func (c Candidate) Retain() (string, error) {
+	if c.Root == "" {
+		return "", errors.New("staging: retain candidate with no root")
+	}
+	retained := filepath.Join(filepath.Dir(c.Root), retainPrefix+sanitizeID(c.TargetID))
+	if err := os.RemoveAll(retained); err != nil {
+		return "", fmt.Errorf("staging: clear prior retained root: %w", err)
+	}
+	if err := os.Rename(c.Root, retained); err != nil {
+		return "", fmt.Errorf("staging: retain staging root: %w", err)
+	}
+	return retained, nil
+}
+
 // WithoutCleanup returns a copy of the candidate whose Cleanup is a no-op. It
 // is used by callers that validate the candidate through a validator (e.g.
 // validate.Runner) which calls Cleanup on completion, but then need the staged
