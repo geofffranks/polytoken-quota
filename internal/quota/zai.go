@@ -281,7 +281,7 @@ type zaiLimitRaw struct {
 
 // zaiDecodedLimit holds a decoded limit awaiting slotting/naming.
 type zaiDecodedLimit struct {
-	limitType string // "TOKENS_LIMIT" or "TIME_LIMIT"
+	limitType string // "TOKENS_LIMIT", "CREDIT_LIMIT", or "TIME_LIMIT"
 	unit      int
 	number    float64
 	window    QuotaWindow // Name unset; filled by the slotter
@@ -339,7 +339,7 @@ func parseZaiQuota(body []byte) (windows []QuotaWindow, partial bool, err error)
 		}
 	}
 
-	// Slot TOKENS_LIMIT by ascending window duration: shortest = session,
+	// Slot token limits (TOKENS_LIMIT/CREDIT_LIMIT) by ascending window duration: shortest = session,
 	// longest = primary; a single token limit is primary; intermediates are
 	// tertiary.
 	sort.SliceStable(tokenLimits, func(i, j int) bool {
