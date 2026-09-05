@@ -125,6 +125,13 @@ With routing disabled, reconciliation keeps the authored chain order.
 Desired chains remain the baseline either way: disabling routing restores
 the authored order.
 
+Editing `enabled` in place preserves every other byte of `desired.yaml`.
+YAML anchors, aliases, and merge keys elsewhere in the file are tolerated;
+the edit is refused — with the file left unchanged — only when an anchor,
+alias, merge key, or duplicate key involves `routing.enabled` or the
+`routing` mapping itself (for example `routing: &r ...` or `enabled: *ref`),
+including a `<<` merge key at the document root.
+
 ## `operational`
 
 Optional; every field also defaults individually, so a partial section is

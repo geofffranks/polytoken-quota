@@ -79,6 +79,8 @@ The file is versioned YAML and is created by `polytoken-quota init`. Its main se
 - `projects` registers additional targets with the same fields. A project root is not discovered or adopted unless it is listed here.
 - `routing`, `operational`, and quota fields are optional with sane defaults for supported non-Anthropic mappings. Anthropic may omit `quota` or use `quota: {}` to remain visible but unpollable; set a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription polling.
 
+YAML anchors are welcome in `desired.yaml`: `reconcile`, `check`, and `status` read the resolved values and never rewrite the file, and the `routing.enabled` toggle edits that single value in place, tolerating anchors, aliases, merge keys, and duplicate keys anywhere else — it refuses only when one of them involves `routing.enabled` itself. Replacing the policy with `init --force` regenerates the file in canonical form, which flattens anchors and comments.
+
 A complete minimal shape is:
 
 ```yaml
@@ -168,6 +170,8 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 | `history [--limit N] [--revision N] [--json]` | Show the meaningful provider/routing event timeline. `--limit` (1–100, default 20) limits event rows; `--revision` shows all events for one revision; `--json` emits deterministic structured events. |
 | `install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]` | Install or remove the in-session Polytoken hook entries (see below). |
 | `notice-hook [--notice PATH]` | Internal: handle one in-session hook event. Invoked by the installed hooks, not for direct use. |
+
+The `routing` commands manage per-mapping routing state. The top-level `routing.enabled` field in `desired.yaml` is edited in place by the routing toggle, which tolerates YAML anchors, aliases, and merge keys anywhere else in the file (see [Configuration](#configuration)).
 
 Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
 
