@@ -45,7 +45,7 @@ func NeuralwattEvidence(_ time.Time) Evidence {
 		Endpoint:    neuralwattQuotaEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "bearer-api-key",
-		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance (kwh_*, current_period_start/current_period_end describe billing term, not monthly quota reset), usage/limits metadata may be null; blocked/overage states fail closed",
+		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance (kwh_*; current_period_start/end are the annual billing term; quota renews on rolling 30-day cycles from current_period_start — dashboard-verified 2026-09: signup Aug 13 → resets Sep 12/Oct 12), usage/limits metadata may be null; blocked/overage states fail closed",
 		FixturePath: "contract/testdata/quota/neuralwatt/quota.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
@@ -297,8 +297,8 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 		if err != nil {
 			partial = true
 		} else {
-			reset, prev := monthlyBounds(now, start.Day(), start.Hour(), start.Minute(), start.Second())
-			period := reset.Sub(prev)
+			reset := nextCycleBoundary(now, start, neuralwattQuotaCycle)
+			period := neuralwattQuotaCycle
 			window.ResetAt = &reset
 			window.Period = &period
 		}
@@ -335,48 +335,27 @@ func neuralwattWindow(name string, used, limit float64) QuotaWindow {
 	return QuotaWindow{Name: name, Used: &used, Limit: &limit, UsagePercent: &percent}
 }
 
-// clampDayOfMonth returns dom clamped to the last valid day of the given
-// year/month (e.g. day 31 in February → 28 or 29). Mirrors cron semantics.
-func clampDayOfMonth(year int, month time.Month, dom int) int {
-	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
-	if dom > lastDay {
-		return lastDay
-	}
-	return dom
-}
+// neuralwattQuotaCycle is the observed Neuralwatt subscription quota cadence:
+// the allowance renews on rolling 30-day cycles anchored at the
+// subscription's current_period_start — not on calendar-month anniversaries
+// (which drift one day further every cycle) and not at the billing-term end.
+// Verified against the provider dashboard (2026-09): signup 2026-08-13
+// 21:48:47Z → allowance reset 2026-09-12, next reset advertised as
+// 2026-10-12. Re-verify on the evidence policy's quarterly review.
+const neuralwattQuotaCycle = 30 * 24 * time.Hour
 
-// nextMonthlyAnniversary returns the next occurrence of the given day-of-month
-// (at hour:min:sec UTC) strictly after now. Day-of-month is clamped to the last
-// valid day of the target month.
-func nextMonthlyAnniversary(now time.Time, dom, hour, min, sec int) time.Time {
-	t := now.UTC()
-	year, month := t.Year(), t.Month()
-	for {
-		day := clampDayOfMonth(year, month, dom)
-		candidate := time.Date(year, month, day, hour, min, sec, 0, time.UTC)
-		if candidate.After(now) {
-			return candidate
-		}
-		month++
-		if month > time.December {
-			month = time.January
-			year++
-		}
+// nextCycleBoundary returns the first boundary of the form anchor+k·cycle
+// (k ≥ 1) strictly after now. Pure instant arithmetic, so the anchor's UTC
+// offset is preserved exactly; there is no wall-clock re-anchoring. A now at
+// or before the anchor yields anchor+cycle, and a now exactly on a boundary
+// yields the following boundary (strictly-future semantics). cycle must be
+// positive; the caller owns the constant.
+func nextCycleBoundary(now, anchor time.Time, cycle time.Duration) time.Time {
+	k := int64(now.Sub(anchor) / cycle)
+	if k < 0 {
+		k = 0
 	}
-}
-
-// monthlyBounds returns the next monthly reset and the previous one (the current
-// window start), so the caller can compute the window period.
-func monthlyBounds(now time.Time, dom, hour, min, sec int) (reset, prev time.Time) {
-	reset = nextMonthlyAnniversary(now, dom, hour, min, sec)
-	py, pm := reset.Year(), reset.Month()-1
-	if pm < time.January {
-		pm = time.December
-		py--
-	}
-	pd := clampDayOfMonth(py, pm, dom)
-	prev = time.Date(py, pm, pd, hour, min, sec, 0, time.UTC)
-	return reset, prev
+	return anchor.Add(time.Duration(k+1) * cycle)
 }
 
 func neuralwattValuesAgree(a, b, limit float64) bool {

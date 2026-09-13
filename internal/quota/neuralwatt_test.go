@@ -124,59 +124,122 @@ func TestNeuralwattSubscriptionWindowAndNullableReset(t *testing.T) {
 	if err != nil || snap.Windows[0].Name != "subscription_kwh" || *snap.Windows[0].Used != 25 {
 		t.Fatalf("snapshot=%+v err=%v", snap, err)
 	}
-	// ResetAt derived from current_period_start day-of-month (1st), not the end.
-	wantReset := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	// ResetAt = current_period_start + one 30-day cycle (Aug 1 → Aug 31),
+	// never the billing-term end (Sep 1).
+	wantReset := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
 	if snap.Windows[0].ResetAt == nil || !snap.Windows[0].ResetAt.Equal(wantReset) {
 		t.Fatalf("reset_at = %v, want %v", snap.Windows[0].ResetAt, wantReset)
 	}
-	// Period = one month (Aug 1 → Sep 1 = 31 days).
-	wantPeriod := 31 * 24 * time.Hour
+	// Period = one fixed 30-day cycle.
+	wantPeriod := 30 * 24 * time.Hour
 	if snap.Windows[0].Period == nil || *snap.Windows[0].Period != wantPeriod {
 		t.Fatalf("period = %v, want %v", snap.Windows[0].Period, wantPeriod)
 	}
 }
 
-func TestNeuralwattSubscriptionAnnualBilledMonthlyReset(t *testing.T) {
-	// Annual billing term (365d) but quota resets monthly on the 13th.
-	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":2.353,"kwh_used":0,"kwh_remaining":2.353,"current_period_start":"2026-08-13T21:48:47Z","current_period_end":"2027-08-13T21:48:47Z","in_overage":false}}`, http.StatusOK, true)
-	snap, err := src.Fetch(context.Background())
-	if err != nil {
-		t.Fatalf("fetch: %v", err)
-	}
-	w := snap.Windows[0]
-	// ResetAt must be the monthly reset (next 13th), NOT the annual current_period_end.
-	wantReset := time.Date(2026, 9, 13, 21, 48, 47, 0, time.UTC)
-	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
-		t.Fatalf("reset_at = %v, want monthly %v", w.ResetAt, wantReset)
-	}
-	if w.ResetAt != nil && w.ResetAt.Equal(time.Date(2027, 8, 13, 21, 48, 47, 0, time.UTC)) {
-		t.Fatal("reset_at used the annual current_period_end instead of the monthly reset")
-	}
-	// Period = Aug 13 → Sep 13 = 31 days.
-	wantPeriod := 31 * 24 * time.Hour
-	if w.Period == nil || *w.Period != wantPeriod {
-		t.Fatalf("period = %v, want %v", w.Period, wantPeriod)
+// TestNeuralwattSubscriptionRollingCycleReset pins the observed Neuralwatt
+// cadence: the allowance renews on rolling 30-day cycles anchored at
+// current_period_start. Regression evidence (operator dashboard, 2026-09-13):
+// signup 2026-08-13T21:48:47Z → allowance reset 2026-09-12, dashboard shows
+// "resets October 12, 2026". The retired calendar-anniversary model predicted
+// Sep 13 / Oct 13 and drifted one day further every cycle.
+func TestNeuralwattSubscriptionRollingCycleReset(t *testing.T) {
+	body := []byte(`{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":2.353,"kwh_used":0,"kwh_remaining":2.353,"current_period_start":"2026-08-13T21:48:47Z","current_period_end":"2027-08-13T21:48:47Z","in_overage":false}}`)
+	for name, tc := range map[string]struct {
+		now  time.Time
+		want time.Time
+	}{
+		// Checked mid-first-cycle: next reset is start+30d (Sep 12), not the
+		// calendar anniversary (Sep 13) and not the annual billing end.
+		"first cycle": {time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC), time.Date(2026, 9, 12, 21, 48, 47, 0, time.UTC)},
+		// The reported bug: on Sep 12 evening the provider had already reset
+		// (57 minutes earlier), while the estimate still said "tomorrow".
+		// The next reset must be Oct 12 — one day before the calendar-
+		// anniversary estimate and matching the dashboard.
+		"after first reset": {time.Date(2026, 9, 12, 22, 45, 49, 0, time.UTC), time.Date(2026, 10, 12, 21, 48, 47, 0, time.UTC)},
+		// Exactly on a boundary: the boundary at `now` is the current cycle's
+		// end; the next reset is strictly future.
+		"on boundary": {time.Date(2026, 9, 12, 21, 48, 47, 0, time.UTC), time.Date(2026, 10, 12, 21, 48, 47, 0, time.UTC)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, windows, _, _, err := parseNeuralwattQuota(body, tc.now)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			w := windows[0]
+			if w.ResetAt == nil || !w.ResetAt.Equal(tc.want) {
+				t.Fatalf("reset_at = %v, want %v", w.ResetAt, tc.want)
+			}
+			if w.ResetAt != nil && w.ResetAt.Equal(time.Date(2027, 8, 13, 21, 48, 47, 0, time.UTC)) {
+				t.Fatal("reset_at used the annual current_period_end")
+			}
+			if w.Period == nil || *w.Period != 30*24*time.Hour {
+				t.Fatalf("period = %v, want 30d", w.Period)
+			}
+		})
 	}
 }
 
-func TestNeuralwattSubscriptionDayClamping(t *testing.T) {
-	// Anchor on the 31st; February has 28 days → clamp to 28.
-	body := `{"snapshot_at":"2026-02-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-01-31T00:00:00Z","in_overage":false}}`
-	now := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
-	_, windows, _, _, err := parseNeuralwattQuota([]byte(body), now)
+// TestNeuralwattSubscriptionResetKeepsAnchorOffset pins the language
+// contract the instant arithmetic relies on: a non-UTC RFC3339 anchor keeps
+// its offset, so the reset lands at the same wall clock (+09:00 here, i.e.
+// 2026-09-12T12:48:47Z), not a UTC-re-anchored 21:48:47Z.
+func TestNeuralwattSubscriptionResetKeepsAnchorOffset(t *testing.T) {
+	body := []byte(`{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-08-13T21:48:47+09:00","in_overage":false}}`)
+	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+	_, windows, _, _, err := parseNeuralwattQuota(body, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	w := windows[0]
-	// Feb 2026 has 28 days; 31st clamps to the 28th.
-	wantReset := time.Date(2026, 2, 28, 0, 0, 0, 0, time.UTC)
-	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
-		t.Fatalf("reset_at = %v, want clamped %v", w.ResetAt, wantReset)
+	wantInstant := time.Date(2026, 9, 12, 12, 48, 47, 0, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(wantInstant) {
+		t.Fatalf("reset_at = %v, want %v", w.ResetAt, wantInstant)
 	}
-	// Period = Jan 31 → Feb 28 = 28 days.
-	wantPeriod := 28 * 24 * time.Hour
-	if w.Period == nil || *w.Period != wantPeriod {
-		t.Fatalf("period = %v, want %v", w.Period, wantPeriod)
+	if got := w.ResetAt.Format("-07:00"); got != "+09:00" {
+		t.Fatalf("reset_at offset = %s, want the anchor's +09:00", got)
+	}
+}
+
+// TestNeuralwattSubscriptionResetBeforeAnchor covers a now preceding the
+// anchor (future-dated subscription / clock skew): the k<0 clamp yields the
+// first renewal, anchor+30d. It uses its own snapshot time because the
+// snapshot_at freshness guard rejects fixtures sampled after `now`.
+func TestNeuralwattSubscriptionResetBeforeAnchor(t *testing.T) {
+	body := []byte(`{"snapshot_at":"2026-08-01T00:00:00Z","subscription":{"kwh_included":100,"kwh_used":0,"kwh_remaining":100,"current_period_start":"2026-08-13T21:48:47Z","in_overage":false}}`)
+	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	_, windows, _, _, err := parseNeuralwattQuota(body, now)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	w := windows[0]
+	wantReset := time.Date(2026, 9, 12, 21, 48, 47, 0, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
+		t.Fatalf("reset_at = %v, want %v", w.ResetAt, wantReset)
+	}
+	if w.Period == nil || *w.Period != 30*24*time.Hour {
+		t.Fatalf("period = %v, want 30d", w.Period)
+	}
+}
+
+// TestNeuralwattSubscriptionMultiCycleAdvance verifies fixed-length cycles
+// advance past month ends without calendar clamping: a Jan 31 anchor steps
+// Jan 31 → Mar 2 → Apr 1 in 30-day jumps, unlike the retired
+// month-length-clamping model (Jan 31 → Feb 28).
+func TestNeuralwattSubscriptionMultiCycleAdvance(t *testing.T) {
+	body := []byte(`{"snapshot_at":"2026-02-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-01-31T00:00:00Z","in_overage":false}}`)
+	now := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	_, windows, _, _, err := parseNeuralwattQuota(body, now)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	w := windows[0]
+	wantReset := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(wantReset) {
+		t.Fatalf("reset_at = %v, want %v", w.ResetAt, wantReset)
+	}
+	if w.Period == nil || *w.Period != 30*24*time.Hour {
+		t.Fatalf("period = %v, want 30d", w.Period)
 	}
 }
 
