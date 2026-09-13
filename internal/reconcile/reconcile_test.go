@@ -337,7 +337,8 @@ func TestStablePartitionPreservesRelativeOrder(t *testing.T) {
 
 // Rule 8: a provider that is disabled forces enabled=false on all its models; a
 // healthy provider restores each model's desired baseline, so an intentionally
-// disabled baseline stays disabled.
+// disabled baseline stays disabled. Models baseline edits are global-layer
+// managed fields (pq-m4k10), so this target is global.
 func TestBaselineIntentionalDisable(t *testing.T) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
@@ -347,7 +348,7 @@ func TestBaselineIntentionalDisable(t *testing.T) {
 			},
 		},
 	}}
-	target := policy.Target{ID: "t", Root: "/r"}
+	target := policy.Target{ID: "t", Root: "/r", Global: true}
 
 	// Healthy provider: baselines restored.
 	s := state.State{Revision: 3}
@@ -560,7 +561,9 @@ func TestEmptyDefinitionChainFailsNamingFile(t *testing.T) {
 	}
 }
 
-// A target with no managed chains at all still yields baseline enabled edits.
+// The global target with no managed chains at all still yields baseline
+// enabled edits (models baseline edits are global-layer managed fields,
+// pq-m4k10).
 func TestEnabledEditsWithoutChains(t *testing.T) {
 	d := policy.Desired{Version: 1, Providers: map[policy.MappingID]policy.Mapping{
 		"codex": {
@@ -569,7 +572,7 @@ func TestEnabledEditsWithoutChains(t *testing.T) {
 			},
 		},
 	}}
-	target := policy.Target{ID: "t", Root: "/r"}
+	target := policy.Target{ID: "t", Root: "/r", Global: true}
 	p, err := Build(d, state.State{Revision: 1}, target, nil)
 	if err != nil {
 		t.Fatal(err)

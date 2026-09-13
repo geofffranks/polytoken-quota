@@ -144,7 +144,9 @@ func TestPermanentDisableSurvivesHealthyReconcile(t *testing.T) {
 			},
 		},
 	}}
-	target := policy.Target{ID: "global", Root: "/r"}
+	// Models baseline edits are global-layer managed fields (pq-m4k10), so
+	// this target is global.
+	target := policy.Target{ID: "global", Root: "/r", Global: true}
 	observed := state.State{Revision: 1} // codex healthy (absent = normal)
 	plan, err := reconcile.Build(d, observed, target, nil)
 	if err != nil {
