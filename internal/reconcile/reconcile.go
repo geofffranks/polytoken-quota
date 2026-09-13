@@ -213,30 +213,35 @@ func Build(desired policy.Desired, observed state.State, target policy.Target, r
 	}
 
 	// Baseline enable state for every managed model, deterministically ordered.
-	ids := make([]string, 0, len(desired.Providers))
-	for id := range desired.Providers {
-		ids = append(ids, string(id))
-	}
-	sort.Strings(ids)
-	for _, idStr := range ids {
-		id := policy.MappingID(idStr)
-		mapping := desired.Providers[id]
-		mode := MappingMode(desired, observed, id)
-		bases := make([]string, 0, len(mapping.Models))
-		for base := range mapping.Models {
-			bases = append(bases, base)
+	// The config.yaml models block is a global-layer concern only: polytoken's
+	// project config layer rejects models entries lacking a provider
+	// definition, so project targets never emit these edits (pq-m4k10).
+	if target.Global {
+		ids := make([]string, 0, len(desired.Providers))
+		for id := range desired.Providers {
+			ids = append(ids, string(id))
 		}
-		sort.Strings(bases)
-		for _, base := range bases {
-			enabled := false
-			if mode != state.ModeDisabled {
-				enabled = mapping.Models[base].Enabled
+		sort.Strings(ids)
+		for _, idStr := range ids {
+			id := policy.MappingID(idStr)
+			mapping := desired.Providers[id]
+			mode := MappingMode(desired, observed, id)
+			bases := make([]string, 0, len(mapping.Models))
+			for base := range mapping.Models {
+				bases = append(bases, base)
 			}
-			plan.Edits = append(plan.Edits, FieldEdit{
-				File:    configFile,
-				Path:    []string{"models", base, "enabled"},
-				Enabled: &enabled,
-			})
+			sort.Strings(bases)
+			for _, base := range bases {
+				enabled := false
+				if mode != state.ModeDisabled {
+					enabled = mapping.Models[base].Enabled
+				}
+				plan.Edits = append(plan.Edits, FieldEdit{
+					File:    configFile,
+					Path:    []string{"models", base, "enabled"},
+					Enabled: &enabled,
+				})
+			}
 		}
 	}
 

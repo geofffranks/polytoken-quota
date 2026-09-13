@@ -294,9 +294,10 @@ func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir
 	// Build the publish dir: real-content config (no secret redaction) with
 	// plan edits applied. The validation configDir may carry inert placeholders
 	// under AuthInert; the publish dir never does. Only managed files are
-	// needed (the publisher only touches files in the plan), but we populate
-	// config.yaml unconditionally since enable-flag edits always target it.
-	if err := buildPublishDir(publishDir, global, project, plan); err != nil {
+	// written (the publisher only touches files in the plan); a project
+	// candidate's config.yaml — when the plan edits it at all — stays
+	// project-scoped (pq-m4k10).
+	if err := buildPublishDir(publishDir, global, project, !res.Global, plan); err != nil {
 		return fmt.Errorf("build publish dir: %w", err)
 	}
 	if err := os.MkdirAll(workDir, dirPerm); err != nil {
@@ -352,16 +353,30 @@ func applyPlanEdits(configDir string, plan reconcile.Plan) error {
 // publication never clobbers live auth blocks with inert placeholders. The
 // publish dir is created with restrictive permissions (0700) and is cleaned up
 // with the rest of the staging root.
-func buildPublishDir(publishDir string, global, project Layer, plan reconcile.Plan) error {
+//
+// projectScoped selects the config.yaml publication base. A project candidate
+// publishes the project's own config bytes: the merged global+project config
+// is the validation-only representation and must never become a publication
+// input (pq-m4k10) — merged bytes would install every global-only key (and
+// any global auth content) into the project's live config.yaml, which
+// polytoken's project layer then rejects. The global target publishes the
+// merged config (its project layer is empty, so that is the global config).
+func buildPublishDir(publishDir string, global, project Layer, projectScoped bool, plan reconcile.Plan) error {
 	// Collect the unique set of managed files from the plan.
 	seen := map[string]bool{}
 	for _, fe := range plan.Edits {
 		seen[fe.File] = true
 	}
 	// Build the real (un-redacted) config once.
-	cfgBytes, _, err := buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
-	if err != nil {
-		return err
+	var cfgBytes []byte
+	var err error
+	if projectScoped {
+		cfgBytes = project.Config
+	} else {
+		cfgBytes, _, err = buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
+		if err != nil {
+			return err
+		}
 	}
 	for file := range seen {
 		stagedPath := filepath.Join(publishDir, filepath.FromSlash(file))

@@ -359,7 +359,7 @@ func TestZeroOrOverLimitSnapshotRemainingDisablesReconciliation(t *testing.T) {
 			}
 
 			plan, err := reconcile.Build(d, s, policy.Target{
-				ID: "target", Root: "/root",
+				ID: "target", Root: "/root", Global: true, // models edits are global-layer (pq-m4k10)
 				Definitions: []policy.Definition{{Path: "agent.md", Chain: chain}},
 			}, ranks)
 			if err != nil {
