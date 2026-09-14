@@ -203,10 +203,10 @@ autonomous_permission_matcher:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "subagents"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agents", "agent.md"), []byte(`---
+	if err := os.WriteFile(filepath.Join(root, "subagents", "agent.md"), []byte(`---
 polytoken:
   model: codex/gpt
   fallback_models:
@@ -231,7 +231,7 @@ body
 	if len(got.Definitions) != 1 || got.Definitions[0].Model != "codex/gpt" {
 		t.Fatalf("definitions=%+v", got.Definitions)
 	}
-	if got.Definitions[0].Path != "agents/agent.md" {
+	if got.Definitions[0].Path != "subagents/agent.md" {
 		t.Fatalf("definition path=%q", got.Definitions[0].Path)
 	}
 }
@@ -245,15 +245,15 @@ func TestFilesystemSourceReaderAcceptsBOMAndWhitespaceFences(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte("models: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "agents"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "subagents"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	bom := "\ufeff---\npolytoken:\n  model: codex/gpt\n---\nbody\n"
 	ws := "---  \r\npolytoken:\r\n  model: zai/glm\r\n---\r\nbody\r\n"
-	if err := os.WriteFile(filepath.Join(root, "agents", "bom.md"), []byte(bom), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "subagents", "bom.md"), []byte(bom), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "agents", "ws.md"), []byte(ws), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "subagents", "ws.md"), []byte(ws), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := (FilesystemSourceReader{GlobalDir: root}).Global(context.Background())
@@ -264,10 +264,10 @@ func TestFilesystemSourceReaderAcceptsBOMAndWhitespaceFences(t *testing.T) {
 	for _, d := range got.Definitions {
 		found[d.Path] = d.Model
 	}
-	if found["agents/bom.md"] != "codex/gpt" {
+	if found["subagents/bom.md"] != "codex/gpt" {
 		t.Fatalf("BOM-prefixed definition not read: %+v", got.Definitions)
 	}
-	if found["agents/ws.md"] != "zai/glm" {
+	if found["subagents/ws.md"] != "zai/glm" {
 		t.Fatalf("whitespace-fence definition not read: %+v", got.Definitions)
 	}
 }

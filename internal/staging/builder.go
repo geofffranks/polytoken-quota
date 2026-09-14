@@ -1,9 +1,14 @@
 // Package staging materializes complete, isolated Polytoken validation staging
 // roots for the polytoken-quota reconciler. For each target it folds the real
 // global source layer together with the registered project layer into one
-// private configuration directory, copies every effective startup definition,
-// applies the reconciler's managed edits inside staging only, and creates a
-// co-located neutral working directory with no .polytoken.
+// private configuration directory, copies exactly the staging read allowlist —
+// config.yaml plus *.md definitions under facets/ and subagents/
+// (policy.InStagingAllowlist) — applies the reconciler's managed edits inside
+// staging only, and creates a co-located neutral working directory with no
+// .polytoken. Any other file in a source root is never read, never staged, and
+// never fails staging, so foreign or secret-bearing files (ephemeral runtime
+// state, a stray watchdog.env, credentials.json) can neither contaminate nor
+// break a reconcile.
 //
 // Live source files are never mutated: edits are translated to document.Edit
 // calls and applied to staged copies. The staged candidate is the sole transient
@@ -26,6 +31,7 @@ import (
 	"sync"
 
 	"github.com/geofffranks/polytoken-quota/internal/document"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/target"
 	"gopkg.in/yaml.v3"
@@ -128,8 +134,13 @@ func (c Candidate) WithoutCleanup() Candidate {
 }
 
 // Layer is one source layer's materialized contents: the config.yaml bytes and
-// every other file under the layer's configuration root, keyed by forward-slash
-// relative path. Bytes are returned verbatim; no environment expansion occurs.
+// every allowlisted file under the layer's configuration root, keyed by
+// forward-slash relative path. Bytes are returned verbatim; no environment
+// expansion occurs. Files contains exactly the staging read allowlist
+// (policy.InStagingAllowlist): nothing outside config.yaml, facets/**/*.md,
+// and subagents/**/*.md. The production reader enforces this at discovery;
+// injected custom Sources must honor the same contract, and the builder
+// defensively drops anything wider before staging.
 type Layer struct {
 	Config []byte
 	Files  map[string][]byte
@@ -260,8 +271,15 @@ func (b Builder) stage(ctx context.Context, configDir, userConfigDir, publishDir
 		return err
 	}
 	for rel, data := range mergeFiles(global.Files, project.Files) {
-		if b.AuthMode == AuthInert && secretBearingFile(rel) {
-			return fmt.Errorf("staging: refusing secret-bearing auxiliary file %q in AuthInert mode", rel)
+		// Defensive: the production reader already filters at discovery, but
+		// injected custom Sources must never widen the staged trees beyond the
+		// allowlist (policy.InStagingAllowlist). Non-allowlisted files are
+		// skipped — never staged, never a failure; when a plan references one,
+		// applyPlanEdits below fails closed with the allowlist message.
+		// config.yaml is likewise never staged from Files: it is the merged,
+		// auth-branched Config bytes written above.
+		if rel == stagedConfigFile || !policy.InStagingAllowlist(rel) {
+			continue
 		}
 		if err := writeStaged(filepath.Join(configDir, filepath.FromSlash(rel)), data); err != nil {
 			return err
@@ -328,6 +346,15 @@ func applyPlanEdits(configDir string, plan reconcile.Plan) error {
 		stagedPath := filepath.Join(configDir, filepath.FromSlash(file))
 		raw, err := os.ReadFile(stagedPath)
 		if err != nil {
+			// Fail closed (pq staging read-allowlist): a registered definition
+			// outside the allowlist was never staged, so its absence must name
+			// the file with move-or-deregister guidance instead of a raw
+			// read error. Paths the predicate would admit keep the plain
+			// read error — an in-tree deleted or typo'd path must not receive
+			// move-the-file advice.
+			if !policy.InStagingAllowlist(file) {
+				return fmt.Errorf(allowlistFailureFmt, file)
+			}
 			return fmt.Errorf("read staged %s: %w", file, err)
 		}
 		var out []byte
@@ -384,6 +411,13 @@ func buildPublishDir(publishDir string, global, project Layer, projectScoped boo
 		if file == stagedConfigFile {
 			raw = cfgBytes
 		} else {
+			// Fail closed on the publish side too (pq staging read-allowlist):
+			// a plan-referenced path outside the allowlist gets the allowlist
+			// message, whether or not a (custom) source layer happens to carry
+			// it; admitted-but-missing paths keep the plain not-found error.
+			if !policy.InStagingAllowlist(file) {
+				return fmt.Errorf(allowlistFailureFmt, file)
+			}
 			// Definition files come from the merged source layers verbatim
 			// (no secret redaction is needed: they carry model names, not
 			// auth values).
@@ -695,13 +729,16 @@ func (m FSMaterializer) Project(ctx context.Context, res target.Resolved) (Layer
 	return layer, true, nil
 }
 
-// readLayer reads config.yaml plus every other regular file under dir, keyed by
-// forward-slash relative path. config.yaml at the dir root is returned as
-// Config; a nested file named config.yaml is treated as an ordinary file.
-// Ephemeral runtime directories (read-once, skill-once, superpowers), the
-// prompt_history file, and backup copies (*.bak) are excluded — they are not
-// configuration and backup files may carry raw secrets that bypass AuthInert
-// redaction.
+// readLayer reads exactly the staging read allowlist under dir: config.yaml at
+// the root (returned as Config) plus every *.md file under facets/ and
+// subagents/ (policy.InStagingAllowlist), keyed by forward-slash relative
+// path. Directories outside the allowlist trees are never descended into and
+// non-allowlisted files are never opened — a foreign or secret-bearing file
+// (ephemeral runtime state, a stray watchdog.env, credentials.json, editor
+// backups) can neither fail the layer read nor leak into staging, and absent
+// optional facets//subagents/ directories read as empty. config.yaml must be
+// a regular file: a nested file named config.yaml is outside the allowlist and
+// is never read as an ordinary file either.
 func readLayer(dir string) (Layer, error) {
 	cfgPath := filepath.Join(dir, stagedConfigFile)
 	// The layer's config.yaml must be a regular file, not a symlink that could
@@ -726,12 +763,9 @@ func readLayer(dir string) (Layer, error) {
 			if rerr != nil {
 				return rerr
 			}
-			if isExcludedDir(filepath.ToSlash(rel)) {
+			if !policy.InStagingAllowlistTree(filepath.ToSlash(rel)) {
 				return filepath.SkipDir
 			}
-			return nil
-		}
-		if filepath.Base(path) == stagedConfigFile && filepath.Dir(path) == dir {
 			return nil
 		}
 		rel, rerr := filepath.Rel(dir, path)
@@ -739,7 +773,13 @@ func readLayer(dir string) (Layer, error) {
 			return rerr
 		}
 		relSlash := filepath.ToSlash(rel)
-		if shouldExcludeFile(relSlash) {
+		// The root config.yaml is the layer's Config, never a Files entry:
+		// it flows exclusively through buildEffectiveConfig (merge + auth
+		// branch), so a raw copy must never overwrite the merged config.
+		if relSlash == stagedConfigFile {
+			return nil
+		}
+		if !policy.InStagingAllowlist(relSlash) {
 			return nil
 		}
 		// Never follow a symlinked file: a benign-named link pointing outside
@@ -760,92 +800,6 @@ func readLayer(dir string) (Layer, error) {
 		return Layer{}, fmt.Errorf("walk %s: %w", dir, err)
 	}
 	return Layer{Config: cfg, Files: files}, nil
-}
-
-// excludedDirs lists top-level directory names under the config root that hold
-// ephemeral runtime state rather than Polytoken configuration. Walking into
-// these is skipped entirely.
-var excludedDirs = map[string]bool{
-	"read-once":   true, // session-tracking JSONL
-	"skill-once":  true, // session-tracking JSONL
-	"superpowers": true, // runtime state scripts
-}
-
-// isExcludedDir reports whether rel (a forward-slash path relative to the config
-// root) is inside a top-level excluded directory.
-func isExcludedDir(rel string) bool {
-	top := rel
-	if i := strings.IndexByte(rel, '/'); i >= 0 {
-		top = rel[:i]
-	}
-	return excludedDirs[top]
-}
-
-// shouldExcludeFile reports whether a file (forward-slash path relative to the
-// config root) should be skipped because it is ephemeral runtime state or a
-// backup copy, not live configuration.
-func shouldExcludeFile(rel string) bool {
-	if isExcludedDir(rel) {
-		return true
-	}
-	base := filepath.Base(rel)
-	if base == "prompt_history" {
-		return true
-	}
-	// Backup copies contain raw config with real secrets and bypass AuthInert
-	// redaction — never stage them.
-	if strings.HasSuffix(base, ".bak") {
-		return true
-	}
-	if strings.Contains(base, ".bak-") {
-		return true
-	}
-	return false
-}
-
-func secretBearingFile(rel string) bool {
-	base := strings.ToLower(filepath.Base(rel))
-	// Distinctive markers — substring match is safe and precise.
-	for _, marker := range []string{".env", "credential", "secret"} {
-		if strings.Contains(base, marker) {
-			return true
-		}
-	}
-	// Short markers that embed in benign words (e.g. "token" in "polytoken",
-	// "auth" in "authorize") — require word boundaries so only standalone
-	// occurrences match.
-	for _, marker := range []string{"token", "auth"} {
-		if wordBoundaryContains(base, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// wordBoundaryContains reports whether s contains word as a token bounded by
-// non-alphabetic characters (or the start/end of the string). This prevents
-// "token" from matching inside "polytoken" while still matching "access_token"
-// or "token.json". s is assumed already lowercased.
-func wordBoundaryContains(s, word string) bool {
-	idx := 0
-	for {
-		pos := strings.Index(s[idx:], word)
-		if pos < 0 {
-			return false
-		}
-		absPos := idx + pos
-		end := absPos + len(word)
-		leftOK := absPos == 0 || !isLowerAlpha(s[absPos-1])
-		rightOK := end == len(s) || !isLowerAlpha(s[end])
-		if leftOK && rightOK {
-			return true
-		}
-		idx = absPos + 1
-	}
-}
-
-func isLowerAlpha(b byte) bool {
-	return b >= 'a' && b <= 'z'
 }
 
 // writeStaged writes data to path, creating parent directories with dirPerm and
@@ -910,3 +864,10 @@ const (
 	dirPerm          = 0o700
 	filePerm         = 0o600
 )
+
+// allowlistFailureFmt is the fail-closed message for a registered definition
+// path outside the staging read allowlist (policy.InStagingAllowlist), emitted
+// at both plan-edit failure sites (applyPlanEdits, buildPublishDir). It names
+// the file and gives move-or-deregister guidance; the coordinator sanitizes it
+// with validate.DefaultSanitize when persisting the pending.
+const allowlistFailureFmt = "definition %q is outside the staging allowlist (config.yaml, facets/, subagents/); move it under facets/ or subagents/ or update the registered policy"

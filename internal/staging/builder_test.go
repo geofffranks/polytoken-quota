@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -528,17 +530,61 @@ func TestConflictingLiveIsolation(t *testing.T) {
 	}
 }
 
-// TestAuthInertRedactsSecrets proves AuthInert removes source secrets and leaves
-// an inert placeholder.
-func TestAuthInertRejectsSecretBearingAuxiliaryFile(t *testing.T) {
+// TestAuthInertIgnoresSecretNamedAuxiliaryFile inverts the old refusal
+// behavior (pq staging read-allowlist): a secret-named foreign file in the
+// source root no longer fails staging — it is never read, so Build succeeds
+// and the file is absent from both staged trees.
+func TestAuthInertIgnoresSecretNamedAuxiliaryFile(t *testing.T) {
 	live := layeredFixture(t)
-	testutil.WriteFile(t, filepath.Join(live.Root, "global", "credentials.json"), `{"token":"secret"}`)
+	leaked := "credential-file-secret-5555"
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "credentials.json"),
+		`{"token":"`+leaked+`"}`)
 	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
-	if _, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil); err == nil {
-		t.Fatal("AuthInert accepted secret-bearing auxiliary file")
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
+	if err != nil {
+		t.Fatalf("staging failed on a foreign secret-named file: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	for _, tree := range stagedTrees(c) {
+		if _, err := os.Stat(filepath.Join(tree, "credentials.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("credentials.json was staged into %s", tree)
+		}
+	}
+	// Its content must not appear anywhere in the staging root either.
+	assertTreeFreeOf(t, c.Root, leaked)
+}
+
+// stagedTrees returns the two staged definition trees that must hold exactly
+// the allowlist and stay byte-identical: the --config-dir tree and the staged
+// user tree (<UserConfigDir>/polytoken) that XDG_CONFIG_HOME points at during
+// validation.
+func stagedTrees(c Candidate) []string {
+	return []string{c.ConfigDir, filepath.Join(c.UserConfigDir, "polytoken")}
+}
+
+// assertTreeFreeOf walks root and fails if needle appears in any file's bytes.
+func assertTreeFreeOf(t *testing.T, root, needle string) {
+	t.Helper()
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if bytes.Contains(data, []byte(needle)) {
+			t.Errorf("forbidden content %q found in staged file %s", needle, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
+// TestAuthInertRedactsSecrets proves AuthInert removes source secrets and leaves
+// an inert placeholder.
 func TestAuthInertRedactsSecrets(t *testing.T) {
 	live := layeredFixture(t)
 	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
@@ -665,63 +711,25 @@ func TestTimeoutContextIsHonored(t *testing.T) {
 	assertGone(t, "timeout-window", root)
 }
 
-// --- secretBearingFile word-boundary tests ----------------------------------
-
-func TestSecretBearingFileWordBoundary(t *testing.T) {
-	// Benign filenames that contain a marker as a substring of a larger word.
-	// These must NOT be flagged — the old code false-positived them.
-	benign := []string{
-		// filepath.Base is all that matters; "polytoken" embeds "token" but
-		// must not be flagged. (Full path kept short to avoid tripping the
-		// TestNoProcessControl source guard.)
-		"ref/polytoken-tools.md",
-		"superpowers/session-start-polytoken",
-		"facets/authorize.md",
-		"subagents/authors.md",
-		"facets/polyauth.md",
-	}
-	for _, f := range benign {
-		if secretBearingFile(f) {
-			t.Errorf("secretBearingFile(%q) = true; want false (benign)", f)
-		}
-	}
-
-	// Genuinely secret-bearing filenames — these MUST be flagged.
-	dangerous := []string{
-		"credentials.json",
-		".env",
-		"production.env",
-		"access_token.json",
-		"token.json",
-		"secret.key",
-		"secrets.yaml",
-		"auth.json",
-		"auth_tokens.yaml",
-		"deploy/.env",
-		"config/token",
-	}
-	for _, f := range dangerous {
-		if !secretBearingFile(f) {
-			t.Errorf("secretBearingFile(%q) = false; want true (secret-bearing)", f)
-		}
-	}
-}
-
-// --- readLayer exclusion tests ----------------------------------------------
+// --- readLayer allowlist tests ----------------------------------------------
 
 func TestReadLayerExcludesNonConfigPaths(t *testing.T) {
 	dir := t.TempDir()
 	testutil.WriteFile(t, filepath.Join(dir, "config.yaml"), "models: {}\n")
-	// Config files that MUST be staged.
+	// Config files that MUST be staged (allowlisted *.md under the trees).
 	testutil.WriteFile(t, filepath.Join(dir, "subagents", "reviewer.md"), "# reviewer")
 	testutil.WriteFile(t, filepath.Join(dir, "facets", "scribe.md"), "# scribe")
+	// Foreign files that MUST be excluded: anything outside config.yaml,
+	// facets/**/*.md, and subagents/**/*.md is never read (pq staging
+	// read-allowlist) — including whole foreign trees and secret-named files.
 	testutil.WriteFile(t, filepath.Join(dir, "skills", "debug", "SKILL.md"), "# debug")
-	// Ephemeral runtime state that MUST be excluded.
+	testutil.WriteFile(t, filepath.Join(dir, "watchdog.env"), "PUSHOVER_TOKEN=leaked\n")
 	testutil.WriteFile(t, filepath.Join(dir, "read-once", "session-abc.jsonl"), "{}")
 	testutil.WriteFile(t, filepath.Join(dir, "skill-once", "session-def.jsonl"), "{}")
 	testutil.WriteFile(t, filepath.Join(dir, "superpowers", "session-start"), "#!/bin/sh")
 	testutil.WriteFile(t, filepath.Join(dir, "prompt_history"), "history data")
-	// Backup files that MUST be excluded (contain raw secrets).
+	testutil.WriteFile(t, filepath.Join(dir, "credentials.json"), `{"api_key":"leaked"}`)
+	// Backup copies that MUST be excluded (raw secrets; not *.md).
 	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.bak"), "providers:\n  api_key: leaked\n")
 	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.20260101T000000Z.bak"), "providers:\n  api_key: leaked\n")
 	testutil.WriteFile(t, filepath.Join(dir, "config.yaml.bak-20260101"), "providers:\n  api_key: leaked\n")
@@ -733,7 +741,6 @@ func TestReadLayerExcludesNonConfigPaths(t *testing.T) {
 	must := []string{
 		"subagents/reviewer.md",
 		"facets/scribe.md",
-		"skills/debug/SKILL.md",
 	}
 	for _, rel := range must {
 		if _, ok := layer.Files[rel]; !ok {
@@ -741,10 +748,13 @@ func TestReadLayerExcludesNonConfigPaths(t *testing.T) {
 		}
 	}
 	excluded := []string{
+		"skills/debug/SKILL.md",
+		"watchdog.env",
 		"read-once/session-abc.jsonl",
 		"skill-once/session-def.jsonl",
 		"superpowers/session-start",
 		"prompt_history",
+		"credentials.json",
 		"config.yaml.bak",
 		"config.yaml.20260101T000000Z.bak",
 		"config.yaml.bak-20260101",
@@ -756,19 +766,37 @@ func TestReadLayerExcludesNonConfigPaths(t *testing.T) {
 	}
 }
 
-// TestStagingAcceptsPolytokenNamedFiles proves staging succeeds when the config
-// dir contains files whose names embed "token" inside "polytoken" — the bug that
-// blocked `polytoken-quota sync --from-polytoken` in the wild.
+// TestStagingAcceptsPolytokenNamedFiles proves polytoken-named files neither
+// fail staging nor leak into it (the allowlist subsumes the old secret-name
+// blacklist, whose word-boundary bug once blocked `sync --from-polytoken`):
+// a file is staged only when it sits under facets/ or subagents/ with a .md
+// name; every other polytoken-named file is absent from both staged trees.
 func TestStagingAcceptsPolytokenNamedFiles(t *testing.T) {
 	live := layeredFixture(t)
+	// Foreign polytoken-named files outside the allowlist — absent.
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "polytoken-tools.md"), "# tools")
 	testutil.WriteFile(t, filepath.Join(live.Root, "global", "superpowers", "session-start-polytoken"), "#!/bin/sh")
+	// Allowlisted polytoken-named definitions — staged.
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "facets", "polytoken-facet.md"), "# facet")
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "subagents", "polytoken-agents.md"), "# agents")
 	live.Sources = FSMaterializer{GlobalDir: filepath.Join(live.Root, "global")}
 	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
 	if err != nil {
 		t.Fatalf("staging rejected benign polytoken-named file: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Cleanup() })
+	for _, tree := range stagedTrees(c) {
+		for _, rel := range []string{"polytoken-tools.md", "superpowers/session-start-polytoken"} {
+			if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel))); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("foreign polytoken-named file %s was staged into %s", rel, tree)
+			}
+		}
+		for _, rel := range []string{"facets/polytoken-facet.md", "subagents/polytoken-agents.md"} {
+			if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel))); err != nil {
+				t.Errorf("allowlisted polytoken-named definition %s missing from %s: %v", rel, tree, err)
+			}
+		}
+	}
 }
 
 // TestStagingExcludesBackupWithSecrets proves backup config files containing
@@ -917,4 +945,207 @@ func TestNoCatalogProviderYieldsNoEnvRefs(t *testing.T) {
 	if len(got.AuthEnvRefs) != 0 {
 		t.Fatalf("static-only config reported env refs %v, want none", got.AuthEnvRefs)
 	}
+}
+
+// --- staging read-allowlist matrix (T2) --------------------------------------
+
+// TestStagingAllowlistMatrix pins the read-allowlist disposition of both staged
+// trees (configDir and userConfigDir/polytoken): foreign files are never staged
+// and never fail staging; allowlisted definitions always are.
+func TestStagingAllowlistMatrix(t *testing.T) {
+	cases := []struct {
+		name string
+		// plant writes the case's extra files into the fixture layers.
+		plant func(t *testing.T, live *liveFixture)
+		// absent rels that must exist in NEITHER staged tree.
+		absent []string
+		// present rels that must exist in BOTH staged trees.
+		present []string
+	}{
+		{
+			name: "foreign root-level file",
+			plant: func(t *testing.T, live *liveFixture) {
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "watchdog.env"), "PUSHOVER_TOKEN=x\n")
+				testutil.WriteFile(t, filepath.Join(live.Root, "project", ".polytoken", "notes.txt"), "project note\n")
+			},
+			absent: []string{"watchdog.env", "notes.txt"},
+		},
+		{
+			name: "foreign skills tree",
+			plant: func(t *testing.T, live *liveFixture) {
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "skills", "debug", "SKILL.md"), "# debug")
+			},
+			absent: []string{"skills/debug/SKILL.md"},
+		},
+		{
+			name: "allowlisted definitions staged",
+			plant: func(t *testing.T, live *liveFixture) {
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "facets", "x.md"), "# x")
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "subagents", "y.md"), "# y")
+			},
+			present: []string{"facets/x.md", "subagents/y.md"},
+		},
+		{
+			name: "non-md inside subagents",
+			plant: func(t *testing.T, live *liveFixture) {
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "subagents", "credentials.json"), `{"api_key":"x"}`)
+			},
+			absent: []string{"subagents/credentials.json"},
+		},
+		{
+			name: "backup inside subagents",
+			plant: func(t *testing.T, live *liveFixture) {
+				testutil.WriteFile(t, filepath.Join(live.Root, "global", "subagents", "old.md.bak"), "# old")
+			},
+			absent: []string{"subagents/old.md.bak"},
+		},
+		{
+			name: "symlink inside subagents",
+			plant: func(t *testing.T, live *liveFixture) {
+				outside := filepath.Join(live.Root, "outside-secret.md")
+				testutil.WriteFile(t, outside, "outside content\n")
+				if err := os.Symlink(outside, filepath.Join(live.Root, "global", "subagents", "link.md")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			absent: []string{"subagents/link.md"},
+		},
+		{
+			name:  "absent facets dir reads as empty",
+			plant: func(t *testing.T, live *liveFixture) {},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			live := layeredFixture(t)
+			tc.plant(t, &live)
+			c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Cleanup() })
+			for _, tree := range stagedTrees(c) {
+				for _, rel := range tc.absent {
+					if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel))); !errors.Is(err, os.ErrNotExist) {
+						t.Errorf("file %s was staged into %s; want absent", rel, tree)
+					}
+				}
+				for _, rel := range tc.present {
+					if _, err := os.Stat(filepath.Join(tree, filepath.FromSlash(rel))); err != nil {
+						t.Errorf("allowlisted file %s missing from %s: %v", rel, tree, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestAdmittedButMissingDefinitionKeepsPlainError pins the D4 predicate check
+// from the other side: a path the allowlist WOULD admit that is simply absent
+// from the staged tree keeps the plain read error, so in-tree deleted or typo'd
+// paths never receive move-the-file advice.
+func TestAdmittedButMissingDefinitionKeepsPlainError(t *testing.T) {
+	live := layeredFixture(t)
+	plan := reconcile.Plan{TargetID: live.Target.ID, Edits: []reconcile.FieldEdit{
+		{File: "subagents/missing-typo.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
+	}}
+	_, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, plan, nil)
+	if err == nil {
+		t.Fatal("missing in-tree definition did not fail staging")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "read staged subagents/missing-typo.md") {
+		t.Fatalf("expected the plain read error, got %q", msg)
+	}
+	if strings.Contains(msg, "outside the staging allowlist") {
+		t.Fatalf("in-tree missing path must not get move-the-file advice: %q", msg)
+	}
+}
+
+// TestBuildPublishDirAllowlistFailClosed pins D4 at the publish-dir failure
+// site: a plan-referenced path outside the allowlist gets the allowlist message
+// (defense in depth, even though the staged-edit site fires first through
+// Build), while an admitted-but-missing path keeps the plain not-found error.
+func TestBuildPublishDirAllowlistFailClosed(t *testing.T) {
+	global := Layer{Config: []byte(globalConfigYAML), Files: map[string][]byte{}}
+	outside := reconcile.Plan{Edits: []reconcile.FieldEdit{
+		{File: "agents/research.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
+	}}
+	err := buildPublishDir(t.TempDir(), global, Layer{}, false, outside)
+	if err == nil || !strings.Contains(err.Error(),
+		`definition "agents/research.md" is outside the staging allowlist`) {
+		t.Fatalf("publish dir did not fail closed with the allowlist message: %v", err)
+	}
+	admitted := reconcile.Plan{Edits: []reconcile.FieldEdit{
+		{File: "subagents/missing-typo.md", Path: []string{"polytoken", "model"}, Scalar: strPtr("codex/gpt")},
+	}}
+	err = buildPublishDir(t.TempDir(), global, Layer{}, false, admitted)
+	if err == nil || !strings.Contains(err.Error(),
+		`managed file "subagents/missing-typo.md" not found in source layers`) {
+		t.Fatalf("admitted-but-missing path lost the plain not-found error: %v", err)
+	}
+}
+
+// --- two-tree equality (T3) --------------------------------------------------
+
+// TestStagedTreesAreByteIdentical proves the two staged trees — the --config-dir
+// tree and the XDG_CONFIG_HOME user tree — are byte-identical after Build:
+// foreign files are excluded by never entering the write set, so the trees
+// cannot diverge. Write/edit error discipline is unchanged (strict error
+// returns), so a partial write can never reach validation.
+func TestStagedTreesAreByteIdentical(t *testing.T) {
+	live := layeredFixture(t)
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "watchdog.env"), "PUSHOVER_TOKEN=x\n")
+	testutil.WriteFile(t, filepath.Join(live.Root, "global", "skills", "debug", "SKILL.md"), "# debug")
+	c, err := builderWith(t, live, AuthInert).Build(context.Background(), live.Target, live.Plan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+
+	collect := func(root string) map[string]string {
+		files := map[string]string{}
+		werr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			data, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			rel, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				return rerr
+			}
+			files[filepath.ToSlash(rel)] = string(data)
+			return nil
+		})
+		if werr != nil {
+			t.Fatal(werr)
+		}
+		return files
+	}
+	left := collect(c.ConfigDir)
+	right := collect(filepath.Join(c.UserConfigDir, "polytoken"))
+	if !reflect.DeepEqual(left, right) {
+		t.Fatalf("staged trees diverge:\nconfigDir=%v\nuserTree=%v", sortedKeys(left), sortedKeys(right))
+	}
+	// Sanity: the compared trees are allowlist-shaped and non-trivial.
+	for _, rel := range []string{"config.yaml", "subagents/global.md", "subagents/project.md"} {
+		if _, ok := left[rel]; !ok {
+			t.Fatalf("expected %s in the staged tree; got %v", rel, sortedKeys(left))
+		}
+	}
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

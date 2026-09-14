@@ -154,6 +154,59 @@ func readManagedConfig(path string) (SourceConfig, error) {
 	return out, nil
 }
 
+// The staging read allowlist is the single source of truth for which files in
+// a Polytoken configuration root are configuration: exactly config.yaml at
+// the root, plus *.md definitions under facets/ and subagents/.
+//
+// Invariant (pq staging read-allowlist): policy definition discovery
+// (discoverManagedFiles below) and staging materialization (the staging
+// reader and the staging write/repair paths) both gate on these predicates,
+// so the managed and validated surfaces coincide. A foreign or secret-bearing
+// file anywhere else in a config root — ephemeral runtime state, a stray
+// watchdog.env, credentials.json, editor backups — is never opened, never
+// staged, and never fails a reconcile.
+
+// InStagingAllowlist reports whether rel — a forward-slash path relative to a
+// Polytoken configuration root — is inside the staging read allowlist:
+// exactly "config.yaml" at the root, or a *.md file anywhere under facets/ or
+// subagents/ (facets/**/*.md, subagents/**/*.md). The *.md selection matches
+// Polytoken's one-file-per-definition discovery, so backups
+// (subagents/old.md.bak), non-definition payloads (subagents/credentials.json),
+// and everything outside the two trees are excluded by construction. Paths
+// with empty, ".", or ".." segments are never admitted, so the predicate can
+// never endorse an escape from the configuration root.
+func InStagingAllowlist(rel string) bool {
+	if rel == "" {
+		return false
+	}
+	if rel == "config.yaml" {
+		return true
+	}
+	top, rest, found := strings.Cut(rel, "/")
+	if !found || rest == "" || (top != "facets" && top != "subagents") {
+		return false
+	}
+	if !strings.HasSuffix(rest, ".md") {
+		return false
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// InStagingAllowlistTree reports whether rel — a forward-slash path relative
+// to a Polytoken configuration root — lies inside or under one of the
+// allowlisted definition trees (facets/, subagents/). Filesystem walks use it
+// to skip descending into directories that cannot contain allowlisted files,
+// so files outside the trees are never even enumerated.
+func InStagingAllowlistTree(rel string) bool {
+	top, _, _ := strings.Cut(rel, "/")
+	return top == "facets" || top == "subagents"
+}
+
 func discoverManagedFiles(root string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -172,7 +225,7 @@ func discoverManagedFiles(root string) ([]string, error) {
 				if err != nil {
 					return err
 				}
-				if isIgnoredDir(filepath.ToSlash(rel)) {
+				if !InStagingAllowlistTree(filepath.ToSlash(rel)) {
 					return filepath.SkipDir
 				}
 			}
@@ -183,7 +236,7 @@ func discoverManagedFiles(root string) ([]string, error) {
 			return err
 		}
 		relSlash := filepath.ToSlash(rel)
-		if isIgnoredFile(relSlash) {
+		if !InStagingAllowlist(relSlash) {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -202,43 +255,6 @@ func discoverManagedFiles(root string) ([]string, error) {
 	}
 	sort.Strings(found)
 	return found, nil
-}
-
-// ignoredDirs are top-level directories under the config root that hold ephemeral
-// runtime state, not Polytoken configuration. They must never contribute
-// definition files. This MUST stay in sync with staging.excludedDirs.
-var ignoredDirs = map[string]bool{
-	"read-once":   true,
-	"skill-once":  true,
-	"superpowers": true,
-}
-
-func isIgnoredDir(rel string) bool {
-	top := rel
-	if i := strings.IndexByte(rel, '/'); i >= 0 {
-		top = rel[:i]
-	}
-	return ignoredDirs[top]
-}
-
-// isIgnoredFile reports whether a file (forward-slash relative path) is a backup
-// copy or ephemeral artifact that must not be treated as a managed definition.
-// Backup copies are especially dangerous: they carry stale managed fields that
-// would pollute the reconciliation plan and then fail in staging (the file is
-// excluded from staging but the plan still references it).
-// This MUST stay in sync with staging.shouldExcludeFile.
-func isIgnoredFile(rel string) bool {
-	if isIgnoredDir(rel) {
-		return true
-	}
-	base := filepath.Base(rel)
-	if base == "prompt_history" {
-		return true
-	}
-	if strings.HasSuffix(base, ".bak") || strings.Contains(base, ".bak-") {
-		return true
-	}
-	return false
 }
 
 func ChainIf(s string) Chain {
