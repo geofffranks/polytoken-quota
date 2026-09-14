@@ -176,6 +176,68 @@ func TestNoSecretCanaryPersists(t *testing.T) {
 	assertNoStagingRoots(t, root)
 }
 
+// TestNoSecretCanaryPersistsInSubagentAuxFiles pins the staging read-allowlist
+// selection rule (D2/T4) against the real incident shape: secret-bearing
+// non-definition files planted under subagents/ (a watchdog.env, a
+// credentials.json) are never read, never staged, and never persist — not in
+// the staged trees, not in the publish dir, and not in a retained keep-staging
+// root. Only the *.{md}-selection rule of policy.InStagingAllowlist keeps them
+// out, so this test decides the in-tree selection behavior.
+func TestNoSecretCanaryPersistsInSubagentAuxFiles(t *testing.T) {
+	root := t.TempDir()
+	stageTmp := filepath.Join(root, "staging-tmp")
+	if err := os.MkdirAll(stageTmp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := filepath.Join(root, "source")
+	testutil.WriteFile(t, filepath.Join(sourceDir, "config.yaml"),
+		"providers:\n  codex:\n    api_key: clean\nmodels:\n  codex/gpt:\n    enabled: true\ndefaults:\n  full: codex/gpt\n")
+	testutil.WriteFile(t, filepath.Join(sourceDir, "subagents", "agent.md"),
+		"---\npolytoken:\n  model: codex/gpt\n---\nbody\n")
+	// Canary-bearing aux files inside the allowlisted tree: NOT *.md, so the
+	// selection rule must exclude them.
+	testutil.WriteFile(t, filepath.Join(sourceDir, "subagents", "watchdog.env"),
+		"PUSHOVER_TOKEN="+canarySecret+"\n")
+	testutil.WriteFile(t, filepath.Join(sourceDir, "subagents", "credentials.json"),
+		`{"api_key":"`+canarySecret+`"}`)
+
+	res := target.Resolved{ID: "global", CanonicalRoot: sourceDir, Global: true}
+	cand := canaryStage(t, sourceDir, stageTmp, res)
+
+	// Retain first (the keep-staging shape), then prove the retained root is
+	// canary-free too. Cleanup targets the vacated build path, so the test
+	// removes the retained snapshot itself.
+	retained, err := cand.Retain()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.RemoveAll(retained); err != nil {
+			t.Errorf("remove retained root: %v", err)
+		}
+	}()
+
+	for _, tree := range []string{cand.ConfigDir, cand.PublishDir, retained} {
+		if _, err := os.Stat(tree); errors.Is(err, os.ErrNotExist) {
+			continue // PublishDir may legitimately hold no managed files here
+		}
+		for _, name := range []string{"watchdog.env", "credentials.json"} {
+			if _, err := os.Stat(filepath.Join(tree, "subagents", name)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("canary file subagents/%s persisted in %s", name, tree)
+			}
+		}
+		scanTree(t, tree, func(b []byte) {
+			if bytes.Contains(b, []byte(canarySecret)) {
+				t.Errorf("canary %q persisted in %s", canarySecret, tree)
+			}
+		})
+	}
+	if err := cand.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoStagingRoots(t, root)
+}
+
 // --- canary helpers ---------------------------------------------------------
 
 // canaryStage builds an AuthInert candidate from sourceDir under stageTmp.
