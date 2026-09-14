@@ -1011,8 +1011,9 @@ func TestStagingAllowlistMatrix(t *testing.T) {
 			absent: []string{"subagents/link.md"},
 		},
 		{
-			name:  "absent facets dir reads as empty",
-			plant: func(t *testing.T, live *liveFixture) {},
+			name:   "absent facets dir reads as empty",
+			plant:  func(t *testing.T, live *liveFixture) {},
+			absent: []string{"facets/polytoken-facet.md"},
 		},
 	}
 	for _, tc := range cases {
