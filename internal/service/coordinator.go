@@ -567,6 +567,13 @@ func (c *Coordinator) globalPlan(desired policy.Desired, next state.State, targe
 // model(s). It turns a doctor failure like "subagent 'x' references unknown
 // model 'y'" into an actionable pointer. Relative staged paths and model base
 // names only; the output is bounded to a handful of files (pq-m4k9).
+//
+// Coverage note (pq staging read-allowlist): the staged candidate now holds
+// exactly config.yaml plus *.md files under facets/ and subagents/, so the
+// .md walk filter below sees the entire validated definition surface. Stale
+// model references in non-allowlisted trees (skills/, agents/, ...) are no
+// longer staged, no longer validated by doctor, and deliberately not scanned
+// here — the accepted coverage narrowing of the allowlist.
 func (c *Coordinator) staleDisabledRefs(candidate staging.Candidate, desired policy.Desired, observed state.State) string {
 	var disabled []string
 	for mid, m := range desired.Providers {
@@ -958,6 +965,11 @@ func appliedOutcome(id string, rev uint64) TargetOutcome {
 }
 
 // pendingOutcome records a target that failed before or during publication.
+// The persisted Remediation is a fixed, stage-aware, sanitized default: only
+// the "stage" stage carries staging-specific advice; render, publish, and
+// resolve_targets failures carry the generic hint, so staging diagnostics can
+// never appear for non-staging failures. Doctor backfills empty remediation
+// only at display time — this field is the persisted value.
 func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcome {
 	return TargetOutcome{
 		TargetID:          id,
@@ -966,10 +978,33 @@ func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcom
 			TargetID:          sanitizeFailure(id),
 			Stage:             sanitizeFailure(stage),
 			Summary:           sanitizeFailure(err.Error()),
+			Remediation:       pendingRemediation(stage),
 			AttemptedRevision: rev,
 			LiveStatus:        "last-known-good",
 		},
 	}
+}
+
+const (
+	// stageRemediationHint is the remediation persisted with a stage-stage
+	// pending: staging reads the source config and definitions, materializes
+	// them into a private temp directory, and applies the plan's managed edits
+	// there, so the actionable checks are source readability, temp-dir
+	// permissions, and the managed edit paths named in the summary.
+	stageRemediationHint = "check the source config and definitions are readable, the staging temp directory is writable, and the managed edit paths named in the summary exist, then re-run reconcile"
+	// genericRemediationHint is the remediation persisted with every other
+	// pre-publication pending (mirrors doctor's display-time backfill and
+	// validationRemediation).
+	genericRemediationHint = "resolve the pending error and re-run reconcile"
+)
+
+// pendingRemediation returns the fixed remediation for one pre-publication
+// failure stage. Only the stage stage gets staging-specific advice.
+func pendingRemediation(stage string) string {
+	if stage == "stage" {
+		return sanitizeFailure(stageRemediationHint)
+	}
+	return genericRemediationHint
 }
 
 func sanitizeFailure(s string) string {
