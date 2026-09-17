@@ -102,7 +102,13 @@ func TestReconcileVerboseNoTraceIsGraceful(t *testing.T) {
 	_ = Run(context.Background(), []string{"reconcile", "--verbose"}, strings.NewReader(""), stdout, io.Discard, Dependencies{
 		Mutator: spy, Diagnoser: spy, Environment: func() map[string]string { return nil },
 	})
-	if !strings.Contains(stdout.String(), "(no trace data)") {
-		t.Fatalf("expected graceful no-trace message:\n%s", stdout.String())
+	// The per-target document renders even without trace data; it just omits
+	// the trace sections.
+	out := stdout.String()
+	if !strings.Contains(out, "=== target global ===") || !strings.Contains(out, "outcome: applied") {
+		t.Fatalf("expected graceful per-target document:\n%s", out)
+	}
+	if strings.Contains(out, "provider modes:") || strings.Contains(out, "chains:") || strings.Contains(out, "edits:") {
+		t.Fatalf("trace sections rendered without trace data:\n%s", out)
 	}
 }

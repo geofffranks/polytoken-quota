@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -440,6 +441,32 @@ func TestDoctorSurfacesPersistedManualResolutionFailure(t *testing.T) {
 	r := Run(context.Background(), Dependencies{Observed: observed, Now: time.Now})
 	if !r.Actionable() || !slices.Contains(findingCodes(r), "target-pending") {
 		t.Fatalf("report did not surface persisted failure: %+v", r)
+	}
+}
+
+// TestDoctorPendingFindingCarriesNoDiagnosticFields is AC6's doctor half:
+// doctor renders only persisted ApplyFailure fields, so the ephemeral full
+// CommandDiagnostic can never surface in its findings — text or JSON.
+func TestDoctorPendingFindingCarriesNoDiagnosticFields(t *testing.T) {
+	observed := state.State{Schema: 1, Providers: map[string]state.ProviderState{}, Targets: map[string]state.TargetState{
+		"global": {Pending: &state.ApplyFailure{
+			TargetID: "global", Stage: "doctor", Summary: "doctor: bounded summary",
+			Remediation: "re-run", LiveStatus: "last-known-good",
+		}},
+	}}
+	r := Run(context.Background(), Dependencies{Observed: observed, Now: time.Now})
+	f := pendingFinding(t, r)
+	raw, err := json.Marshal(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"FullOutput", "Diagnostic", "Truncated"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("doctor finding carries diagnostic field %q: %s", forbidden, raw)
+		}
+	}
+	if !strings.Contains(f.Message, "doctor: bounded summary") {
+		t.Fatalf("finding lost the persisted summary: %q", f.Message)
 	}
 }
 
