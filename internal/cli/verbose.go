@@ -90,7 +90,7 @@ func writeVerboseError(w io.Writer, err error) {
 		return
 	}
 	fmt.Fprintln(w, "error (sanitized):")
-	for _, line := range strings.Split(strings.TrimSuffix(validate.InternalDiagnostic("reconcile", err).FullOutput, "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(validate.InternalDiagnostic("reconcile", err).FullOutput, "\n"), "\n") {
 		fmt.Fprintf(w, "    %s\n", line)
 	}
 }
