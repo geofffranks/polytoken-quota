@@ -1,8 +1,10 @@
 package cli
 
-// Verbose reconcile trace rendering. Writes the decision data captured in
-// TargetOutcome.Trace as human-readable text on stdout so the user can see
-// exactly why each target's config did or did not change.
+// Verbose reconcile rendering. Under --verbose each target reports only its
+// outcome; a pending target additionally shows the full sanitized failing
+// surface, labeled by who failed, so the actual error is never buried under
+// decision detail. All data is sanitized at the source; only the capture cap
+// bounds its length.
 
 import (
 	"fmt"
@@ -13,19 +15,15 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
-// writeVerboseTrace renders the full per-target verbose reconcile report on
-// stdout: per target the outcome, the full sanitized failing surface labeled
-// by who failed — `polytoken doctor failed:` for external doctor output,
-// `polytoken-quota validation failed:` for external config-validate and
-// quota-own failures — plus remediation, any retained staging root, and —
-// when traces were populated — the decision data (provider modes, routing
-// ranking, chain survivors, edits). Transact-level failures that occur before
-// any target exists render as a single failure document. All data is
-// sanitized at the source; only the capture cap bounds its length.
+// writeVerboseTrace renders the per-target verbose reconcile report on stdout.
+// Applied targets print only their outcome. Pending targets print their
+// outcome plus the full sanitized failure — `polytoken doctor failed:` for
+// external doctor output, `polytoken-quota validation failed:` for external
+// config-validate and quota-own failures — and any retained staging root.
+// Transact-level failures that occur before any target exists render as a
+// single failure document.
 func writeVerboseTrace(w io.Writer, o service.Outcome) {
 	if !o.Accepted {
-		// Pre-validation failures (policy load, target resolution) have no
-		// targets and no trace; show only the reason, nothing redundant.
 		fmt.Fprintln(w, "=== reconcile ===")
 		writeVerboseError(w, o.Error)
 		return
@@ -44,21 +42,12 @@ func writeVerboseTrace(w io.Writer, o service.Outcome) {
 			// text (newlines intact), never `%q`-escaped.
 			fmt.Fprintf(w, "  reason: %s\n", validate.DefaultSanitize([]byte(tgt.Pending.Summary)))
 		}
-		if tgt.Pending != nil && tgt.Pending.Remediation != "" {
-			fmt.Fprintf(w, "remediation: %s\n", validate.DefaultSanitize([]byte(tgt.Pending.Remediation)))
-		}
 		if tgt.StagingRoot != "" {
 			// Verbatim, not sanitizer-wrapped: the root is a tool-generated
-			// path under the OS temp dir (the previous stderr line printed it
-			// raw too), and the operator needs it to inspect the retained
-			// candidate — the sanitizer's temp-path rule would erase it.
+			// path under the OS temp dir, and the operator needs it to inspect
+			// the retained candidate — the sanitizer's temp-path rule would
+			// erase it.
 			fmt.Fprintf(w, "retained staging root: %s\n", tgt.StagingRoot)
-		}
-		if tgt.Trace != nil {
-			writeProviderModes(w, tgt.Trace)
-			writeRanking(w, tgt.Trace)
-			writeChains(w, tgt.Trace)
-			writeEdits(w, tgt.Trace)
 		}
 	}
 	writeVerboseError(w, o.Error)
@@ -94,63 +83,5 @@ func writeVerboseError(w io.Writer, err error) {
 	fmt.Fprintln(w, "polytoken-quota validation failed:")
 	for _, line := range strings.Split(strings.TrimRight(validate.InternalDiagnostic("reconcile", err).FullOutput, "\n"), "\n") {
 		fmt.Fprintf(w, "    %s\n", line)
-	}
-}
-
-func writeProviderModes(w io.Writer, tr *service.ReconcileTrace) {
-	if len(tr.ProviderModes) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "  provider modes:")
-	for _, pm := range tr.ProviderModes {
-		fmt.Fprintf(w, "    %s: %s (%s)\n",
-			validate.DefaultSanitize([]byte(pm.MappingID)),
-			pm.Mode, pm.Reason)
-	}
-}
-
-func writeRanking(w io.Writer, tr *service.ReconcileTrace) {
-	if len(tr.Ranking) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "  routing ranking:")
-	for _, e := range tr.Ranking {
-		elig := "eligible"
-		if !e.Eligible {
-			elig = "ineligible"
-		}
-		fmt.Fprintf(w, "    %s: rank=%d %s — %s\n",
-			validate.DefaultSanitize([]byte(e.MappingID)),
-			e.Rank, elig, e.Explanation)
-	}
-}
-
-func writeChains(w io.Writer, tr *service.ReconcileTrace) {
-	if len(tr.Chains) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "  chains:")
-	for _, ch := range tr.Chains {
-		fmt.Fprintf(w, "    %s:\n", validate.DefaultSanitize([]byte(ch.Name)))
-		fmt.Fprintf(w, "      desired:  %s\n", strings.Join(ch.Desired, " → "))
-		fmt.Fprintf(w, "      survived: %s\n", strings.Join(ch.Survived, " → "))
-		if len(ch.Dropped) > 0 {
-			fmt.Fprintf(w, "      dropped:  %s\n", strings.Join(ch.Dropped, ", "))
-		}
-	}
-}
-
-func writeEdits(w io.Writer, tr *service.ReconcileTrace) {
-	if len(tr.Edits) == 0 {
-		fmt.Fprintln(w, "  edits: (none)")
-		return
-	}
-	fmt.Fprintln(w, "  edits:")
-	for _, ed := range tr.Edits {
-		fmt.Fprintf(w, "    %s %s: %s = %s\n",
-			validate.DefaultSanitize([]byte(ed.File)),
-			ed.Action,
-			strings.Join(ed.Path, "."),
-			validate.DefaultSanitize([]byte(ed.Detail)))
 	}
 }

@@ -189,6 +189,12 @@ func TestReconcileVerboseDoctorFailurePrintsFullOutput(t *testing.T) {
 	if strings.Contains(out, "…[truncated]…") {
 		t.Fatalf("verbose document must not carry the persisted-summary elision marker:\n%s", out)
 	}
+	// A pending target shows only its error: no remediation, no decision detail.
+	for _, absent := range []string{"remediation:", "provider modes:", "routing ranking:", "chains:", "edits:"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("pending target rendered %q:\n%s", absent, out)
+		}
+	}
 }
 
 // TestReconcileVerboseQuotaOwnError is AC2: quota-own failures (render/stage/
@@ -223,6 +229,11 @@ func TestReconcileVerboseQuotaOwnError(t *testing.T) {
 			}
 			if !strings.Contains(out, chain) {
 				t.Fatalf("full error chain not rendered:\n%s", out)
+			}
+			for _, absent := range []string{"remediation:", "provider modes:", "routing ranking:", "chains:", "edits:"} {
+				if strings.Contains(out, absent) {
+					t.Fatalf("pending target rendered %q:\n%s", absent, out)
+				}
 			}
 		})
 	}
@@ -285,6 +296,9 @@ func TestReconcileVerboseDryRunQuotaOwnError(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run quota-own document missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "remediation:") {
+		t.Fatalf("dry-run quota-own pending rendered remediation:\n%s", out)
 	}
 }
 

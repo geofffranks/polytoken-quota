@@ -31,6 +31,8 @@ func TestReconcileVerboseWithDryRun(t *testing.T) {
 }
 
 func TestReconcileVerboseRendersTrace(t *testing.T) {
+	// Applied targets report only their outcome: the decision detail
+	// (provider modes, ranking, chains, edits) is deliberately not rendered.
 	mode := "normal"
 	spy := &verboseOutcomeSpy{}
 	spy.outcome = service.Outcome{
@@ -66,17 +68,13 @@ func TestReconcileVerboseRendersTrace(t *testing.T) {
 		t.Fatalf("exit=%d want %d (stderr=%q)", code, ExitOK, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "provider modes:") {
-		t.Fatalf("missing provider modes in verbose output:\n%s", out)
+	if !strings.Contains(out, "=== target global ===") || !strings.Contains(out, "outcome: applied") {
+		t.Fatalf("missing applied outcome report:\n%s", out)
 	}
-	if !strings.Contains(out, "codex") {
-		t.Fatalf("missing codex in verbose output:\n%s", out)
-	}
-	if !strings.Contains(out, "chains:") {
-		t.Fatalf("missing chains in verbose output:\n%s", out)
-	}
-	if !strings.Contains(out, "edits:") {
-		t.Fatalf("missing edits in verbose output:\n%s", out)
+	for _, absent := range []string{"provider modes:", "routing ranking:", "chains:", "edits:", "remediation:"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("applied target rendered detail %q:\n%s", absent, out)
+		}
 	}
 }
 

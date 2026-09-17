@@ -890,11 +890,13 @@ func TestReconcileDryRunReportsPendingAndRetainedStaging(t *testing.T) {
 			"outcome: pending (stage=config_validate)",
 			"polytoken-quota validation failed:",
 			"config validate: invalid model",
-			"remediation: inspect staged config",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("verbose dry-run document missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, "remediation:") || strings.Contains(out, "provider modes:") {
+			t.Fatalf("verbose dry-run pending rendered remediation or detail:\n%s", out)
 		}
 	})
 
