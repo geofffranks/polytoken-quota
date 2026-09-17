@@ -26,7 +26,7 @@ func TestCaptureBudgetTruncatedFlag(t *testing.T) {
 		if budget.isTruncated() {
 			t.Fatalf("exact-cap fill reported truncated=true")
 		}
-		if got := fullOutput("out", budget.isTruncated()); strings.Contains(got, truncationMarker()) {
+		if got := fullOutput(defaultMaxOutput, "out", budget.isTruncated()); strings.Contains(got, truncationMarker(defaultMaxOutput)) {
 			t.Fatalf("exact-cap fill composed a truncation marker: %q", got)
 		}
 	})
@@ -43,8 +43,8 @@ func TestCaptureBudgetTruncatedFlag(t *testing.T) {
 		if !budget.isTruncated() {
 			t.Fatalf("clipped write reported truncated=false")
 		}
-		got := fullOutput("out", budget.isTruncated())
-		if !strings.HasSuffix(got, truncationMarker()+"\n") {
+		got := fullOutput(defaultMaxOutput, "out", budget.isTruncated())
+		if !strings.HasSuffix(got, truncationMarker(defaultMaxOutput)+"\n") {
 			t.Fatalf("clipped output missing terminal truncation marker: %q", got)
 		}
 	})
@@ -74,14 +74,19 @@ func TestCaptureBudgetTruncatedFlag(t *testing.T) {
 		}
 	})
 
-	t.Run("marker_states_the_capture_cap", func(t *testing.T) {
-		if want := "…[output truncated at 262144 bytes]…"; truncationMarker() != want {
-			t.Fatalf("truncationMarker()=%q want %q", truncationMarker(), want)
+	t.Run("marker_states_the_applied_capture_cap", func(t *testing.T) {
+		if want := "…[output truncated at 262144 bytes]…"; truncationMarker(defaultMaxOutput) != want {
+			t.Fatalf("truncationMarker(defaultMaxOutput)=%q want %q", truncationMarker(defaultMaxOutput), want)
+		}
+		// The marker names the cap that bound the run, not a fixed constant.
+		small := truncationMarker(64)
+		if !strings.Contains(small, "64") || !strings.HasPrefix(small, "…[output truncated at ") {
+			t.Fatalf("truncationMarker(%d)=%q does not state its cap", 64, small)
 		}
 	})
 
 	t.Run("full_output_without_truncation_is_unchanged", func(t *testing.T) {
-		if got := fullOutput("plain output", false); got != "plain output" {
+		if got := fullOutput(128, "plain output", false); got != "plain output" {
 			t.Fatalf("fullOutput=%q want unchanged input", got)
 		}
 	})

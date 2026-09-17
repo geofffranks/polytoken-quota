@@ -38,7 +38,7 @@ func TestValidateDiagnosticCarriesFullOutput(t *testing.T) {
 	if got.Diagnostic.FullOutput != long {
 		t.Fatalf("full output length=%d want %d (bounded or altered?)", len(got.Diagnostic.FullOutput), len(long))
 	}
-	if strings.Contains(got.Diagnostic.FullOutput, summaryElision) || strings.Contains(got.Diagnostic.FullOutput, truncationMarker()) {
+	if strings.Contains(got.Diagnostic.FullOutput, summaryElision) || strings.Contains(got.Diagnostic.FullOutput, truncationMarker(4096)) {
 		t.Fatalf("full output carries a summary-bound or truncation marker")
 	}
 	// Persisted: the summary keeps the 1024-byte head+tail bound.
@@ -68,7 +68,8 @@ func TestValidateDiagnosticTruncationMarker(t *testing.T) {
 	if !got.Diagnostic.Truncated {
 		t.Fatalf("diagnostic lost the runner's truncation flag: %+v", got.Diagnostic)
 	}
-	if !strings.HasSuffix(got.Diagnostic.FullOutput, truncationMarker()+"\n") {
+	// newRunner bounds at 4096, so the marker must name that cap.
+	if !strings.HasSuffix(got.Diagnostic.FullOutput, truncationMarker(4096)+"\n") {
 		t.Fatalf("truncated capture did not append the terminal marker: %q", got.Diagnostic.FullOutput)
 	}
 	if !strings.Contains(got.Diagnostic.FullOutput, "boom") {

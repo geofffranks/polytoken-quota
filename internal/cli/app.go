@@ -443,9 +443,9 @@ func dryRunExitCode(o service.Outcome) int {
 }
 
 // writePendingTargets prints each pending target's stage/summary/remediation to
-// stderr, sanitized via validate.DefaultSanitize. Shared by runCheck and
-// runReconcile's dry-run path so both surfaces explain why an accepted outcome
-// is still pending.
+// stderr, sanitized via validate.DefaultSanitize. Used by runCheck; reconcile's
+// dry-run path no longer calls it (a quiet reconcile prints nothing — pending
+// detail renders only inside the --verbose document).
 func writePendingTargets(o service.Outcome, stderr io.Writer) {
 	for _, target := range o.Targets {
 		if target.Pending != nil {

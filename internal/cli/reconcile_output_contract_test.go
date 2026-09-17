@@ -250,6 +250,41 @@ func TestReconcileVerboseDryRunTransactError(t *testing.T) {
 	}
 }
 
+// TestReconcileVerboseDryRunQuotaOwnError closes the uncovered matrix cell: a
+// quota-own (render/stage/publish) pending under --dry-run --verbose renders
+// the full sanitized error chain on stdout and exits 0 (a dry-run pending is
+// not a failure exit).
+func TestReconcileVerboseDryRunQuotaOwnError(t *testing.T) {
+	chain := "render: failed to materialize candidate"
+	spy := &outcomeSpy{outcome: service.Outcome{
+		Accepted: true,
+		Targets: []service.TargetOutcome{{
+			TargetID: "global",
+			Pending: &state.ApplyFailure{
+				Stage:       "render",
+				Summary:     "bounded summary",
+				Remediation: "resolve the pending error and re-run reconcile",
+			},
+			Diagnostic: &validate.CommandDiagnostic{Stage: "render", FullOutput: chain},
+		}},
+	}}
+	stdout := &strings.Builder{}
+	stderr := &strings.Builder{}
+	code := Run(context.Background(), []string{"reconcile", "--dry-run", "--verbose"}, strings.NewReader(""), stdout, stderr, spy.Dependencies())
+	if code != ExitOK {
+		t.Fatalf("exit=%d want %d", code, ExitOK)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("verbose document must stay on stdout, got stderr=%q", stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"=== target global ===", "outcome: pending (stage=render)", "error (render, sanitized):", chain} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("dry-run quota-own document missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestCheckOutputUnchangedGolden is AC5: pins check's non-JSON output —
 // including the shared writePendingTargets one-liners — so the reconcile
 // silencing cannot drift it.

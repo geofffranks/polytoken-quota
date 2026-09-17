@@ -131,22 +131,24 @@ const defaultMaxOutput int64 = 262144
 
 // truncationMarker returns the terminal marker line appended to full
 // diagnostic output when capture actually dropped or clipped bytes. It states
-// the capture cap — the number of dropped bytes is unknowable once gone.
-func truncationMarker() string {
-	return fmt.Sprintf("…[output truncated at %d bytes]…", defaultMaxOutput)
+// the capture cap that applied — the number of dropped bytes is unknowable
+// once gone — so the marker always reflects the cap that actually bounded the
+// run, not a fixed constant.
+func truncationMarker(max int64) string {
+	return fmt.Sprintf("…[output truncated at %d bytes]…", max)
 }
 
 // fullOutput composes terminal full diagnostic output: the sanitized text,
 // with the truncation marker appended as a terminal line when and only when
-// capture dropped or clipped bytes.
-func fullOutput(sanitized string, truncated bool) string {
+// capture dropped or clipped bytes. The marker names the cap that applied.
+func fullOutput(max int64, sanitized string, truncated bool) string {
 	if !truncated {
 		return sanitized
 	}
 	if sanitized != "" && !strings.HasSuffix(sanitized, "\n") {
 		sanitized += "\n"
 	}
-	return sanitized + truncationMarker() + "\n"
+	return sanitized + truncationMarker(max) + "\n"
 }
 
 // maxSummaryBytes bounds the length of a persisted sanitized summary.
@@ -235,7 +237,7 @@ func (r Runner) fail(stage Stage, stdout, stderr []byte, exit int, truncated boo
 		},
 		&CommandDiagnostic{
 			Stage:      stage,
-			FullOutput: fullOutput(sanitized, truncated),
+			FullOutput: fullOutput(r.maxOutput(), sanitized, truncated),
 			Truncated:  truncated,
 			ExitCode:   exit,
 		}

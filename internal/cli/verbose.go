@@ -84,13 +84,15 @@ func writeVerboseDiagnostic(w io.Writer, d *validate.CommandDiagnostic) {
 // writeVerboseError renders the outcome-level error — a transact-level failure
 // such as policy load, target resolution, or state save — with the unbounded
 // sanitizer, so verbose output is not squeezed into the persisted-summary
-// bound.
+// bound. Multi-line chains render indented like per-target diagnostics.
 func writeVerboseError(w io.Writer, err error) {
 	if err == nil {
 		return
 	}
 	fmt.Fprintln(w, "error (sanitized):")
-	fmt.Fprintf(w, "    %s\n", validate.InternalDiagnostic("reconcile", err).FullOutput)
+	for _, line := range strings.Split(strings.TrimSuffix(validate.InternalDiagnostic("reconcile", err).FullOutput, "\n"), "\n") {
+		fmt.Fprintf(w, "    %s\n", line)
+	}
 }
 
 func writeProviderModes(w io.Writer, tr *service.ReconcileTrace) {
