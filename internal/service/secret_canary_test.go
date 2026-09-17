@@ -106,6 +106,13 @@ func canaryValidationFailure(t *testing.T, root, canary, stageTmp, logsDir, sour
 	if strings.Contains(result.Error.Summary, canary) {
 		t.Fatalf("canary survived sanitization into summary: %q", result.Error.Summary)
 	}
+	// The full ephemeral diagnostic is sanitized with the same pipeline.
+	if result.Diagnostic == nil || result.Diagnostic.FullOutput == "" {
+		t.Fatal("expected a full sanitized diagnostic on validation failure")
+	}
+	if strings.Contains(result.Diagnostic.FullOutput, canary) {
+		t.Fatalf("canary survived sanitization into full output: %q", result.Diagnostic.FullOutput)
+	}
 	// Simulate persisting the diagnostic to logs (as status/doctor would).
 	testutil.WriteFile(t, filepath.Join(logsDir, "validation-failure.txt"), result.Error.Summary+"\n")
 }

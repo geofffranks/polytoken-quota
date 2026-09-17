@@ -30,14 +30,16 @@ import (
 // every Run call. FailAt (>=0) is the 0-based call index that exits non-zero;
 // -1 (the default via newSpy) disables failure. Block makes Run wait on the
 // context to exercise the shared timeout path. Stderr is the canned output
-// returned with a failure or timeout.
+// returned with a failure or timeout. Truncated is the canned truncation flag
+// (simulating a capture budget that dropped bytes).
 type commandSpy struct {
-	Args   [][]string
-	Envs   []map[string]string
-	FailAt int
-	Block  bool
-	Stderr []byte
-	calls  int
+	Args      [][]string
+	Envs      []map[string]string
+	FailAt    int
+	Block     bool
+	Stderr    []byte
+	Truncated bool
+	calls     int
 }
 
 func newSpy() *commandSpy { return &commandSpy{FailAt: -1} }
@@ -63,9 +65,9 @@ func (s *commandSpy) Run(ctx context.Context, name string, args []string, max in
 		return nil, canned, 0, false, ctx.Err()
 	}
 	if s.FailAt >= 0 && idx == s.FailAt {
-		return nil, canned, 1, false, errors.New("command exited non-zero")
+		return nil, canned, 1, s.Truncated, errors.New("command exited non-zero")
 	}
-	return nil, nil, 0, false, nil
+	return nil, nil, 0, s.Truncated, nil
 }
 
 // --- shared test helpers ----------------------------------------------------

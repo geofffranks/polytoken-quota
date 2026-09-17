@@ -55,11 +55,43 @@ type CommandError struct {
 
 // Result is the outcome of validating one candidate. ConfigValid is set when
 // `config validate` passes; StartupValid is set when both commands pass. Error
-// is non-nil on any failure.
+// is non-nil on any failure. Diagnostic carries the full sanitized output of
+// the failed stage for ephemeral verbose diagnostics; it is nil on success and
+// is never persisted.
 type Result struct {
 	ConfigValid  bool
 	StartupValid bool
 	Error        *CommandError
+	Diagnostic   *CommandDiagnostic
+}
+
+// CommandDiagnostic is the ephemeral, human-readable record of one failed
+// step: the full sanitized output — bounded only by the capture cap, never by
+// the persisted-summary bound — plus whether capture dropped bytes. It is
+// carried out of validate for `reconcile --verbose` rendering and is never
+// persisted to state, history, or any other durable artifact.
+type CommandDiagnostic struct {
+	Stage      Stage
+	FullOutput string
+	Truncated  bool
+	ExitCode   int
+}
+
+// InternalDiagnostic builds a CommandDiagnostic for a polytoken-quota-own
+// failure (render/stage/publish) that never ran an external command. The
+// error chain is redacted with the same unbounded sanitizer as captured
+// command output, so verbose diagnostics can show the full sanitized error;
+// any persisted summary keeps its separate 1024-byte bound. ExitCode is 0:
+// no external process ran.
+func InternalDiagnostic(stage Stage, err error) CommandDiagnostic {
+	msg := ""
+	if err != nil {
+		msg = err.Error()
+	}
+	return CommandDiagnostic{
+		Stage:      stage,
+		FullOutput: sanitizeOutput([]byte(msg)),
+	}
 }
 
 // Runner validates a single staged candidate. Binary is the Polytoken executable
@@ -165,35 +197,48 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	defer cancel()
 
 	// Stage 1: config validate.
-	out, errOut, exit, _, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
+	out, errOut, exit, truncated, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
-		return Result{Error: r.fail(ConfigValidate, out, errOut, exit, timedOut)}
+		cmdErr, diag := r.fail(ConfigValidate, out, errOut, exit, truncated, timedOut)
+		return Result{Error: cmdErr, Diagnostic: diag}
 	}
 
 	// Stage 2: doctor (only after config validation passed).
-	out, errOut, exit, _, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
+	out, errOut, exit, truncated, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
-		return Result{ConfigValid: true, Error: r.fail(Doctor, out, errOut, exit, timedOut)}
+		cmdErr, diag := r.fail(Doctor, out, errOut, exit, truncated, timedOut)
+		return Result{ConfigValid: true, Error: cmdErr, Diagnostic: diag}
 	}
 
 	_ = c.Cleanup()
 	return Result{ConfigValid: true, StartupValid: true}
 }
 
-// fail builds a sanitized CommandError for one failed stage. The summary bound
-// applies to the final composed string so the coarse command prefix fits.
-func (r Runner) fail(stage Stage, stdout, stderr []byte, exit int, timedOut bool) *CommandError {
+// fail builds the sanitized persisted CommandError and the ephemeral full
+// CommandDiagnostic for one failed stage. The persisted summary bound applies
+// to the final composed string so the coarse command prefix fits; the
+// diagnostic's full output is bounded only by the capture cap (plus the
+// truncation marker when capture dropped bytes), and both carry the same
+// injectable sanitizer so tests and production share one redaction path.
+func (r Runner) fail(stage Stage, stdout, stderr []byte, exit int, truncated bool, timedOut bool) (*CommandError, *CommandDiagnostic) {
 	combined := append(append([]byte(nil), stdout...), stderr...)
+	sanitized := r.sanitizer()(combined)
 	return &CommandError{
-		Stage:       stage,
-		Summary:     boundSummary(summarize(stage, r.sanitizer()(combined), exit)),
-		TimedOut:    timedOut,
-		Remediation: remediation(stage, timedOut),
-	}
+			Stage:       stage,
+			Summary:     boundSummary(summarize(stage, sanitized, exit)),
+			TimedOut:    timedOut,
+			Remediation: remediation(stage, timedOut),
+		},
+		&CommandDiagnostic{
+			Stage:      stage,
+			FullOutput: fullOutput(sanitized, truncated),
+			Truncated:  truncated,
+			ExitCode:   exit,
+		}
 }
 
 func (r Runner) maxOutput() int64 {

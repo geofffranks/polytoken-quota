@@ -971,9 +971,13 @@ func appliedOutcome(id string, rev uint64) TargetOutcome {
 // never appear for non-staging failures. Doctor backfills empty remediation
 // only at display time — this field is the persisted value.
 func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcome {
+	// Build the ephemeral full sanitized error chain for verbose diagnostics;
+	// the persisted ApplyFailure below keeps DefaultSanitize's bounded summary.
+	diag := validate.InternalDiagnostic(validate.Stage(stage), err)
 	return TargetOutcome{
 		TargetID:          id,
 		AttemptedRevision: rev,
+		Diagnostic:        &diag,
 		Pending: &state.ApplyFailure{
 			TargetID:          sanitizeFailure(id),
 			Stage:             sanitizeFailure(stage),
@@ -1049,6 +1053,9 @@ func pendingValidate(id string, rev uint64, attemptedAt time.Time, result valida
 	return TargetOutcome{
 		TargetID:          id,
 		AttemptedRevision: rev,
+		// Mirror the full sanitized validation output onto the ephemeral
+		// outcome; the persisted ApplyFailure below keeps the bounded summary.
+		Diagnostic: result.Diagnostic,
 		Pending: &state.ApplyFailure{
 			TargetID:          sanitizeFailure(id),
 			Stage:             sanitizeFailure(stage),
