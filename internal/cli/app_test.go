@@ -888,7 +888,7 @@ func TestReconcileDryRunReportsPendingAndRetainedStaging(t *testing.T) {
 		for _, want := range []string{
 			"=== target global ===",
 			"outcome: pending (stage=config_validate)",
-			"validation output (config_validate, sanitized):",
+			"polytoken-quota validation failed:",
 			"config validate: invalid model",
 			"remediation: inspect staged config",
 		} {
@@ -962,7 +962,7 @@ func TestMutationErrorsArePrinted(t *testing.T) {
 			t.Fatalf("exit=%d want=%d", got, ExitRejected)
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "error (sanitized):") || !strings.Contains(out, "source reader unavailable") {
+		if !strings.Contains(out, "polytoken-quota validation failed:") || !strings.Contains(out, "source reader unavailable") {
 			t.Fatalf("verbose reconcile missing error detail:\n%s", out)
 		}
 	})

@@ -177,14 +177,14 @@ func TestReconcileVerboseDoctorFailurePrintsFullOutput(t *testing.T) {
 	if !strings.Contains(out, "=== target global ===") || !strings.Contains(out, "outcome: pending (stage=doctor)") {
 		t.Fatalf("missing target document header:\n%s", out)
 	}
-	if !strings.Contains(out, "validation output (doctor, sanitized):") {
-		t.Fatalf("missing validation output section:\n%s", out)
+	if !strings.Contains(out, "polytoken doctor failed:") {
+		t.Fatalf("missing doctor failure section:\n%s", out)
 	}
 	if got := strings.Count(out, "doctor detail line"); got != 300 {
 		t.Fatalf("full doctor output not rendered in full: %d of 300 detail lines in %d bytes of stdout:\n%s", got, len(out), out)
 	}
-	if strings.Count(out, "validation output (doctor, sanitized):") != 1 {
-		t.Fatalf("validation output section rendered more than once:\n%s", out)
+	if strings.Count(out, "polytoken doctor failed:") != 1 {
+		t.Fatalf("doctor failure section rendered more than once:\n%s", out)
 	}
 	if strings.Contains(out, "…[truncated]…") {
 		t.Fatalf("verbose document must not carry the persisted-summary elision marker:\n%s", out)
@@ -218,8 +218,8 @@ func TestReconcileVerboseQuotaOwnError(t *testing.T) {
 				t.Fatalf("exit=%d want %d", code, ExitPending)
 			}
 			out := stdout.String()
-			if !strings.Contains(out, "error ("+stage+", sanitized):") {
-				t.Fatalf("missing quota-own error section:\n%s", out)
+			if strings.Count(out, "polytoken-quota validation failed:") != 1 {
+				t.Fatalf("missing quota-own failure section:\n%s", out)
 			}
 			if !strings.Contains(out, chain) {
 				t.Fatalf("full error chain not rendered:\n%s", out)
@@ -243,7 +243,7 @@ func TestReconcileVerboseDryRunTransactError(t *testing.T) {
 		t.Fatalf("verbose document must stay on stdout, got stderr=%q", stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"=== reconcile ===", "outcome: not accepted", "error (sanitized):", "resolve targets: root missing"} {
+	for _, want := range []string{"=== reconcile ===", "outcome: not accepted", "polytoken-quota validation failed:", "resolve targets: root missing"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("transact error document missing %q:\n%s", want, out)
 		}
@@ -278,7 +278,7 @@ func TestReconcileVerboseDryRunQuotaOwnError(t *testing.T) {
 		t.Fatalf("verbose document must stay on stdout, got stderr=%q", stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"=== target global ===", "outcome: pending (stage=render)", "error (render, sanitized):", chain} {
+	for _, want := range []string{"=== target global ===", "outcome: pending (stage=render)", "polytoken-quota validation failed:", chain} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dry-run quota-own document missing %q:\n%s", want, out)
 		}

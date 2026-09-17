@@ -14,13 +14,14 @@ import (
 )
 
 // writeVerboseTrace renders the full per-target verbose reconcile report on
-// stdout: per target the outcome, the full sanitized validation output (or the
-// sanitized error chain of a polytoken-quota-own failure), remediation, any
-// retained staging root, and — when traces were populated — the decision data
-// (provider modes, routing ranking, chain survivors, edits). Transact-level
-// failures that occur before any target exists render as a single error
-// document. All data is sanitized at the source; only the capture cap bounds
-// its length.
+// stdout: per target the outcome, the full sanitized failing surface labeled
+// by who failed — `polytoken doctor failed:` for external doctor output,
+// `polytoken-quota validation failed:` for external config-validate and
+// quota-own failures — plus remediation, any retained staging root, and —
+// when traces were populated — the decision data (provider modes, routing
+// ranking, chain survivors, edits). Transact-level failures that occur before
+// any target exists render as a single failure document. All data is
+// sanitized at the source; only the capture cap bounds its length.
 func writeVerboseTrace(w io.Writer, o service.Outcome) {
 	if !o.Accepted {
 		fmt.Fprintln(w, "=== reconcile ===")
@@ -38,8 +39,9 @@ func writeVerboseTrace(w io.Writer, o service.Outcome) {
 		writeVerboseDiagnostic(w, tgt.Diagnostic)
 		if tgt.Pending != nil && (tgt.Diagnostic == nil || tgt.Diagnostic.FullOutput == "") {
 			// Defensive fallback mirroring summarize: a pending without a full
-			// diagnostic still shows its bounded sanitized one-liner.
-			fmt.Fprintf(w, "  summary: %q\n", validate.DefaultSanitize([]byte(tgt.Pending.Summary)))
+			// diagnostic still shows its bounded sanitized one-liner as real
+			// text (newlines intact), never `%q`-escaped.
+			fmt.Fprintf(w, "  reason: %s\n", validate.DefaultSanitize([]byte(tgt.Pending.Summary)))
 		}
 		if tgt.Pending != nil && tgt.Pending.Remediation != "" {
 			fmt.Fprintf(w, "remediation: %s\n", validate.DefaultSanitize([]byte(tgt.Pending.Remediation)))
@@ -61,35 +63,34 @@ func writeVerboseTrace(w io.Writer, o service.Outcome) {
 	writeVerboseError(w, o.Error)
 }
 
-// writeVerboseDiagnostic renders one target's ephemeral full diagnostic.
-// External validation output (config_validate/doctor stages) is labeled as
-// validation output; any other stage is a polytoken-quota-own failure and is
-// labeled as an error. The truncation marker, when present, is the diagnostic's
-// terminal line and renders with the rest.
+// writeVerboseDiagnostic renders one target's ephemeral full diagnostic with
+// real newlines, labeled by who failed: external `polytoken doctor` output, or
+// every other reconciliation problem (external `config validate` and
+// polytoken-quota's own render/stage/publish errors).
 func writeVerboseDiagnostic(w io.Writer, d *validate.CommandDiagnostic) {
 	if d == nil || d.FullOutput == "" {
 		return
 	}
 	switch d.Stage {
-	case validate.ConfigValidate, validate.Doctor:
-		fmt.Fprintf(w, "validation output (%s, sanitized):\n", d.Stage)
+	case validate.Doctor:
+		fmt.Fprintln(w, "polytoken doctor failed:")
 	default:
-		fmt.Fprintf(w, "error (%s, sanitized):\n", d.Stage)
+		fmt.Fprintln(w, "polytoken-quota validation failed:")
 	}
-	for _, line := range strings.Split(strings.TrimSuffix(d.FullOutput, "\n"), "\n") {
+	for _, line := range strings.Split(strings.TrimRight(d.FullOutput, "\n"), "\n") {
 		fmt.Fprintf(w, "    %s\n", line)
 	}
 }
 
 // writeVerboseError renders the outcome-level error — a transact-level failure
-// such as policy load, target resolution, or state save — with the unbounded
-// sanitizer, so verbose output is not squeezed into the persisted-summary
-// bound. Multi-line chains render indented like per-target diagnostics.
+// such as policy load, target resolution, or state save — as a reconciliation
+// problem outside `polytoken doctor`, with the unbounded sanitizer and real
+// newlines.
 func writeVerboseError(w io.Writer, err error) {
 	if err == nil {
 		return
 	}
-	fmt.Fprintln(w, "error (sanitized):")
+	fmt.Fprintln(w, "polytoken-quota validation failed:")
 	for _, line := range strings.Split(strings.TrimRight(validate.InternalDiagnostic("reconcile", err).FullOutput, "\n"), "\n") {
 		fmt.Fprintf(w, "    %s\n", line)
 	}
