@@ -72,7 +72,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 			pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
 			outcomes = []TargetOutcome{pending}
 		} else {
-			outcomes = c.processTargets(ctx, desired, observed, next, targets, true)
+			outcomes = c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
 			next = c.retireSyntheticPendings(next)
 			appendRoutingChangeEvents(&next, desired, outcomes, c.now())
 			c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)

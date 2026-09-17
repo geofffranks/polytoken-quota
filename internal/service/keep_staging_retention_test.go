@@ -43,6 +43,14 @@ func (doctorFailingRunner) Run(_ context.Context, _ string, args []string, _ int
 // global target has drift (codex exhausted in persisted state, so the chain
 // reorders), mirroring the production wiring in cmd/polytoken-quota.
 func newRetentionHarness(t *testing.T) *Coordinator {
+	return newHarnessWithRunner(t, doctorFailingRunner{})
+}
+
+// newHarnessWithRunner builds the same real-collaborator coordinator as
+// newRetentionHarness but runs validation through the given command runner, so
+// tests can drive both applied (validation passes) and pending (validation
+// fails) outcomes through identical wiring.
+func newHarnessWithRunner(t *testing.T, runner validate.CommandRunner) *Coordinator {
 	t.Helper()
 	root := t.TempDir()
 
@@ -101,7 +109,7 @@ func newRetentionHarness(t *testing.T) *Coordinator {
 			AuthMode: staging.AuthInert,
 			Sources:  staging.FSMaterializer{GlobalDir: sourceDir},
 		}},
-		Validate: ValidateRunner{Runner: validate.Runner{Binary: "polytoken", Commands: doctorFailingRunner{}}},
+		Validate: ValidateRunner{Runner: validate.Runner{Binary: "polytoken", Commands: runner}},
 		Publish: PublisherAdapter{Publisher: publish.Publisher{
 			Locker:      publish.NewFileLock(lockPath),
 			State:       store,
