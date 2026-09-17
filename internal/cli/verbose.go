@@ -24,8 +24,9 @@ import (
 // sanitized at the source; only the capture cap bounds its length.
 func writeVerboseTrace(w io.Writer, o service.Outcome) {
 	if !o.Accepted {
+		// Pre-validation failures (policy load, target resolution) have no
+		// targets and no trace; show only the reason, nothing redundant.
 		fmt.Fprintln(w, "=== reconcile ===")
-		fmt.Fprintln(w, "outcome: not accepted")
 		writeVerboseError(w, o.Error)
 		return
 	}

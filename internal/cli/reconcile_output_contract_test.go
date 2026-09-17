@@ -243,10 +243,13 @@ func TestReconcileVerboseDryRunTransactError(t *testing.T) {
 		t.Fatalf("verbose document must stay on stdout, got stderr=%q", stderr.String())
 	}
 	out := stdout.String()
-	for _, want := range []string{"=== reconcile ===", "outcome: not accepted", "polytoken-quota validation failed:", "resolve targets: root missing"} {
+	for _, want := range []string{"=== reconcile ===", "polytoken-quota validation failed:", "resolve targets: root missing"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("transact error document missing %q:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "not accepted") || strings.Contains(out, "no trace") {
+		t.Fatalf("transact error document carried redundant outcome text:\n%s", out)
 	}
 }
 
