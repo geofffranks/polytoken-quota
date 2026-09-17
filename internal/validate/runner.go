@@ -36,10 +36,12 @@ const (
 
 // CommandRunner runs one external command under ctx, bounding the captured
 // stdout and stderr to at most max bytes combined, and returning the captured
-// bytes, the process exit code (0 on success, -1 when unavailable), and any
-// error. It is injectable so tests drive the validator without a real binary.
+// bytes, the process exit code (0 on success, -1 when unavailable), whether
+// any captured bytes were dropped or clipped by the bound (so a truncated
+// diagnostic never claims completeness), and any error. It is injectable so
+// tests drive the validator without a real binary.
 type CommandRunner interface {
-	Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error)
+	Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, truncated bool, err error)
 }
 
 // CommandError is the sanitized, persisted record of one failed stage. Summary
@@ -62,9 +64,9 @@ type Result struct {
 
 // Runner validates a single staged candidate. Binary is the Polytoken executable
 // path; Commands runs each command; MaxOutput bounds combined captured output
-// (defaults to 4096); Sanitize redacts captured output before persistence
-// without applying a length bound (defaults to sanitizeOutput) — the runner
-// composes the redactor with the head+tail summary bound itself.
+// (defaults to 262144 = 256 KiB); Sanitize redacts captured output before
+// persistence without applying a length bound (defaults to sanitizeOutput) — the
+// runner composes the redactor with the head+tail summary bound itself.
 type Runner struct {
 	Binary    string
 	Commands  CommandRunner
@@ -89,7 +91,31 @@ func (r Runner) envLookup() func(string) string {
 }
 
 // defaultMaxOutput bounds the combined stdout+stderr captured per command.
-const defaultMaxOutput int64 = 4096
+// The bound is a memory guard, not a presentation choice: full sanitized
+// output is surfaced to `reconcile --verbose` diagnostics, so it is generous
+// (256 KiB, matching the in-repo HistoryRecordEncodedBytes precedent) while
+// still bounding a runaway command.
+const defaultMaxOutput int64 = 262144
+
+// truncationMarker returns the terminal marker line appended to full
+// diagnostic output when capture actually dropped or clipped bytes. It states
+// the capture cap — the number of dropped bytes is unknowable once gone.
+func truncationMarker() string {
+	return fmt.Sprintf("…[output truncated at %d bytes]…", defaultMaxOutput)
+}
+
+// fullOutput composes terminal full diagnostic output: the sanitized text,
+// with the truncation marker appended as a terminal line when and only when
+// capture dropped or clipped bytes.
+func fullOutput(sanitized string, truncated bool) string {
+	if !truncated {
+		return sanitized
+	}
+	if sanitized != "" && !strings.HasSuffix(sanitized, "\n") {
+		sanitized += "\n"
+	}
+	return sanitized + truncationMarker() + "\n"
+}
 
 // maxSummaryBytes bounds the length of a persisted sanitized summary.
 const maxSummaryBytes = 1024
@@ -139,7 +165,7 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	defer cancel()
 
 	// Stage 1: config validate.
-	out, errOut, exit, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
+	out, errOut, exit, _, runErr := r.Commands.Run(runCtx, r.Binary, configValidateArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
@@ -147,7 +173,7 @@ func (r Runner) Validate(ctx context.Context, c staging.Candidate, timeout time.
 	}
 
 	// Stage 2: doctor (only after config validation passed).
-	out, errOut, exit, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
+	out, errOut, exit, _, runErr = r.Commands.Run(runCtx, r.Binary, doctorArgs(c), max, doctorEnv(r.Env, c, r.envLookup()))
 	if runErr != nil || exit != 0 {
 		timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded)
 		_ = c.Cleanup()
@@ -267,7 +293,7 @@ type ExecRunner struct{}
 // never merged in, so inherited credentials and account-bearing variables
 // cannot leak into the validation subprocess. Callers own including PATH and
 // any other variables the binary genuinely needs.
-func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error) {
+func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, truncated bool, err error) {
 	if max <= 0 {
 		max = defaultMaxOutput
 	}
@@ -282,15 +308,16 @@ func (ExecRunner) Run(ctx context.Context, name string, args []string, max int64
 
 	runErr := cmd.Run()
 	stdout, stderr = out.bytes(), errw.bytes()
+	truncated = budget.isTruncated()
 	if runErr != nil {
 		if ee, ok := runErr.(*exec.ExitError); ok {
 			exit = ee.ExitCode()
 		} else {
 			exit = -1
 		}
-		return stdout, stderr, exit, runErr
+		return stdout, stderr, exit, truncated, runErr
 	}
-	return stdout, stderr, 0, nil
+	return stdout, stderr, 0, truncated, nil
 }
 
 func exactEnvironment(env map[string]string) []string {
@@ -307,15 +334,26 @@ func exactEnvironment(env map[string]string) []string {
 }
 
 // captureBudget is the shared remaining byte budget for one command's combined
-// stdout+stderr. Both streams draw from it, bounding the total.
+// stdout+stderr. Both streams draw from it, bounding the total. truncated
+// records whether any write was dropped entirely or clipped partway — it is
+// written under the same mutex and read only after the command has exited and
+// both writer goroutines have joined.
 type captureBudget struct {
 	mu        sync.Mutex
 	remaining int64
+	truncated bool
+}
+
+// isTruncated reports whether capture dropped or clipped any bytes.
+func (b *captureBudget) isTruncated() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.truncated
 }
 
 // boundedWriter appends to an internal buffer until the shared budget is
-// exhausted, then silently drops further bytes (still reporting a full write so
-// the command is not perturbed by an error).
+// exhausted, then records the drop or clip and discards further bytes (still
+// reporting a full write so the command is not perturbed by an error).
 type boundedWriter struct {
 	budget *captureBudget
 	buf    bytes.Buffer
@@ -325,11 +363,15 @@ func (w *boundedWriter) Write(p []byte) (int, error) {
 	w.budget.mu.Lock()
 	defer w.budget.mu.Unlock()
 	if w.budget.remaining <= 0 {
+		if len(p) > 0 {
+			w.budget.truncated = true
+		}
 		return len(p), nil
 	}
 	n := int64(len(p))
 	if n > w.budget.remaining {
 		n = w.budget.remaining
+		w.budget.truncated = true
 	}
 	w.buf.Write(p[:n])
 	w.budget.remaining -= n

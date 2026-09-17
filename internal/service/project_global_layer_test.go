@@ -26,13 +26,13 @@ import (
 // retained for inspection), standing in for the real Polytoken binary.
 type projectDoctorFailRunner struct{}
 
-func (projectDoctorFailRunner) Run(_ context.Context, _ string, args []string, _ int64, _ map[string]string) ([]byte, []byte, int, error) {
+func (projectDoctorFailRunner) Run(_ context.Context, _ string, args []string, _ int64, _ map[string]string) ([]byte, []byte, int, bool, error) {
 	for _, a := range args {
 		if a == "doctor" {
-			return []byte("doctor: simulated failure"), nil, 1, nil
+			return []byte("doctor: simulated failure"), nil, 1, false, nil
 		}
 	}
-	return nil, nil, 0, nil
+	return nil, nil, 0, false, nil
 }
 
 // projectGlobalHarness builds a real-collaborator coordinator with one global

@@ -30,13 +30,13 @@ import (
 // pending that the keep-staging remediation text targets.
 type doctorFailingRunner struct{}
 
-func (doctorFailingRunner) Run(_ context.Context, _ string, args []string, _ int64, _ map[string]string) (stdout, stderr []byte, exit int, err error) {
+func (doctorFailingRunner) Run(_ context.Context, _ string, args []string, _ int64, _ map[string]string) (stdout, stderr []byte, exit int, truncated bool, err error) {
 	for _, a := range args {
 		if a == "doctor" {
-			return []byte("doctor: simulated startup failure"), nil, 1, nil
+			return []byte("doctor: simulated startup failure"), nil, 1, false, nil
 		}
 	}
-	return nil, nil, 0, nil
+	return nil, nil, 0, false, nil
 }
 
 // newRetentionHarness builds a real-collaborator coordinator whose single

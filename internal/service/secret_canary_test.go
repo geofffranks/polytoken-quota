@@ -290,14 +290,14 @@ func canaryPublish(t *testing.T, cand staging.Candidate, store state.Store, cloc
 // stderr to exercise the real sanitizer.
 type canaryStderrRunner struct{ canary string }
 
-func (r canaryStderrRunner) Run(context.Context, string, []string, int64, map[string]string) ([]byte, []byte, int, error) {
+func (r canaryStderrRunner) Run(context.Context, string, []string, int64, map[string]string) ([]byte, []byte, int, bool, error) {
 	// Realistic secret-bearing forms a binary might echo in diagnostics: a
 	// credential assignment, a token header, and a bearer token. DefaultSanitize
 	// redacts all three before any summary is persisted.
 	stderr := "error: api_key=" + r.canary + " invalid\n" +
 		"auth_token: " + r.canary + "\n" +
 		"Authorization: Bearer " + r.canary + "\n"
-	return []byte(""), []byte(stderr), 1, nil
+	return []byte(""), []byte(stderr), 1, false, nil
 }
 
 // scanTree walks path and invokes fn on every regular file's bytes.

@@ -126,6 +126,6 @@ func TestAssertNoStagingRootsAfterExits(t *testing.T) {
 // Runner's candidate-cleanup-on-failure path.
 type failRunner struct{}
 
-func (failRunner) Run(context.Context, string, []string, int64, map[string]string) ([]byte, []byte, int, error) {
-	return []byte(""), []byte("synthetic failure"), 1, nil
+func (failRunner) Run(context.Context, string, []string, int64, map[string]string) ([]byte, []byte, int, bool, error) {
+	return []byte(""), []byte("synthetic failure"), 1, false, nil
 }
