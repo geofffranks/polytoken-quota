@@ -44,8 +44,8 @@ import (
 // passes without an external dependency.
 type fakeCommandRunner struct{}
 
-func (fakeCommandRunner) Run(context.Context, string, []string, int64, map[string]string) (stdout, stderr []byte, exit int, err error) {
-	return nil, nil, 0, nil
+func (fakeCommandRunner) Run(context.Context, string, []string, int64, map[string]string) (stdout, stderr []byte, exit int, truncated bool, err error) {
+	return nil, nil, 0, false, nil
 }
 
 // TestCoordinatorPublisherIntegrationPublishesRealTarget is the C1/C2 regression

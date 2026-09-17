@@ -3,7 +3,10 @@
 // process exit code.
 package service
 
-import "github.com/geofffranks/polytoken-quota/internal/state"
+import (
+	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
+)
 
 // TargetOutcome describes the result of attempting to reconcile a single target
 // (the global target or a registered project target).
@@ -19,6 +22,12 @@ type TargetOutcome struct {
 	// Trace carries the verbose decision data (provider modes, ranking, chain
 	// survivors, edits). It is populated only when the caller requests --verbose.
 	Trace *ReconcileTrace
+	// Diagnostic carries the ephemeral full sanitized diagnostics for verbose
+	// reconcile rendering: the external validation output, or the sanitized
+	// error chain of a polytoken-quota-own failure. Like Trace it is never
+	// persisted; unlike Trace it is populated regardless of --verbose, and
+	// rendering is decided by the CLI.
+	Diagnostic *validate.CommandDiagnostic
 	// Prepare carries the hash-based preparation result when staging succeeded.
 	// It is the change-qualification data used by history recording. It is nil
 	// when staging was not reached or the candidate was cleaned up.

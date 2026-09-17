@@ -364,12 +364,12 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 		return Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}
 	}
 	if in.DryRun {
-		outcomes := c.processTargets(ctx, desired, observed, observed, targets, false, in.KeepStaging)
+		outcomes := c.processTargets(ctx, desired, observed, observed, targets, false, in.Verbose, in.KeepStaging)
 		return Outcome{Accepted: true, Revision: observed.Revision, Targets: outcomes}
 	}
 	next := observed
 	next.Revision = observed.Revision + 1
-	outcomes := c.processTargets(ctx, desired, observed, next, targets, true)
+	outcomes := c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, outcomes)
 	c.recordHistoryIfQualified(&next, txReconcile, in, outcomes, targets, desired)
@@ -539,7 +539,8 @@ func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, 
 		return next, nil
 	}
 	next = c.retireSyntheticPendings(next)
-	return next, c.processTargets(ctx, desired, prior, next, targets, publish)
+	// Init has no verbose flag: the coarse path never requests traces.
+	return next, c.processTargets(ctx, desired, prior, next, targets, publish, false)
 }
 
 // globalPlan renders the global target's plan once, for sharing the reconciled
@@ -632,13 +633,13 @@ func (c *Coordinator) staleDisabledRefs(candidate staging.Candidate, desired pol
 // processTargets runs the detailed per-target pipeline (render → stage →
 // validate → publish), emitting a trace step for each stage and target. When
 // publish is false (dry-run) no publish or state mutation occurs.
-func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool, retain ...bool) []TargetOutcome {
+func (c *Coordinator) processTargets(ctx context.Context, desired policy.Desired, prior, next state.State, targets []RegisteredTarget, publish bool, verbose bool, retain ...bool) []TargetOutcome {
 	keepStaging := len(retain) > 0 && retain[0]
 	timeout := c.validationTimeout(desired)
 	gp := c.globalPlan(desired, next, targets)
 	outcomes := make([]TargetOutcome, 0, len(targets))
 	for _, rt := range targets {
-		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, false, gp))
+		outcomes = append(outcomes, c.processOneTarget(ctx, desired, prior, next, rt, timeout, publish, true, keepStaging, verbose, gp))
 	}
 	return outcomes
 }
@@ -971,9 +972,13 @@ func appliedOutcome(id string, rev uint64) TargetOutcome {
 // never appear for non-staging failures. Doctor backfills empty remediation
 // only at display time — this field is the persisted value.
 func pendingOutcome(id string, rev uint64, stage string, err error) TargetOutcome {
+	// Build the ephemeral full sanitized error chain for verbose diagnostics;
+	// the persisted ApplyFailure below keeps DefaultSanitize's bounded summary.
+	diag := validate.InternalDiagnostic(validate.Stage(stage), err)
 	return TargetOutcome{
 		TargetID:          id,
 		AttemptedRevision: rev,
+		Diagnostic:        &diag,
 		Pending: &state.ApplyFailure{
 			TargetID:          sanitizeFailure(id),
 			Stage:             sanitizeFailure(stage),
@@ -1049,6 +1054,9 @@ func pendingValidate(id string, rev uint64, attemptedAt time.Time, result valida
 	return TargetOutcome{
 		TargetID:          id,
 		AttemptedRevision: rev,
+		// Mirror the full sanitized validation output onto the ephemeral
+		// outcome; the persisted ApplyFailure below keeps the bounded summary.
+		Diagnostic: result.Diagnostic,
 		Pending: &state.ApplyFailure{
 			TargetID:          sanitizeFailure(id),
 			Stage:             sanitizeFailure(stage),

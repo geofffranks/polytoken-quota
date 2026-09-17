@@ -30,19 +30,21 @@ import (
 // every Run call. FailAt (>=0) is the 0-based call index that exits non-zero;
 // -1 (the default via newSpy) disables failure. Block makes Run wait on the
 // context to exercise the shared timeout path. Stderr is the canned output
-// returned with a failure or timeout.
+// returned with a failure or timeout. Truncated is the canned truncation flag
+// (simulating a capture budget that dropped bytes).
 type commandSpy struct {
-	Args   [][]string
-	Envs   []map[string]string
-	FailAt int
-	Block  bool
-	Stderr []byte
-	calls  int
+	Args      [][]string
+	Envs      []map[string]string
+	FailAt    int
+	Block     bool
+	Stderr    []byte
+	Truncated bool
+	calls     int
 }
 
 func newSpy() *commandSpy { return &commandSpy{FailAt: -1} }
 
-func (s *commandSpy) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, err error) {
+func (s *commandSpy) Run(ctx context.Context, name string, args []string, max int64, env map[string]string) (stdout, stderr []byte, exit int, truncated bool, err error) {
 	cp := append([]string(nil), args...)
 	s.Args = append(s.Args, cp)
 	if env != nil {
@@ -60,12 +62,12 @@ func (s *commandSpy) Run(ctx context.Context, name string, args []string, max in
 
 	if s.Block {
 		<-ctx.Done()
-		return nil, canned, 0, ctx.Err()
+		return nil, canned, 0, false, ctx.Err()
 	}
 	if s.FailAt >= 0 && idx == s.FailAt {
-		return nil, canned, 1, errors.New("command exited non-zero")
+		return nil, canned, 1, s.Truncated, errors.New("command exited non-zero")
 	}
-	return nil, nil, 0, nil
+	return nil, nil, 0, s.Truncated, nil
 }
 
 // --- shared test helpers ----------------------------------------------------
@@ -89,7 +91,7 @@ func TestExecRunnerDoesNotInheritParentEnvironment(t *testing.T) {
 		t.Skip("/bin/sh unavailable")
 	}
 	t.Setenv("SECRET_CLOUD_TOKEN", "canary-must-not-leak")
-	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s:%s \"$SECRET_CLOUD_TOKEN\" \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
+	out, _, exit, _, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s:%s \"$SECRET_CLOUD_TOKEN\" \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
 	if err != nil || exit != 0 || string(out) != ":present" {
 		t.Fatalf("out=%q exit=%d err=%v (inherited secret visible to child?)", out, exit, err)
 	}
@@ -99,7 +101,7 @@ func TestExecRunnerPassesExplicitEnvironment(t *testing.T) {
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		t.Skip("/bin/sh unavailable")
 	}
-	out, _, exit, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
+	out, _, exit, _, err := (ExecRunner{}).Run(context.Background(), "/bin/sh", []string{"-c", "printf %s \"$POLYTOKEN_TEST_ENV\""}, 128, map[string]string{"POLYTOKEN_TEST_ENV": "present"})
 	if err != nil || exit != 0 || string(out) != "present" {
 		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
 	}
@@ -339,7 +341,7 @@ func TestExecRunnerDirectInvocation(t *testing.T) {
 	big := strings.Repeat("x", 5000)
 	r := ExecRunner{}
 
-	stdout, stderr, exit, err := r.Run(context.Background(), "/bin/echo", []string{big}, max, nil)
+	stdout, stderr, exit, _, err := r.Run(context.Background(), "/bin/echo", []string{big}, max, nil)
 	if err != nil || exit != 0 {
 		t.Fatalf("echo: exit=%d err=%v", exit, err)
 	}

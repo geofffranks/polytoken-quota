@@ -31,6 +31,8 @@ func TestReconcileVerboseWithDryRun(t *testing.T) {
 }
 
 func TestReconcileVerboseRendersTrace(t *testing.T) {
+	// Applied targets report only their outcome: the decision detail
+	// (provider modes, ranking, chains, edits) is deliberately not rendered.
 	mode := "normal"
 	spy := &verboseOutcomeSpy{}
 	spy.outcome = service.Outcome{
@@ -66,17 +68,13 @@ func TestReconcileVerboseRendersTrace(t *testing.T) {
 		t.Fatalf("exit=%d want %d (stderr=%q)", code, ExitOK, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "provider modes:") {
-		t.Fatalf("missing provider modes in verbose output:\n%s", out)
+	if !strings.Contains(out, "=== target global ===") || !strings.Contains(out, "outcome: applied") {
+		t.Fatalf("missing applied outcome report:\n%s", out)
 	}
-	if !strings.Contains(out, "codex") {
-		t.Fatalf("missing codex in verbose output:\n%s", out)
-	}
-	if !strings.Contains(out, "chains:") {
-		t.Fatalf("missing chains in verbose output:\n%s", out)
-	}
-	if !strings.Contains(out, "edits:") {
-		t.Fatalf("missing edits in verbose output:\n%s", out)
+	for _, absent := range []string{"provider modes:", "routing ranking:", "chains:", "edits:", "remediation:"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("applied target rendered detail %q:\n%s", absent, out)
+		}
 	}
 }
 
@@ -102,7 +100,13 @@ func TestReconcileVerboseNoTraceIsGraceful(t *testing.T) {
 	_ = Run(context.Background(), []string{"reconcile", "--verbose"}, strings.NewReader(""), stdout, io.Discard, Dependencies{
 		Mutator: spy, Diagnoser: spy, Environment: func() map[string]string { return nil },
 	})
-	if !strings.Contains(stdout.String(), "(no trace data)") {
-		t.Fatalf("expected graceful no-trace message:\n%s", stdout.String())
+	// The per-target document renders even without trace data; it just omits
+	// the trace sections.
+	out := stdout.String()
+	if !strings.Contains(out, "=== target global ===") || !strings.Contains(out, "outcome: applied") {
+		t.Fatalf("expected graceful per-target document:\n%s", out)
+	}
+	if strings.Contains(out, "provider modes:") || strings.Contains(out, "chains:") || strings.Contains(out, "edits:") {
+		t.Fatalf("trace sections rendered without trace data:\n%s", out)
 	}
 }

@@ -410,11 +410,9 @@ func runReconcile(ctx context.Context, args []string, deps Dependencies, stdout,
 		writeVerboseTrace(stdout, out)
 	}
 	if dryRun {
-		return dryRunExitCode(out, stderr)
+		return dryRunExitCode(out)
 	}
-	if out.Error != nil {
-		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
-	}
+	// Without --verbose a quiet reconcile prints nothing: exit code only.
 	return MutationExitCode(out)
 }
 
@@ -434,16 +432,10 @@ func parseReconcileFlags(args []string) (dryRun, keepStaging, verbose, ok bool) 
 	return dryRun, keepStaging, verbose, true
 }
 
-func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
-	writePendingTargets(o, stderr)
-	for _, target := range o.Targets {
-		if target.StagingRoot != "" {
-			fmt.Fprintf(stderr, "staged candidate retained at: %s\n", target.StagingRoot)
-		}
-	}
-	if o.Error != nil {
-		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(o.Error.Error())))
-	}
+// dryRunExitCode maps a dry-run outcome to its exit code: 0 when accepted,
+// 1 when rejected. A quiet dry-run prints nothing on either stream — pending
+// detail and retained staging roots are reported only under --verbose.
+func dryRunExitCode(o service.Outcome) int {
 	if !o.Accepted {
 		return ExitRejected
 	}
@@ -451,9 +443,9 @@ func dryRunExitCode(o service.Outcome, stderr io.Writer) int {
 }
 
 // writePendingTargets prints each pending target's stage/summary/remediation to
-// stderr, sanitized via validate.DefaultSanitize. Shared by runCheck and
-// runReconcile's dry-run path so both surfaces explain why an accepted outcome
-// is still pending.
+// stderr, sanitized via validate.DefaultSanitize. Used by runCheck; reconcile's
+// dry-run path no longer calls it (a quiet reconcile prints nothing — pending
+// detail renders only inside the --verbose document).
 func writePendingTargets(o service.Outcome, stderr io.Writer) {
 	for _, target := range o.Targets {
 		if target.Pending != nil {

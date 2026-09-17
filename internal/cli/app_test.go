@@ -18,6 +18,7 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
 
 // Compile-time proof that the production Coordinator implements Mutator.
@@ -839,30 +840,85 @@ func TestStatusNoRunningSessionAdvisory(t *testing.T) {
 }
 
 // TestReconcileDryRunReportsPendingAndRetainedStaging covers the dry-run path.
+// Under the quiet-silence contract a dry-run without --verbose prints nothing:
+// pending detail and retained staging roots render only under --verbose, on
+// stdout.
 func TestReconcileDryRunReportsPendingAndRetainedStaging(t *testing.T) {
-	t.Run("reports pending without exit 2", func(t *testing.T) {
-		stderr := &strings.Builder{}
-		spy := &outcomeSpy{outcome: service.Outcome{
-			Accepted: true,
-			Targets: []service.TargetOutcome{{TargetID: "global", Pending: &state.ApplyFailure{
+	pendingOutcome := service.Outcome{
+		Accepted: true,
+		Targets: []service.TargetOutcome{{
+			TargetID: "global",
+			Pending: &state.ApplyFailure{
 				Stage: "config_validate", Summary: "config validate: invalid model", Remediation: "inspect staged config",
-			}}},
-		}}
-		code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
+			},
+		}},
+	}
+
+	t.Run("quiet pending dry-run is silent and exits 0", func(t *testing.T) {
+		stdout := &strings.Builder{}
+		stderr := &strings.Builder{}
+		spy := &outcomeSpy{outcome: pendingOutcome}
+		code := Run(context.Background(), []string{"reconcile", "--dry-run"}, strings.NewReader(""), stdout, stderr, spy.Dependencies())
 		if code != ExitOK {
 			t.Fatalf("exit=%d want %d", code, ExitOK)
 		}
-		if !strings.Contains(stderr.String(), "config validate: invalid model") {
-			t.Fatalf("stderr=%q", stderr.String())
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("quiet dry-run printed output: stdout=%q stderr=%q", stdout.String(), stderr.String())
 		}
 	})
 
-	t.Run("reports retained staging path", func(t *testing.T) {
+	t.Run("verbose dry-run renders pending on stdout", func(t *testing.T) {
+		stdout := &strings.Builder{}
+		stderr := &strings.Builder{}
+		doc := pendingOutcome
+		doc.Targets[0].Diagnostic = &validate.CommandDiagnostic{
+			Stage:      validate.ConfigValidate,
+			FullOutput: "config validate: invalid model",
+			ExitCode:   1,
+		}
+		spy := &outcomeSpy{outcome: doc}
+		code := Run(context.Background(), []string{"reconcile", "--dry-run", "--verbose"}, strings.NewReader(""), stdout, stderr, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d want %d", code, ExitOK)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("verbose dry-run wrote to stderr: %q", stderr.String())
+		}
+		out := stdout.String()
+		for _, want := range []string{
+			"=== target global ===",
+			"outcome: pending (stage=config_validate)",
+			"polytoken-quota validation failed:",
+			"config validate: invalid model",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("verbose dry-run document missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "remediation:") || strings.Contains(out, "provider modes:") {
+			t.Fatalf("verbose dry-run pending rendered remediation or detail:\n%s", out)
+		}
+	})
+
+	t.Run("quiet keep-staging dry-run is silent", func(t *testing.T) {
+		stdout := &strings.Builder{}
 		stderr := &strings.Builder{}
 		spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{TargetID: "global", StagingRoot: "/tmp/staged"}}}}
-		code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging"}, strings.NewReader(""), io.Discard, stderr, spy.Dependencies())
-		if code != ExitOK || !strings.Contains(stderr.String(), "staged candidate retained at: /tmp/staged") {
-			t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+		code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging"}, strings.NewReader(""), stdout, stderr, spy.Dependencies())
+		if code != ExitOK {
+			t.Fatalf("exit=%d want %d", code, ExitOK)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("quiet keep-staging dry-run printed output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("verbose keep-staging dry-run prints retained root on stdout", func(t *testing.T) {
+		stdout := &strings.Builder{}
+		spy := &outcomeSpy{outcome: service.Outcome{Accepted: true, Targets: []service.TargetOutcome{{TargetID: "global", StagingRoot: "/tmp/staged"}}}}
+		code := Run(context.Background(), []string{"reconcile", "--dry-run", "--keep-staging", "--verbose"}, strings.NewReader(""), stdout, io.Discard, spy.Dependencies())
+		if code != ExitOK || !strings.Contains(stdout.String(), "retained staging root: /tmp/staged") {
+			t.Fatalf("exit=%d stdout=%q", code, stdout.String())
 		}
 	})
 
@@ -876,24 +932,42 @@ func TestReconcileDryRunReportsPendingAndRetainedStaging(t *testing.T) {
 }
 
 func TestMutationErrorsArePrinted(t *testing.T) {
-	for _, tc := range []struct {
-		command string
-		args    []string
-	}{
-		{command: "init", args: []string{"init"}},
-		{command: "reconcile", args: []string{"reconcile"}},
-	} {
-		t.Run(tc.command, func(t *testing.T) {
-			spy := &outcomeSpy{outcome: service.Outcome{Error: errors.New("source reader unavailable")}}
-			var stderr bytes.Buffer
-			if got := Run(context.Background(), tc.args, strings.NewReader(""), io.Discard, &stderr, spy.Dependencies()); got != ExitRejected {
-				t.Fatalf("exit=%d want=%d", got, ExitRejected)
-			}
-			if !strings.Contains(stderr.String(), "source reader unavailable") {
-				t.Fatalf("stderr=%q does not contain mutation error", stderr.String())
-			}
-		})
-	}
+	t.Run("init", func(t *testing.T) {
+		spy := &outcomeSpy{outcome: service.Outcome{Error: errors.New("source reader unavailable")}}
+		var stderr bytes.Buffer
+		if got := Run(context.Background(), []string{"init"}, strings.NewReader(""), io.Discard, &stderr, spy.Dependencies()); got != ExitRejected {
+			t.Fatalf("exit=%d want=%d", got, ExitRejected)
+		}
+		if !strings.Contains(stderr.String(), "source reader unavailable") {
+			t.Fatalf("stderr=%q does not contain mutation error", stderr.String())
+		}
+	})
+
+	// Reconcile is quiet by default: a non-dry-run failure is exit-code only.
+	// The sanitized error renders in the stdout document under --verbose.
+	t.Run("reconcile quiet is silent with exit code", func(t *testing.T) {
+		spy := &outcomeSpy{outcome: service.Outcome{Error: errors.New("source reader unavailable")}}
+		stdout := &strings.Builder{}
+		stderr := &strings.Builder{}
+		if got := Run(context.Background(), []string{"reconcile"}, strings.NewReader(""), stdout, stderr, spy.Dependencies()); got != ExitRejected {
+			t.Fatalf("exit=%d want=%d", got, ExitRejected)
+		}
+		if stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("quiet reconcile printed output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+	})
+
+	t.Run("reconcile verbose renders error on stdout", func(t *testing.T) {
+		spy := &outcomeSpy{outcome: service.Outcome{Error: errors.New("source reader unavailable")}}
+		stdout := &strings.Builder{}
+		if got := Run(context.Background(), []string{"reconcile", "--verbose"}, strings.NewReader(""), stdout, io.Discard, spy.Dependencies()); got != ExitRejected {
+			t.Fatalf("exit=%d want=%d", got, ExitRejected)
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "polytoken-quota validation failed:") || !strings.Contains(out, "source reader unavailable") {
+			t.Fatalf("verbose reconcile missing error detail:\n%s", out)
+		}
+	})
 }
 
 // --- process-control source guard (retained) ---
