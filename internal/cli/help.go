@@ -74,12 +74,12 @@ var helpDocs = map[string]helpDoc{
 	},
 	"reconcile": {
 		short: "Apply desired quota state to live configuration",
-		long:  "Apply desired quota state to the live Polytoken configuration.",
+		long:  "Apply desired quota state to the live Polytoken configuration. Without --verbose reconcile is silent: output is the exit code only (usage and flag errors still print to stderr).",
 		usage: []string{"polytoken-quota reconcile [--dry-run] [--keep-staging] [--verbose]"},
 		flags: []flagDoc{
 			{"--dry-run", "Preview changes without applying"},
 			{"--keep-staging", "Retain staged candidates (requires --dry-run)"},
-			{"--verbose", "Show detailed reconciliation trace"},
+			{"--verbose", "Print full sanitized per-target diagnostics (external validation output capped at 256 KiB, never un-redacted); retained staging path prints only here"},
 		},
 	},
 	"routing": {
