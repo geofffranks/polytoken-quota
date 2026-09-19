@@ -155,11 +155,17 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 
 `routing.enabled` defaults to `true` (an omitted `routing` section means enabled). Disabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
 
+## Task-aware model selection
+
+Opt-in `select` assesses a stdin task with pinned Jev, then recommends one explicitly registered candidate using saved quota evidence. `--difficulty` bypasses remote assessment entirely. Candidate policy cannot enable disclosure; consent belongs in operator `desired.yaml`. No workflow migration or live evaluation is automatic. See the [selection guide](docs/selection.md) for candidate groups, sensitive-task bypass, uncertainty handling, and the operator evaluation gate. Both new commands retain the normal supported-Polytoken-binary startup prerequisite.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
+| `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file while preserving selection consent/configuration. |
+| `select --policy PATH --phase NAME [--difficulty TIER | --min-difficulty TIER] [--exclude-family NAME] [--refresh] [--json]` | Recommend a candidate; automatic mode reads stdin, explicit tier stays local. |
+| `select-eval --policy PATH --fixtures PATH --live [--json]` | Operator-authorized rubric evaluation; never invoked by normal selection or tests. |
 | `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's status/reason, raw per-window quota numbers, next resets, compact target/source route rows with first desired/effective models, and a pending-config warning pointing at `doctor`. `--json` additionally retains ranking fields, route provenance, and complete desired/effective chains. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed Polytoken fields toward desired state. Quiet by default: without `--verbose` output is the exit code only (0 success, 1 rejected, 2 pending when applying — a dry-run pending exits 0; usage/flag errors still print to stderr). On a silent non-zero exit, re-run with `--verbose`: applied targets print only their outcome; pending targets print the full sanitized failure — external validation output capped at 256 KiB and always redacted, or the quota-own error chain — plus any retained staging path. Transact-level failures (policy load, target resolution) are persisted nowhere, so `--verbose` is their only diagnostic surface. `--keep-staging` (dry-run only) retains a failed validation candidate for inspection: the candidate moves to a deterministic per-target name (`quota-retain-<target-id>`, replacing any prior retained root) and the path prints only under `--verbose`; the caller owns deleting it (it may contain merged configuration). |
@@ -173,7 +179,9 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 
 The `routing` commands manage per-mapping routing state. The top-level `routing.enabled` field in `desired.yaml` is edited in place by the routing toggle, which tolerates YAML anchors, aliases, and merge keys anywhere else in the file (see [Configuration](#configuration)).
 
-Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
+Existing commands use `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
+
+For `select`, `0` means `confirmed`; `2` means `uncertain`, `no_selection`, or `assessment_unavailable`; `1` means a fatal input/configuration/state error. Inspect status before using a recommendation: uncertainty is not known availability. For `select-eval`, `0` means every fixture matched, `2` means mismatches or unavailable assessments, and `1` means invalid input/configuration. Mocked tests do not establish Jev quality; the operator must review an explicitly authorized live evaluation before adoption.
 
 ## Meaningful event history
 

@@ -39,7 +39,7 @@ type helpDoc struct {
 
 // commandOrder is the display order for top-level commands in root help.
 var commandOrder = []string{
-	"init", "status", "check", "reconcile", "routing", "doctor", "history", "notice-hook", "install-hook",
+	"init", "status", "check", "reconcile", "routing", "doctor", "history", "select", "select-eval", "notice-hook", "install-hook",
 }
 
 // helpDocs maps each command path to its help content. Top-level commands use
@@ -131,15 +131,40 @@ var helpDocs = map[string]helpDoc{
 	},
 	"notice-hook": {
 		short: "Run one in-session hook event (installed by install-hook)",
-		long: "Handle one Polytoken hook event: converge this session's daemon to a newly published reconciliation notice and surface model-drift information. Invoked by the hooks installed with install-hook; not for direct use.",
+		long:  "Handle one Polytoken hook event: converge this session's daemon to a newly published reconciliation notice and surface model-drift information. Invoked by the hooks installed with install-hook; not for direct use.",
 		usage: []string{"polytoken-quota notice-hook [--notice PATH]"},
 		flags: []flagDoc{
 			{"--notice PATH", "Notice file to consume (defaults to the published path)"},
 		},
 	},
+	"select": {
+		short: "Recommend one registered model for a phase (never launches work)",
+		long:  "Recommend one candidate model for a selection phase. The task is read from stdin and disclosed to the configured Jev assessment; --difficulty assigns the difficulty yourself and keeps the task fully local (stdin is never read, no credential or consent is used). Recommendations never launch an agent or reserve quota. Output contains no task text, credential, or raw upstream response.",
+		usage: []string{"polytoken-quota select --policy PATH --phase NAME [--difficulty TIER | --min-difficulty TIER] [--exclude-family NAME]... [--refresh] [--json]"},
+		flags: []flagDoc{
+			{"--policy PATH", "Candidate policy file (version 1; every referenced model must be registered in desired configuration; never names desired.yaml itself)"},
+			{"--phase NAME", "Selection phase key in the candidate policy"},
+			{"--difficulty TIER", "Explicit difficulty (routine|normal|difficult|very_difficult); bypasses assessment and keeps the task local; conflicts with --min-difficulty"},
+			{"--min-difficulty TIER", "Difficulty floor: raises a valid assessment only; never rescues an abstention or failed assessment; conflicts with --difficulty"},
+			{"--exclude-family NAME", "Exclude one exact provider family (the prefix before /); repeatable"},
+			{"--refresh", "Perform one provider quota poll without reconciliation before snapshotting; default reads the saved snapshot without polling"},
+			{"--json", "Output JSON (version 1; nullable model and status)"},
+		},
+	},
+	"select-eval": {
+		short: "Run the operator evaluation gate against synthetic fixtures",
+		long:  "Run the opt-in operator evaluation: every fixture case is assessed and reported against its expected tier or abstention. Reports case IDs, expected/actual assessment, safe error kinds, confusion counts, under/over-classification and abstention counts/rates, classifier model and rubric versions, latency and token usage. Never echoes task text or raw responses; never polls quota or dispatches agents. Requires --live, the selection.jev.enabled desired configuration (persistent consent), and externally supplied credentials.",
+		usage: []string{"polytoken-quota select-eval --policy PATH --fixtures PATH --live [--json]"},
+		flags: []flagDoc{
+			{"--policy PATH", "Candidate policy file covering every fixture phase/tier"},
+			{"--fixtures PATH", "Synthetic fixture document (version 1; non-sensitive synthetic cases)"},
+			{"--live", "Explicit gate: perform the remote evaluation; without it nothing is disclosed"},
+			{"--json", "Output JSON (version 1 envelope around the report)"},
+		},
+	},
 	"install-hook": {
 		short: "Install or remove the in-session Polytoken hook entries",
-		long: "Idempotently add (or remove with --remove) the two hooks.json entries that route session events to notice-hook. Backs up hooks.json before writing and never touches unrelated entries.",
+		long:  "Idempotently add (or remove with --remove) the two hooks.json entries that route session events to notice-hook. Backs up hooks.json before writing and never touches unrelated entries.",
 		usage: []string{"polytoken-quota install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]"},
 		flags: []flagDoc{
 			{"--config-dir DIR", "Polytoken config dir (default ~/.config/polytoken)"},

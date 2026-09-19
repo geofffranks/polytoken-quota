@@ -1,5 +1,9 @@
 # AGENTS.md — polytoken-quota reconciler
 
+Last verified: 2026-09-18
+
+Task-assessment/selection contracts live in `internal/selection/AGENTS.md`. Operator opt-in remote assessment is a runtime feature, not an exception to repository agents' no-live-accounts validation rule.
+
 Short-lived Go CLI (`polytoken-quota`) that maintains durable independent
 quota/availability state and safely reconciles only
 explicitly managed Polytoken model fields across a global target and registered

@@ -139,6 +139,48 @@ type RoutingConfig struct {
 	Enabled bool
 }
 
+// DocumentedJevModel is the versioned assessment model pinned for JEV. It is
+// the documented default of the selection.jev `model` key: an omitted key (or
+// an omitted selection section) resolves to this version, and the rendered
+// policy omits the key whenever it matches, so the documented value — not a
+// per-file literal — is the single source of the pin.
+const DocumentedJevModel = "jev-1.13.0"
+
+// DefaultJevTimeout bounds one JEV assessment when selection.jev omits
+// timeout. It must stay positive: Load rejects an explicit non-positive
+// timeout, so every resolved JevSelectionConfig carries a positive bound.
+const DefaultJevTimeout = 10 * time.Second
+
+// SelectionConfig holds quota-aware model-selection settings (additive on
+// Desired). The whole section is optional: Load resolves an omitted selection
+// section — or any omitted key within it — to the documented defaults (JEV
+// disabled, DefaultJevTimeout).
+type SelectionConfig struct {
+	// Jev holds the JEV assessment enablement. The struct zero value is
+	// disabled with no timeout; only Load and propose apply DefaultJevTimeout,
+	// so code constructing Desired by hand must set Selection explicitly where
+	// it means "as loaded" (the same contract as Routing).
+	Jev JevSelectionConfig
+}
+
+// JevSelectionConfig is the resolved selection.jev configuration. Enabled
+// defaults to false: quota-aware model selection is strictly opt-in. When
+// enabled, the assessment runs against Model — defaulted to the documented
+// DocumentedJevModel pin when the key is omitted — and is bounded by Timeout,
+// which Load guarantees to be positive (DefaultJevTimeout when the key is
+// omitted).
+type JevSelectionConfig struct {
+	Enabled bool
+	// Model is the versioned assessment model pin. Load validates an explicit
+	// pin against the documented jev-X.Y.Z grammar and defaults the omitted
+	// key to DocumentedJevModel. Empty only in a hand-constructed zero value;
+	// Load and propose always resolve it.
+	Model string
+	// Timeout is positive after Load; DefaultJevTimeout when the key is
+	// omitted.
+	Timeout time.Duration
+}
+
 // Desired is the fully validated in-memory desired policy produced by Load.
 type Desired struct {
 	Version     int
@@ -152,4 +194,9 @@ type Desired struct {
 	// `routing: {enabled: false}` disables quota-based reordering (managed
 	// fields then reconcile to their configured chain positions only).
 	Routing RoutingConfig
+
+	// Selection holds the optional quota-aware model-selection settings. Load
+	// defaults it to JEV disabled with a DefaultJevTimeout bound when the
+	// selection section is omitted.
+	Selection SelectionConfig
 }

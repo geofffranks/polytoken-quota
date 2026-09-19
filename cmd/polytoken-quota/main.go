@@ -22,6 +22,7 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/cli"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/publish"
+	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
 	"github.com/geofffranks/polytoken-quota/internal/state"
@@ -148,6 +149,11 @@ func allowInheritedEnvKey(key string) bool {
 // inherited process value when one is set (non-empty), preserving the
 // process-overrides-file precedence — but a variable must be named in the
 // file (or allowlisted) to be forwarded at all.
+//
+// TYPESAFE_API_KEY is excluded unconditionally, even when the env file names
+// it: it is the selection runtime credential, read via the process
+// environment immediately before an enabled assessment request, and it must
+// never reach the validation subprocess environment.
 func loadPolytokenEnv(path string, inherited []string) (map[string]string, error) {
 	all := inheritedEnvironment(inherited)
 	env := make(map[string]string, len(all))
@@ -176,6 +182,11 @@ func loadPolytokenEnv(path string, inherited []string) (map[string]string, error
 		key, value, ok := strings.Cut(text, "=")
 		if !ok || !validEnvKey(key) {
 			return nil, fmt.Errorf("invalid polytoken env file line %d", line)
+		}
+		if key == "TYPESAFE_API_KEY" {
+			// The selection runtime credential never enters the validation
+			// subprocess environment, even when the opt-in file names it.
+			continue
 		}
 		value = strings.TrimSpace(value)
 		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
@@ -264,6 +275,86 @@ func newCoordinator(cfg config) *service.Coordinator {
 	}
 }
 
+// resolveRuntimeKey is the assessment KeyResolver: it reads the runtime
+// credential from the process environment immediately before an enabled
+// request — never from the validation subprocess environment, never cached,
+// never logged. A missing or empty key is reported without echoing any part
+// of the value.
+func resolveRuntimeKey(context.Context) (string, error) {
+	if key := strings.TrimSpace(os.Getenv("TYPESAFE_API_KEY")); key != "" {
+		return key, nil
+	}
+	return "", selection.ErrNoAPIKey
+}
+
+// newSelectionClient constructs one assessment client for the desired
+// configuration's model pin and timeout.
+func newSelectionClient(model string, timeout time.Duration) (*selection.Client, error) {
+	return selection.NewClient(model, resolveRuntimeKey, selection.ClientOptions{Timeout: timeout})
+}
+
+// selectionSnapshot adapts the coordinator's narrow business read to the
+// selection snapshot source. Target diagnostic failures cannot reach a
+// selection: targets are never resolved on this path.
+type selectionSnapshot struct {
+	coord *service.Coordinator
+}
+
+func (s selectionSnapshot) SelectionSnapshot(ctx context.Context) (selection.Snapshot, error) {
+	inputs, err := s.coord.SelectionInputs(ctx)
+	if err != nil {
+		return selection.Snapshot{}, err
+	}
+	return selection.Snapshot{Desired: inputs.Desired, State: inputs.State, AsOf: inputs.AsOf}, nil
+}
+
+// selectionRefresh adapts one opt-in quota check without reconciliation. A
+// rejected check is fatal; an accepted check with provider problems is not —
+// the last-good evidence stays usable.
+type selectionRefresh struct {
+	coord *service.Coordinator
+}
+
+func (r selectionRefresh) RefreshQuota(ctx context.Context) error {
+	out := r.coord.QuotaCheck(ctx, "", false)
+	if out.Accepted {
+		return nil
+	}
+	if out.Error != nil {
+		return out.Error
+	}
+	return fmt.Errorf("service: quota poll rejected")
+}
+
+// newSelectionRunners wires the select and select-eval orchestration over the
+// coordinator. Both share the narrow business snapshot and the runtime
+// credential resolver; the startup binary prerequisite is already enforced
+// by resolveConfig before either can run.
+func newSelectionRunners(coord *service.Coordinator) (*selection.SelectRunner, *selection.EvaluationRunner) {
+	snapshot := selectionSnapshot{coord: coord}
+	selectRunner := &selection.SelectRunner{
+		Snapshot: snapshot,
+		Refresh:  selectionRefresh{coord: coord},
+		NewAssessor: func(model string, timeout time.Duration) (selection.Assessor, error) {
+			return newSelectionClient(model, timeout)
+		},
+	}
+	evalRunner := &selection.EvaluationRunner{
+		Snapshot: snapshot,
+		NewJev: func(model string, timeout time.Duration) (selection.EvalRunner, error) {
+			client, err := newSelectionClient(model, timeout)
+			if err != nil {
+				return nil, err
+			}
+			// Consent was already enforced by the evaluation runner from
+			// the desired configuration; the runner passes it explicitly
+			// on every request.
+			return &selection.JevEvalRunner{Client: client, Enabled: true}, nil
+		},
+	}
+	return selectRunner, evalRunner
+}
+
 func main() {
 	if printVersionIfRequested(os.Args[1:], os.Stdout) {
 		return
@@ -284,12 +375,16 @@ func main() {
 	// state path. It loads state exactly once per invocation.
 	historyReader := service.NewHistoryReader(service.StoreState{Store: state.Store{Path: cfg.StatePath}}, nil)
 
+	selectRunner, evalRunner := newSelectionRunners(coord)
+
 	code := cli.Run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.Dependencies{
 		Mutator:         coord,
 		Diagnoser:       coord,
 		SnapshotBuilder: coord,
 		HistoryQuerier:  historyReader,
 		Policy:          coord.Policy,
+		Select:          selectRunner,
+		SelectEval:      evalRunner,
 	})
 	os.Exit(code)
 }
