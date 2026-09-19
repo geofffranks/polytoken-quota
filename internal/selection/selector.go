@@ -212,7 +212,6 @@ func classify(ref string, desired policy.Desired, st state.State, asOf time.Time
 
 	ps, observed := st.Providers[string(mid)]
 	var snap, attempt *quota.QuotaSnapshot
-	stateExplicit := false
 	if observed {
 		snap, attempt = ps.QuotaSnapshot, ps.QuotaAttempt
 		if ps.ManualDisabled {
@@ -220,8 +219,8 @@ func classify(ref string, desired policy.Desired, st state.State, asOf time.Time
 			return c
 		}
 		// Unrecognized non-empty axis values are corrupted observations and
-		// never enable a provider; empty values are the legacy sparse state,
-		// which merely withholds confirmation.
+		// never enable a provider. Empty legacy axes add no evidence: polling
+		// establishes confirmation through the quota snapshot below.
 		if ps.Quota != "" && !validStateQuota(ps.Quota) {
 			c.status, c.reason = candExcluded, "corrupt provider state"
 			return c
@@ -238,9 +237,6 @@ func classify(ref string, desired policy.Desired, st state.State, asOf time.Time
 			c.status, c.reason = candExcluded, "provider exhausted"
 			return c
 		}
-		// Confirmation requires both axes explicitly established; after the
-		// checks above, present-and-valid means normal/reserve and available.
-		stateExplicit = ps.Quota != "" && ps.Availability != ""
 	}
 
 	if snap == nil {
@@ -317,12 +313,6 @@ func classify(ref string, desired policy.Desired, st state.State, asOf time.Time
 	if snap.Status == "" {
 		// No recorded source status: not the exact successful status, so the
 		// snapshot can never confirm.
-		c.status, c.reason = candUncertain, EvidenceUnknown
-		return c
-	}
-	if !stateExplicit {
-		// The durable provider axes are sparse (empty); confirmation requires
-		// explicitly supported state, not EffectiveMode's sparse defaults.
 		c.status, c.reason = candUncertain, EvidenceUnknown
 		return c
 	}

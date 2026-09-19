@@ -353,6 +353,24 @@ func assertNoReconcileSideEffects(t *testing.T, env *selectionTestEnv, st state.
 // selection, last-good preservation on accepted-with-problems, and a fatal
 // check stopping before any assessment.
 func TestSelectRefreshIntegration(t *testing.T) {
+	t.Run("first refresh confirms without legacy provider axes", func(t *testing.T) {
+		env := newSelectionTestEnv(t)
+		env.poller.snapshots["codex"] = polledSnap("codex", env.now)
+		args := []string{"--policy", env.candidatePath, "--phase", "execution", "--difficulty", "normal"}
+		code, stdout, stderr := env.runSelect(t, append(args, "--refresh")...)
+		if code != cli.ExitOK || !strings.Contains(stdout, "status: confirmed") {
+			t.Fatalf("first refresh: exit=%d stdout=%q stderr=%q", code, stdout, stderr)
+		}
+		ps := env.loadDiskState(t).Providers["codex"]
+		if ps.Quota != "" || ps.Availability != "" {
+			t.Fatal("polling must not manufacture legacy provider axes")
+		}
+		code, stdout, stderr = env.runSelect(t, args...)
+		if code != cli.ExitOK || !strings.Contains(stdout, "status: confirmed") || env.poller.calls != 1 {
+			t.Fatalf("saved evidence: exit=%d polls=%d stdout=%q stderr=%q", code, env.poller.calls, stdout, stderr)
+		}
+		assertNoReconcileSideEffects(t, env, env.loadDiskState(t))
+	})
 	t.Run("explicit refresh persists the snapshot and the selection sees it", func(t *testing.T) {
 		env := newSelectionTestEnv(t)
 		env.seedState(t, nil) // explicit axes, no quota evidence yet

@@ -554,10 +554,10 @@ func TestSelectQuotaEvidenceMatrix(t *testing.T) {
 			wantEvidence: EvidenceUnknown,
 		},
 		{
-			name:         "sparse provider axes with a fresh complete snapshot are not confirmed",
+			name:         "sparse provider axes with a fresh complete snapshot confirm",
 			ps:           selPS("", "", fresh(nil), nil),
-			wantKind:     KindUncertain,
-			wantEvidence: EvidenceUnknown,
+			wantKind:     KindConfirmed,
+			wantHeadroom: 0.75,
 		},
 
 		// -- headroom arithmetic --
