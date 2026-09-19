@@ -286,7 +286,15 @@ func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := Resolve(policy.Target{ID: "target-a", Root: "CANARY-RELATIVE-ROOT"})
-		assertPrivateRootError(t, err, "canonicalize root failed", "CANARY-RELATIVE-ROOT")
+		// On macOS, filepath.Abs can succeed with a deleted CWD and
+		// EvalSymlinks can then report the failure instead.
+		if err == nil {
+			t.Fatal("invalid root accepted")
+		}
+		if !strings.Contains(err.Error(), "canonicalize root failed") && !strings.Contains(err.Error(), "resolve root failed") {
+			t.Fatalf("root error lacks safe canonicalization classification: %q", err)
+		}
+		assertPrivateRootError(t, err, "root failed", "CANARY-RELATIVE-ROOT")
 	})
 }
 
