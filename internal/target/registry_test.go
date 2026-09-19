@@ -143,8 +143,15 @@ func TestResolvedDefinitionsRetainPathIdentity(t *testing.T) {
 	if got.TargetID != "project-a" || got.PolicyPath != "subagents/nested/agent.md" {
 		t.Fatalf("public identity=%+v", got)
 	}
-	if got.canonicalPath != definitionPath {
-		t.Fatalf("canonical path=%q want %q", got.canonicalPath, definitionPath)
+	// macOS serves temp dirs through a symlink (/var/folders ->
+	// /private/var/folders), so the stored canonical path is the
+	// symlink-resolved form of the fixture path.
+	wantCanonical, err := filepath.EvalSymlinks(definitionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.canonicalPath != wantCanonical {
+		t.Fatalf("canonical path=%q want %q", got.canonicalPath, wantCanonical)
 	}
 	if len(got.Chain) != 2 || got.Chain[0] != chain[0] || got.Chain[1] != chain[1] {
 		t.Fatalf("chain=%v want %v", got.Chain, chain)
@@ -253,12 +260,19 @@ func TestReadDefinitionMetadataRejectsPostResolveSymlinkSwap(t *testing.T) {
 }
 
 func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
-	assertPrivateRootError := func(t *testing.T, err error, classification string, forbidden ...string) {
+	assertPrivateRootError := func(t *testing.T, err error, classifications []string, forbidden ...string) {
 		t.Helper()
 		if err == nil {
 			t.Fatal("invalid root accepted")
 		}
-		if !strings.Contains(err.Error(), "target-a") || !strings.Contains(err.Error(), classification) {
+		classified := false
+		for _, classification := range classifications {
+			if strings.Contains(err.Error(), classification) {
+				classified = true
+				break
+			}
+		}
+		if !strings.Contains(err.Error(), "target-a") || !classified {
 			t.Fatalf("root error lacks safe identity/classification: %q", err)
 		}
 		for _, value := range forbidden {
@@ -273,11 +287,11 @@ func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
 	}
 
 	_, err := Resolve(policy.Target{ID: "target-a"})
-	assertPrivateRootError(t, err, "empty root")
+	assertPrivateRootError(t, err, []string{"empty root"})
 
 	missingRoot := filepath.Join(t.TempDir(), "CANARY-MISSING-ROOT")
 	_, err = Resolve(policy.Target{ID: "target-a", Root: missingRoot})
-	assertPrivateRootError(t, err, "resolve root failed", missingRoot, "CANARY-MISSING-ROOT")
+	assertPrivateRootError(t, err, []string{"resolve root failed"}, missingRoot, "CANARY-MISSING-ROOT")
 
 	t.Run("absolute canonicalization", func(t *testing.T) {
 		removedWorkingDir := t.TempDir()
@@ -285,8 +299,14 @@ func TestResolveRootErrorsIncludeSanitizedTargetIdentity(t *testing.T) {
 		if err := os.Remove(removedWorkingDir); err != nil {
 			t.Fatal(err)
 		}
+		// With the working directory deleted, Linux getwd fails, so Abs
+		// classifies the failure as "canonicalize root failed"; darwin
+		// getcwd still reports the removed directory's stale path, Abs
+		// succeeds, and the failure surfaces at symlink resolution as
+		// "resolve root failed". Either classification satisfies the
+		// contract: identity present, paths and OS errors absent.
 		_, err := Resolve(policy.Target{ID: "target-a", Root: "CANARY-RELATIVE-ROOT"})
-		assertPrivateRootError(t, err, "canonicalize root failed", "CANARY-RELATIVE-ROOT")
+		assertPrivateRootError(t, err, []string{"canonicalize root failed", "resolve root failed"}, "CANARY-RELATIVE-ROOT")
 	})
 }
 

@@ -41,8 +41,15 @@ func TestResolveAppendsPolytokenForProjectDirRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if res.CanonicalRoot != configDir {
-		t.Fatalf("CanonicalRoot=%q want %q", res.CanonicalRoot, configDir)
+	// macOS serves temp dirs through a symlink (/var/folders ->
+	// /private/var/folders); the resolved root is the symlink-resolved
+	// form of the fixture path.
+	wantConfigDir, err := filepath.EvalSymlinks(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CanonicalRoot != wantConfigDir {
+		t.Fatalf("CanonicalRoot=%q want %q", res.CanonicalRoot, wantConfigDir)
 	}
 	if len(res.Definitions) != 1 || res.Definitions[0].PolicyPath != "facets/app-engineering.md" {
 		t.Fatalf("definitions=%+v", res.Definitions)
@@ -68,8 +75,9 @@ func TestResolveRejectsProjectDirRootWithoutConfigDir(t *testing.T) {
 }
 
 // TestResolveGlobalRootNotCanonicalized proves global targets keep their
-// documented root semantics: the root is the configuration directory and is
-// never rewritten, even when a .polytoken subdirectory exists.
+// documented root semantics: the root stays the configuration directory
+// itself, symlink-resolved but never rewritten to a .polytoken subdirectory,
+// even when one exists.
 func TestResolveGlobalRootNotCanonicalized(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".polytoken"), 0o700); err != nil {
@@ -79,8 +87,12 @@ func TestResolveGlobalRootNotCanonicalized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if res.CanonicalRoot != root {
-		t.Fatalf("CanonicalRoot=%q want unchanged %q", res.CanonicalRoot, root)
+	wantRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CanonicalRoot != wantRoot {
+		t.Fatalf("CanonicalRoot=%q want unchanged %q", res.CanonicalRoot, wantRoot)
 	}
 }
 
