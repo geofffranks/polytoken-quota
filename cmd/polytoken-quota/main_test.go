@@ -2,9 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/selection"
+	"github.com/geofffranks/polytoken-quota/internal/service"
 )
 
 func setFakePolytokenBinary(t *testing.T) {
@@ -186,5 +194,85 @@ func TestResolveConfigHonorsConfigDirOverride(t *testing.T) {
 	}
 	if cfg.GlobalDir != override {
 		t.Fatalf("global dir=%q want %q", cfg.GlobalDir, override)
+	}
+}
+
+// TestLoadPolytokenEnvExcludesTypesafeKeyEvenWhenFileNamed proves the
+// selection runtime credential never enters the validation subprocess
+// environment: not from the inherited process environment (it is not
+// allowlisted) and not from the opt-in env file naming it explicitly.
+func TestLoadPolytokenEnvExcludesTypesafeKeyEvenWhenFileNamed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "polytoken.env")
+	if err := os.WriteFile(path, []byte("TYPESAFE_API_KEY=sk-file-named-value\nOTHER=ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inherited := []string{"TYPESAFE_API_KEY=sk-process-value", "PATH=/usr/bin"}
+	got, err := loadPolytokenEnv(path, inherited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, leaked := got["TYPESAFE_API_KEY"]; leaked {
+		t.Fatalf("TYPESAFE_API_KEY leaked into the validation environment: %v", got)
+	}
+	if got["OTHER"] != "ok" || got["PATH"] != "/usr/bin" {
+		t.Fatalf("unrelated keys must still forward: %v", got)
+	}
+}
+
+// TestResolveRuntimeKeyReadsProcessEnvironment proves the credential is
+// taken from the process environment at request time and never echoed; a
+// missing or empty key reports ErrNoAPIKey.
+func TestResolveRuntimeKeyReadsProcessEnvironment(t *testing.T) {
+	t.Setenv("TYPESAFE_API_KEY", "  sk-live-credential  ")
+	key, err := resolveRuntimeKey(context.Background())
+	if err != nil {
+		t.Fatalf("resolve with key set: %v", err)
+	}
+	if key == "" || strings.TrimSpace(key) != key {
+		t.Fatalf("key must be returned trimmed and nonempty (len=%d)", len(key))
+	}
+
+	t.Setenv("TYPESAFE_API_KEY", "")
+	if _, err := resolveRuntimeKey(context.Background()); !errors.Is(err, selection.ErrNoAPIKey) {
+		t.Fatalf("empty key: err=%v, want ErrNoAPIKey", err)
+	}
+
+	if err := os.Unsetenv("TYPESAFE_API_KEY"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveRuntimeKey(context.Background()); !errors.Is(err, selection.ErrNoAPIKey) {
+		t.Fatalf("missing key: err=%v, want ErrNoAPIKey", err)
+	}
+}
+
+// TestNewSelectionRunnersWiresBoth proves the production wiring returns
+// fully wired runners for both selection commands.
+func TestNewSelectionRunnersWiresBoth(t *testing.T) {
+	coord := service.Coordinator{}
+	selectRunner, evalRunner := newSelectionRunners(&coord)
+	if selectRunner == nil || evalRunner == nil {
+		t.Fatal("newSelectionRunners returned a nil runner")
+	}
+	if selectRunner.Snapshot == nil || selectRunner.Refresh == nil || selectRunner.NewAssessor == nil {
+		t.Fatal("select runner is incompletely wired")
+	}
+	if evalRunner.Snapshot == nil || evalRunner.NewJev == nil {
+		t.Fatal("evaluation runner is incompletely wired")
+	}
+	// The assessor factory must produce a usable client for the documented
+	// model pin.
+	assessor, err := selectRunner.NewAssessor(policy.DocumentedJevModel, time.Second)
+	if err != nil {
+		t.Fatalf("NewAssessor: %v", err)
+	}
+	if assessor == nil {
+		t.Fatal("NewAssessor returned nil")
+	}
+	live, err := evalRunner.NewJev(policy.DocumentedJevModel, time.Second)
+	if err != nil {
+		t.Fatalf("NewJev: %v", err)
+	}
+	if live == nil || live.Model() != policy.DocumentedJevModel {
+		t.Fatalf("NewJev returned %v", live)
 	}
 }

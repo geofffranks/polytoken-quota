@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/geofffranks/polytoken-quota/internal/notice"
+	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -36,6 +37,18 @@ type Mutator interface {
 	QuotaCheck(context.Context, string, bool) service.Outcome
 }
 
+// SelectRunner runs one model-selection invocation. The production
+// implementation is selection.SelectRunner.
+type SelectRunner interface {
+	Run(ctx context.Context, req selection.SelectRequest) (selection.SelectOutcome, error)
+}
+
+// SelectEvalRunner runs one select-eval invocation. The production
+// implementation is selection.EvaluationRunner.
+type SelectEvalRunner interface {
+	RunEval(ctx context.Context, req selection.EvalInvocation) (*selection.Report, error)
+}
+
 // DiagnosticCommand selects a read-only diagnostic command.
 type DiagnosticCommand uint8
 
@@ -54,7 +67,11 @@ type Dependencies struct {
 	// Policy resolves the desired policy for install-hook's notice-path
 	// default. Nil-safe: install-hook falls back to the default location.
 	Policy service.PolicyLoader
-	Environment     func() map[string]string
+	// Select runs model-selection invocations (the select command).
+	Select SelectRunner
+	// SelectEval runs operator evaluation invocations (select-eval).
+	SelectEval  SelectEvalRunner
+	Environment func() map[string]string
 }
 
 // removedCommands are the former top-level commands that are now strictly
@@ -135,6 +152,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return runNoticeHook(args[1:], stdout)
 	case "install-hook":
 		return runInstallHook(args[1:], deps, stdout, stderr)
+	case "select":
+		return runSelect(ctx, args[1:], deps, stdin, stdout, stderr)
+	case "select-eval":
+		return runSelectEval(ctx, args[1:], deps, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		usage(stderr)
@@ -503,6 +524,6 @@ func parseBoolFlags(args []string, allowed ...string) (present, ok bool) {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage: polytoken-quota <command> [options]")
-	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history, notice-hook, install-hook")
+	fmt.Fprintln(w, "commands: init, status, check, reconcile, routing, doctor, history, select, select-eval, notice-hook, install-hook")
 	fmt.Fprintln(w, "run 'polytoken-quota help' or 'polytoken-quota <command> --help' for details")
 }

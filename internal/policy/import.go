@@ -206,6 +206,9 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 		// writes no routing section) so the returned proposal and the file a
 		// caller persists from it agree.
 		Routing: RoutingConfig{Enabled: true},
+		// Match Load's default for an omitted selection section likewise:
+		// marshalDesired writes no selection section for the resolved defaults.
+		Selection: defaultSelection(),
 	}
 	owner := map[string]MappingID{}
 	if err := buildProviders(&d, global.Config.Providers, owner); err != nil {
@@ -541,6 +544,9 @@ func marshalDesired(d Desired) ([]byte, error) {
 		}
 		doc.Operational = &outOps
 	}
+	if outSel := selectionOut(d.Selection); outSel != nil {
+		doc.Selection = outSel
+	}
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -586,6 +592,7 @@ type outDoc struct {
 	Global      *outTarget            `yaml:"global,omitempty"`
 	Projects    []outTarget           `yaml:"projects,omitempty"`
 	Operational *outOperational       `yaml:"operational,omitempty"`
+	Selection   *outSelection         `yaml:"selection,omitempty"`
 }
 
 type outMapping struct {
@@ -635,4 +642,39 @@ func operationalIsZero(op Operational) bool {
 		op.BackupCount == 0 &&
 		op.NoticePath == "" &&
 		len(op.OnChange) == 0
+}
+
+type outSelection struct {
+	Jev outJev `yaml:"jev"`
+}
+
+// outJev renders only the non-default selection.jev keys, so an operator's
+// explicit choices round-trip while a policy at the documented defaults (JEV
+// disabled, DocumentedJevModel pin, DefaultJevTimeout) omits the section
+// entirely — first init and default-carrying re-imports produce the same bytes
+// as before the section existed.
+type outJev struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
+	Model   string `yaml:"model,omitempty"`
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+// selectionOut renders the resolved selection config, or nil when it carries
+// no information beyond the documented defaults. A zero (hand-constructed)
+// Selection is also omitted: it means "no selection intent", matching the
+// Routing precedent where only Load/propose apply defaults.
+func selectionOut(s SelectionConfig) *outSelection {
+	enabled := s.Jev.Enabled
+	model := ""
+	if s.Jev.Model != DocumentedJevModel {
+		model = s.Jev.Model
+	}
+	timeout := ""
+	if s.Jev.Timeout != DefaultJevTimeout {
+		timeout = s.Jev.Timeout.String()
+	}
+	if !enabled && model == "" && timeout == "" {
+		return nil
+	}
+	return &outSelection{Jev: outJev{Enabled: enabled, Model: model, Timeout: timeout}}
 }
