@@ -740,6 +740,11 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 			out.Prepare = prep
 			return out
 		}
+		// Runtime backup retention tracks the loaded policy: apply the
+		// policy-loaded operational.backup_count (omitted → default 1,
+		// explicit N → N) to the concrete publisher before this apply. The
+		// transaction lock is held, so no concurrent apply races the update.
+		c.applyBackupRetention(desired.Operational.BackupCount)
 		// ApplyUnderLock: the Coordinator already holds the transaction lock;
 		// the publisher must NOT re-acquire it (flock LOCK_EX is not re-entrant).
 		if _, err := c.Publish.ApplyUnderLock(ctx, tx); err != nil {
@@ -758,6 +763,17 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	}
 	out.Prepare = prep
 	return out
+}
+
+// applyBackupRetention threads the policy-loaded backup retention into the
+// concrete publisher immediately before a locked apply. Publishers without
+// runtime-retargetable retention (test spies) are skipped via the interface
+// check; the setter clamps values below 1 to the minimum of 1, so a zero
+// operational section can never widen retention to unbounded.
+func (c *Coordinator) applyBackupRetention(count int) {
+	if setter, ok := c.Publish.(BackupLimitSetter); ok {
+		setter.SetBackupLimit(count)
+	}
 }
 
 // --- helpers ----------------------------------------------------------------

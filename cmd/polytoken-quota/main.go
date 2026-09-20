@@ -54,6 +54,10 @@ type config struct {
 	StagingRoot  string // parent of transient staging roots
 	GlobalDir    string // canonical global Polytoken configuration dir
 	PolytokenBin string // Polytoken executable for validation
+	// BackupCount is the pre-policy constructor placeholder for the backup
+	// store's retention limit. The Coordinator overwrites it from the loaded
+	// operational.backup_count (default 1) before every locked apply, so this
+	// value never governs a real apply.
 	BackupCount  int
 	Retention    time.Duration
 	LockWait     time.Duration
@@ -109,7 +113,9 @@ func resolveConfig() (config, error) {
 		StagingRoot:  filepath.Join(home, "stage"),
 		GlobalDir:    globalDir,
 		PolytokenBin: bin,
-		BackupCount:  5,
+		// Placeholder only: the Coordinator applies the policy-loaded
+		// operational.backup_count to the publisher before every apply.
+		BackupCount:  1,
 		Retention:    7 * 24 * time.Hour,
 		LockWait:     10 * time.Second,
 		ValidateWait: 30 * time.Second,
@@ -257,10 +263,13 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Builder:      service.NewReconciler(),
 		Stage:        service.StagingStager{Builder: builder},
 		Validate:     service.ValidateRunner{Runner: runner},
-		Publish:      service.PublisherAdapter{Publisher: pub},
-		Sources:      policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
-		QuotaPoller:  service.NewQuotaPoller(),
-		JournalPath:  cfg.JournalPath,
+		// The adapter is wired by pointer so the Coordinator can retarget the
+		// publisher's backup retention from the loaded policy (SetBackupLimit
+		// has a pointer receiver) before every locked apply.
+		Publish:     &service.PublisherAdapter{Publisher: pub},
+		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller: service.NewQuotaPoller(),
+		JournalPath: cfg.JournalPath,
 	}
 }
 
