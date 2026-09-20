@@ -254,6 +254,16 @@ func newCoordinator(cfg config) *service.Coordinator {
 
 	loader := service.FilePolicyLoader{Path: cfg.DesiredPath}
 	registry := service.NewTargetRegistry()
+
+	// Pointer form is load-bearing: SetBackupLimit has a pointer receiver, so
+	// the Coordinator can retarget backup retention from the loaded policy
+	// only when the Publisher interface holds the adapter by pointer. This
+	// compile-time assertion fails on a value-form regression, which would
+	// otherwise build and silently stop applying operational.backup_count
+	// (review finding F-1, retention-impl-review).
+	adapter := &service.PublisherAdapter{Publisher: pub}
+	var _ service.BackupLimitSetter = adapter
+
 	return &service.Coordinator{
 		Lock:         publish.NewFileLock(cfg.LockPath),
 		Policy:       loader,
@@ -263,13 +273,10 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Builder:      service.NewReconciler(),
 		Stage:        service.StagingStager{Builder: builder},
 		Validate:     service.ValidateRunner{Runner: runner},
-		// The adapter is wired by pointer so the Coordinator can retarget the
-		// publisher's backup retention from the loaded policy (SetBackupLimit
-		// has a pointer receiver) before every locked apply.
-		Publish:     &service.PublisherAdapter{Publisher: pub},
-		Sources:     policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
-		QuotaPoller: service.NewQuotaPoller(),
-		JournalPath: cfg.JournalPath,
+		Publish:      adapter,
+		Sources:      policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
+		QuotaPoller:  service.NewQuotaPoller(),
+		JournalPath:  cfg.JournalPath,
 	}
 }
 
