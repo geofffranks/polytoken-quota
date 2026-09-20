@@ -50,7 +50,7 @@ func TestReadmeMinimalExampleLoads(t *testing.T) {
 	if !d.Routing.Enabled {
 		t.Error("README example should load with routing enabled by default")
 	}
-	if d.Operational.BackupCount != 5 || d.Operational.ValidationTimeout != 30*time.Second {
+	if d.Operational.BackupCount != 1 || d.Operational.ValidationTimeout != 30*time.Second {
 		t.Errorf("operational defaults not applied: %+v", d.Operational)
 	}
 	if q := d.Providers["codex"].Quota; q == nil || q.Adapter != "codex" {

@@ -23,7 +23,7 @@ var defaultOperational = Operational{
 	ValidationTimeout:  30 * time.Second,
 	LockWait:           10 * time.Second,
 	RecoveredRetention: 7 * 24 * time.Hour,
-	BackupCount:        5,
+	BackupCount:        1,
 }
 
 // defaultQuotaFreshness is the freshness TTL applied when a quota section omits
@@ -393,8 +393,11 @@ type operationalWire struct {
 	ValidationTimeout  string `yaml:"validation_timeout"`
 	LockWait           string `yaml:"lock_wait"`
 	RecoveredRetention string `yaml:"recovered_retention"`
-	// BackupCount is a pointer so an omitted key (nil) can default to 5 while
-	// an explicit zero or negative value is still rejected.
+	// BackupCount is a pointer so an omitted key (nil) can default to 1 while
+	// an explicit zero or negative value is still rejected. One pre-apply
+	// backup per managed file is the minimum viable rollback point; the
+	// runtime publisher prunes each file's backups oldest-first to this count
+	// as the file changes.
 	BackupCount *int `yaml:"backup_count"`
 	// NoticePath is optional; empty means the default notice location.
 	NoticePath string `yaml:"notice_path"`

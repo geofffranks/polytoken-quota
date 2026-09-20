@@ -211,7 +211,7 @@ func TestLoadOperationalBounds(t *testing.T) {
 			t.Fatal("accepted zero backup count")
 		}
 	})
-	t.Run("backup count omitted in partial section defaults to 5", func(t *testing.T) {
+	t.Run("backup count omitted in partial section defaults to 1", func(t *testing.T) {
 		yaml := "version: 1\nproviders: {a: {models: [codex/m]}}\noperational: {validation_timeout: 60s}"
 		d, err := Load(writeTemp(t, yaml))
 		if err != nil {
@@ -220,8 +220,8 @@ func TestLoadOperationalBounds(t *testing.T) {
 		if d.Operational.ValidationTimeout != 60*time.Second {
 			t.Fatalf("validation_timeout=%v want 60s", d.Operational.ValidationTimeout)
 		}
-		if d.Operational.BackupCount != 5 {
-			t.Fatalf("backup_count=%d want default 5", d.Operational.BackupCount)
+		if d.Operational.BackupCount != 1 {
+			t.Fatalf("backup_count=%d want default 1", d.Operational.BackupCount)
 		}
 	})
 	t.Run("backup count explicit value honored", func(t *testing.T) {
