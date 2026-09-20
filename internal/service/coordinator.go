@@ -105,6 +105,12 @@ type transactionInput struct {
 	Reconcile bool
 	// Verbose requests the verbose reconcile trace in target outcomes.
 	Verbose bool
+	// ExistingPolicy is set by the init preflight when desired.yaml already
+	// exists and parsed successfully. Forced init imports its selection section
+	// into the replacement proposal so a re-import of live managed fields never
+	// silently resets operator selection intent. It is nil for every other
+	// transaction kind and for first init.
+	ExistingPolicy *policy.Desired
 }
 
 // defaultValidationTimeout is used when the policy omits an operational timeout.
@@ -192,7 +198,7 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 	}()
 	var initExisting bool
 	if kind == txInit {
-		_, err := c.Policy.LoadPolicy()
+		loaded, err := c.Policy.LoadPolicy()
 		switch {
 		case err == nil:
 			initExisting = true
@@ -200,6 +206,10 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 				c.step("desired-exists")
 				return Outcome{Error: policy.ErrDesiredExists}
 			}
+			// The existing file parsed cleanly; keep it so forced init can
+			// import operator-owned sections. A corrupt or unreadable file
+			// falls through to the abort below — it is never replaced.
+			in.ExistingPolicy = &loaded
 		case errors.Is(err, fs.ErrNotExist):
 			if in.Force {
 				return Outcome{Error: fmt.Errorf("service: forced init requires an existing desired.yaml: %w", err)}
@@ -266,6 +276,14 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	}
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
+	}
+	if in.ExistingPolicy != nil {
+		// Forced init imports the existing policy's selection section: the
+		// replacement adopts live managed fields, but operator selection
+		// intent (selection.jev) is durable config and must survive the
+		// replace. First init (nil ExistingPolicy) and plain init keep the
+		// documented defaults.
+		desired.Selection = in.ExistingPolicy.Selection
 	}
 	c.step("load-sources")
 	initTargets, err := c.Targets.ResolveTargets(desired)

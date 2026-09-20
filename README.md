@@ -155,11 +155,182 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 
 `routing.enabled` defaults to `true` (an omitted `routing` section means enabled). Disabling it changes only the effective managed order; the desired chains in `desired.yaml` remain the user-authored baseline and are restored when routing is disabled. There is no mutation command for `routing.enabled`; set it directly in the YAML file.
 
+## Task-aware model selection
+
+`polytoken-quota select` recommends **one suitable, explicitly registered model** for a task. It separates two decisions:
+
+1. **Assess difficulty:** use a pinned Jev classifier to assess a task supplied on stdin, or provide `--difficulty` to keep the task entirely local.
+2. **Select a candidate:** apply your phase/tier policy, model and provider exclusions, and saved quota evidence deterministically.
+
+The command does not launch a subagent, reserve quota, rewrite model chains, or migrate existing workflows. By default it does not poll providers or write state. Both `select` and `select-eval` retain the normal startup requirement for a supported `polytoken` binary on `PATH` or configured through `POLYTOKEN_BINARY`, including explicit-tier mode.
+
+### Configure candidates separately from remote consent
+
+`--policy` names a **candidate file**, not the application's `desired.yaml`. Registered models, provider ownership, freshness TTLs, and permission to send tasks remotely come from the standard operator configuration, relocated with `POLYTOKEN_QUOTA_HOME` when needed.
+
+Save a candidate policy such as this as `candidates.yaml`:
+
+```yaml
+version: 1
+phases:
+  execute:
+    routine:
+      - [codex/example]
+    normal:
+      - [codex/example(high), anthropic/example]
+      - [other/example]
+    difficult:
+      - [codex/example(high)]
+    very_difficult:
+      - [anthropic/example]
+  plan:
+    normal:
+      - [codex/example]
+    difficult:
+      - [codex/example(high)]
+    very_difficult:
+      - [anthropic/example]
+  orchestrate:
+    normal:
+      - [codex/example]
+```
+
+These are illustrative names, not model capability recommendations. **Every base model anywhere in the candidate file must already be registered in `desired.yaml`.** Exact reasoning suffixes such as `(high)` are preserved in the result. The provider mapping that owns a model need not have the same name as its provider family.
+
+A tier contains ordered groups. Members of one group are candidates you explicitly consider interchangeable for that phase and tier; separate groups express preference order. When converting an existing ordered list, make each entry a singleton group unless you intentionally want quota-based choice within a group. Global routing rank is not used as a model-quality score.
+
+Phase names are your explicit keys; the only tiers are `routine`, `normal`, `difficult`, and `very_difficult`. A phase may omit tiers, but requesting an absent phase/tier is an error—selection never borrows another tier. Unknown fields, duplicate YAML keys, duplicate exact references within a tier, empty groups, unregistered references, trailing documents, and candidate files over 64 KiB are rejected.
+
+### Use an explicit tier for local or sensitive tasks
+
+Explicit difficulty needs **no Jev consent or credential and does not read stdin**:
+
+```sh
+polytoken-quota select --policy candidates.yaml --phase execute --difficulty normal --json
+```
+
+Choose the tier based on the hardest required part of the work, not its length:
+
+| Tier | Rubric |
+|---|---|
+| `routine` | Mechanical, well-specified work following an established procedure. |
+| `normal` | A clear approach with established patterns to follow. |
+| `difficult` | Interpretation, cross-cutting changes, concurrency/performance reasoning, or persisted-data implications. |
+| `very_difficult` | Architecture, migration policy, security-sensitive work, deep coupling, or expensive novel errors. |
+
+### Enable automatic task assessment deliberately
+
+Remote assessment is disabled by default. To enable it, the operator adds this section to **application `desired.yaml`**, not `candidates.yaml`:
+
+```yaml
+selection:
+  jev:
+    enabled: true
+    model: jev-1.13.0
+    timeout: 10s
+```
+
+Supply `TYPESAFE_API_KEY` externally in the runtime process environment. Do not put the key in arguments, candidate policy, desired configuration, or the Polytoken validation environment file. It is read immediately before an enabled request and excluded from validation-subprocess forwarding. The model must be a versioned `jev-X.Y.Z` pin; 10 seconds is the default timeout, not a latency guarantee. Forced initialization preserves these settings.
+
+Create `synthetic-task.txt` with a non-sensitive task such as “Rename the README heading using the supplied exact replacement.” Then run:
+
+```sh
+polytoken-quota select --policy candidates.yaml --phase execute --json < synthetic-task.txt
+```
+
+Only task text is sent as request state, alongside the trusted rubric and classifier pin, to the fixed Typesafe endpoint. Candidate identities, configuration, history, and attachments are not included. Prompts must be nonempty valid UTF-8 and at most 64 KiB; oversized tasks are rejected, not truncated. This byte bound is not a tokenizer or the provider's token limit. Output does not echo the prompt, key, or raw upstream response.
+
+Automatic assessment can abstain with `insufficient_information`; this is not a fifth tier. Invalid responses, remote errors, timeout, or abstention produce `assessment_unavailable`, with no automatic retries. Exact maximum-probability ties choose the harder tier; a tie involving abstention abstains. There is no confidence cutoff. Treat classification as probabilistic and potentially misleading for incomplete or adversarial task descriptions. The provider's privacy terms do not establish zero data retention; review them before opting in.
+
+### Floors, review exclusions, and refresh
+
+| Option | Behavior |
+|---|---|
+| `--policy PATH` | Required candidate-policy file; cannot grant remote consent. |
+| `--phase NAME` | Required policy phase. |
+| `--difficulty TIER` | Bypass Jev and stdin entirely. |
+| `--min-difficulty TIER` | Raise a valid automatic assessment to at least this tier. Conflicts with `--difficulty`; cannot rescue abstention or failure. |
+| `--exclude-family NAME` | Repeatable exclusion of the exact prefix before `/`, independent of quota ownership. Not a model-lineage guarantee. |
+| `--refresh` | Perform one quota check without reconciliation, finish its transaction, then read the selection snapshot. |
+| `--json` | Emit a version-1 result with explicit status and a nullable model. |
+
+Examples:
+
+```sh
+# Require at least difficult work after a valid automatic assessment.
+polytoken-quota select --policy candidates.yaml --phase execute \
+  --min-difficulty difficult --json < synthetic-task.txt
+
+# Exclude a prior worker's provider family for a review recommendation.
+polytoken-quota select --policy candidates.yaml --phase execute \
+  --difficulty normal --exclude-family codex --json
+
+# Refresh quota once before selecting, without reconciling targets.
+polytoken-quota select --policy candidates.yaml --phase execute \
+  --difficulty normal --refresh --json
+```
+
+A fatal refresh stops selection before assessment. An accepted check with provider problems can continue using independently usable evidence, including a still-fresh last-good snapshot after a failed refresh. For a wave of tasks, run `polytoken-quota check --json` once, inspect its result, then run multiple selectors without `--refresh`.
+
+### How quota evidence determines the recommendation
+
+Selection searches **all groups for confirmed candidates before using any uncertain fallback**. It picks the first group with a confirmed candidate, then maximizes the minimum usable remaining fraction across that candidate's quota windows. Authored order breaks ties. If no candidate is confirmed anywhere in the tier, it returns the first non-excluded uncertain candidate in authored order. If none remain, it returns `no_selection`.
+
+- **Excluded:** baseline-disabled models, manually disabled providers, known unavailable/exhausted states, nonpositive usable headroom, excluded families, or corrupt state values. Stale data never rescues these exclusions.
+- **Confirmed:** supported normal/reserve state and fresh, complete, successful, available quota evidence with positive usable headroom. Reserve/low is not itself disabled.
+- **Uncertain:** missing, stale, partial, failed, sparse, or unknown evidence that cannot support confirmation. A missing state file supplies missing evidence; an unreadable/corrupt state file is fatal. Future or inconsistent timestamps are handled conservatively.
+
+Headroom fractions are not comparable token counts across providers. Positive headroom is not a reservation: multiple same-snapshot selections can choose the same provider. Neither quota confirmation nor your suitability policy guarantees the model will succeed or have capacity when dispatched.
+
+### Handle statuses rather than assuming a model is available
+
+| Status | Exit | Caller action |
+|---|---|---|
+| `confirmed` | `0` | Recommendation has fresh usable quota evidence; still not reserved capacity. |
+| `uncertain` | `2` | A model is recommended without confirmed quota evidence; review before dispatch. |
+| `no_selection` | `2` | No eligible candidate remains; model is null. |
+| `assessment_unavailable` | `2` | No usable automatic assessment; model is null. |
+| `error` | `1` | Invalid invocation, policy/configuration/state, missing consent/credential, or another fatal failure. |
+
+Human output labels uncertainty explicitly. JSON includes `version`, `explicit_tier`, `abstained`, `refreshed`, `model`, `mapping` (the quota owner), effective `tier`, original `assessed_tier`, `assessed_model`, `reason`, quota `evidence` and `headroom`, and snapshot timestamps `as_of` / `evidence_checked_at` when relevant. Automatic results also carry validated `confidence` and `probabilities`; explicit-tier selection has no classifier assessment. Do not interpret its default confidence value as a classifier judgment.
+
+For shell automation, preserve exit 2 and inspect the status instead of extracting a model blindly. This example requires `jq`:
+
+```sh
+code=0
+polytoken-quota select --policy candidates.yaml --phase execute \
+  --difficulty normal --json > selection-result.json || code=$?
+case "$code" in
+  0) jq -r '.model' selection-result.json ;;
+  2) jq '{status, model, reason, evidence}' selection-result.json
+     # Review this result; do not automatically dispatch.
+     ;;
+  *) printf '%s\n' 'Selection failed; stop.' >&2; exit 1 ;;
+esac
+```
+
+### Evaluate Jev before adopting an automatic workflow
+
+`select-eval` runs synthetic rubric fixtures through the same assessment client, without quota polling or dispatch. It requires both persistent consent and explicit `--live`; an operator must separately authorize the paid requests and supply the credential:
+
+```sh
+polytoken-quota select-eval --policy candidates.yaml \
+  --fixtures docs/selection-fixtures.yaml --live --json
+```
+
+The candidate policy must cover every fixture's phase and expected tier, and all candidate models must be registered. The shipped fixtures cover all four tiers, abstention, misleading embedded instructions, short high-risk work, and non-English tasks. Fixture documents are bounded to 256 KiB and 64 cases per invocation and use non-sensitive synthetic prompts. Each assessed case can incur one paid request; larger evaluations require separately authorized batches.
+
+The report includes case IDs, expected/actual assessments, safe errors, confusion counts, under/over-classification and abstention rates, classifier/rubric versions, latency, and token usage when provided—not task text or raw responses. Exit `0` means all fixtures matched; `2` means mismatches, unavailable assessments, or policy-rejected cases; `1` means invalid input/configuration, cancellation, or a missing credential. This report is not an adopted quality threshold.
+
+Offline repository tests verify protocol handling, selection, persistence boundaries, and report arithmetic, **not live Jev quality or latency**. Review a separately authorized evaluation before adoption and repeat it when the model pin or rubric changes. No live evaluation or workflow migration is automatic. See the [selection guide](docs/selection.md) for the full contract and provider references, and the [configuration reference](docs/configuration.md#selectionjev) for operator settings.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file. |
+| `init [--force]` | Create `desired.yaml` from current managed state. `--force` overwrites a valid existing file while preserving selection consent/configuration. |
+| `select --policy PATH --phase NAME [--difficulty TIER | --min-difficulty TIER] [--exclude-family NAME] [--refresh] [--json]` | Recommend a candidate; automatic mode reads stdin, explicit tier stays local. |
+| `select-eval --policy PATH --fixtures PATH --live [--json]` | Operator-authorized rubric evaluation; never invoked by normal selection or tests. |
 | `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's status/reason, raw per-window quota numbers, next resets, compact target/source route rows with first desired/effective models, and a pending-config warning pointing at `doctor`. `--json` additionally retains ranking fields, route provenance, and complete desired/effective chains. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed Polytoken fields toward desired state. Quiet by default: without `--verbose` output is the exit code only (0 success, 1 rejected, 2 pending when applying — a dry-run pending exits 0; usage/flag errors still print to stderr). On a silent non-zero exit, re-run with `--verbose`: applied targets print only their outcome; pending targets print the full sanitized failure — external validation output capped at 256 KiB and always redacted, or the quota-own error chain — plus any retained staging path. Transact-level failures (policy load, target resolution) are persisted nowhere, so `--verbose` is their only diagnostic surface. `--keep-staging` (dry-run only) retains a failed validation candidate for inspection: the candidate moves to a deterministic per-target name (`quota-retain-<target-id>`, replacing any prior retained root) and the path prints only under `--verbose`; the caller owns deleting it (it may contain merged configuration). |
@@ -173,7 +344,9 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 
 The `routing` commands manage per-mapping routing state. The top-level `routing.enabled` field in `desired.yaml` is edited in place by the routing toggle, which tolerates YAML anchors, aliases, and merge keys anywhere else in the file (see [Configuration](#configuration)).
 
-Exit codes are `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
+Existing commands use `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
+
+For `select`, `0` means `confirmed`; `2` means `uncertain`, `no_selection`, or `assessment_unavailable`; `1` means a fatal input/configuration/state error. Inspect status before using a recommendation: uncertainty is not known availability. For `select-eval`, `0` means every fixture matched, `2` means mismatches, unavailable assessments, or policy-rejected cases, and `1` means invalid input/configuration or cancellation. Mocked tests do not establish Jev quality; the operator must review an explicitly authorized live evaluation before adoption.
 
 ## Meaningful event history
 

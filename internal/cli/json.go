@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -241,6 +242,140 @@ func mutationEnvelope(o service.Outcome) mutationJSON {
 		out.Targets = []targetJSON{}
 	}
 	return out
+}
+
+// --- select / select-eval JSON ---
+
+// selectJSONVersion is the schema version of the select and select-eval JSON
+// envelopes.
+const selectJSONVersion = 1
+
+// selectStatusError is the select envelope status for a fatal failure
+// (exit 1). Safe statuses — confirmed, uncertain, no_selection,
+// assessment_unavailable — are the runner's SelectStatus values.
+const selectStatusError = "error"
+
+// selectOutcomeJSON is the normative top-level select shape. Model and every
+// contextual field are nullable: a selection always names a status, and only
+// a selection names a model. The one exception is probabilities, which the
+// envelope always renders as an object — {} when empty, never null.
+//
+//	{"version":1,"status":"confirmed","reason":"fresh_quota_evidence",
+//	 "phase":"execute","tier":"normal","model":"codex/example(high)",
+//	 "mapping":"codex","headroom":0.9,"evidence":null,
+//	 "assessed_tier":null,"assessed_model":null,"confidence":0,"probabilities":{},
+//	 "abstained":false,"explicit_tier":true,"refreshed":false,
+//	 "as_of":"...Z","evidence_checked_at":null,"error":"optional"}
+type selectOutcomeJSON struct {
+	Version           int                `json:"version"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	Phase             string             `json:"phase"`
+	Tier              *string            `json:"tier"`
+	Model             *string            `json:"model"`
+	Mapping           *string            `json:"mapping"`
+	Headroom          *float64           `json:"headroom"`
+	Evidence          *string            `json:"evidence"`
+	AssessedTier      *string            `json:"assessed_tier"`
+	AssessedModel     *string            `json:"assessed_model"`
+	Confidence        float64            `json:"confidence"`
+	Probabilities     map[string]float64 `json:"probabilities"`
+	Abstained         bool               `json:"abstained"`
+	ExplicitTier      bool               `json:"explicit_tier"`
+	Refreshed         bool               `json:"refreshed"`
+	AsOf              *string            `json:"as_of"`
+	EvidenceCheckedAt *string            `json:"evidence_checked_at"`
+	Error             string             `json:"error,omitempty"`
+}
+
+// selectEnvelope renders one select outcome as the version-1 envelope. Every
+// free string is sanitized — policy phase names included, exactly as the text
+// path sanitizes them: the envelope can carry operator-authored identifiers
+// but never task text, credentials, or raw remote response content. Fatal
+// failures render through selectErrorEnvelope instead: by the time an outcome
+// exists the invocation is known-safe.
+func selectEnvelope(o selection.SelectOutcome) selectOutcomeJSON {
+	out := selectOutcomeJSON{
+		Version:  selectJSONVersion,
+		Status:   string(o.Status),
+		Reason:   o.Reason,
+		Phase:    validate.DefaultSanitize([]byte(o.Phase)),
+		Abstained: o.Abstained,
+		// Tier is populated only for an operator-supplied explicit tier or
+		// a successful assessment; AssessedTier marks the assessment-derived
+		// tiers and Abstained marks abstention, so what remains here is
+		// exactly the explicit local tier — including a no_selection run,
+		// whose Result is zero and must not gate the flag.
+		ExplicitTier:  o.AssessedTier == "" && !o.Abstained && o.Tier != "",
+		Refreshed:     o.Refreshed,
+		Confidence:    o.Confidence,
+		Probabilities: o.Probabilities,
+	}
+	if out.Probabilities == nil {
+		out.Probabilities = map[string]float64{}
+	}
+	if o.Tier != "" {
+		tier := string(o.Tier)
+		out.Tier = &tier
+	}
+	if o.AssessedTier != "" {
+		tier := string(o.AssessedTier)
+		out.AssessedTier = &tier
+	}
+	if o.AssessedModel != "" {
+		model := validate.DefaultSanitize([]byte(o.AssessedModel))
+		out.AssessedModel = &model
+	}
+	if o.Result.Reference != "" {
+		model := validate.DefaultSanitize([]byte(o.Result.Reference))
+		out.Model = &model
+	}
+	if o.Result.Mapping != "" {
+		mapping := validate.DefaultSanitize([]byte(o.Result.Mapping))
+		out.Mapping = &mapping
+	}
+	out.Headroom = o.Result.Headroom
+	if o.Result.Evidence != "" {
+		evidence := validate.DefaultSanitize([]byte(o.Result.Evidence))
+		out.Evidence = &evidence
+	}
+	if !o.AsOf.IsZero() {
+		asOf := o.AsOf.UTC().Format(time.RFC3339)
+		out.AsOf = &asOf
+	}
+	if o.EvidenceCheckedAt != nil {
+		checkedAt := o.EvidenceCheckedAt.UTC().Format(time.RFC3339)
+		out.EvidenceCheckedAt = &checkedAt
+	}
+	return out
+}
+
+// selectErrorEnvelope renders one fatal select failure as the version-1
+// envelope: the error status, the sanitized message, and the same field
+// shape as every other envelope — including the empty probabilities object,
+// which is never null even for a fatal failure.
+func selectErrorEnvelope(msg string) selectOutcomeJSON {
+	return selectOutcomeJSON{
+		Version:       selectJSONVersion,
+		Status:        selectStatusError,
+		Probabilities: map[string]float64{},
+		Error:         msg,
+	}
+}
+
+// evalReportJSON is the normative top-level select-eval shape: the schema
+// version, an optional fatal error, and the safe evaluation report.
+//
+//	{"version":1,"error":"optional","report":{...selection.Report...}}
+type evalReportJSON struct {
+	Version int               `json:"version"`
+	Error   string            `json:"error,omitempty"`
+	Report  *selection.Report `json:"report,omitempty"`
+}
+
+// evalEnvelope renders one evaluation report as the version-1 envelope.
+func evalEnvelope(r selection.Report) evalReportJSON {
+	return evalReportJSON{Version: selectJSONVersion, Report: &r}
 }
 
 // encodeJSON writes exactly one JSON object to w. stderr stays empty except on

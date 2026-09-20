@@ -1,5 +1,9 @@
 # AGENTS.md — polytoken-quota reconciler
 
+Last verified: 2026-09-20
+
+Task-assessment/selection contracts live in `internal/selection/AGENTS.md`. Selection domain vocabulary is defined in the committed `CONTEXT.md`, with the public selection contract in `docs/selection.md`; unlike the ignored design/plan artifacts below, both are committed repository files. Operator opt-in remote assessment is a runtime feature, not an exception to repository agents' no-live-accounts validation rule.
+
 Short-lived Go CLI (`polytoken-quota`) that maintains durable independent
 quota/availability state and safely reconciles only
 explicitly managed Polytoken model fields across a global target and registered
@@ -73,9 +77,10 @@ Contract tests invoke the real Polytoken binary against complete private staging
   credentials, auth blocks, inherited secrets, or raw unrelated config. Sanitize all
   diagnostics and command output. Transient staging is the sole narrowly scoped
   exception and must be private and always deleted.
-- **Scoped daemon interaction.** The host binary (`check`, `reconcile`,
-  `init`, `routing`, `state`) never contacts, inspects, or signals any live
-  Polytoken daemon or session. The sole exception is the operator-installed
+- **Scoped daemon interaction.** The host binary (`init`, `status`, `check`,
+  `reconcile`, `routing`, `doctor`, `history`, `select`, `select-eval`,
+  `install-hook`) never contacts, inspects, or signals any live Polytoken
+  daemon or session. The sole exception is the operator-installed
   `notice-hook` subcommand: it acts only on its **own** session's daemon, via
   the documented loopback HTTP API, with that session's own credential, and
   only between turns (a 409 turn-in-flight reply is skipped, never forced).

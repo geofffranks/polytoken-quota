@@ -95,6 +95,22 @@ schedule:
 
 The legacy `off_peak` key is rejected with a pointer to `peak`.
 
+## `selection.jev`
+
+Optional persistent consent and settings for task assessment. Absence disables remote assessment. This section belongs only in operator `desired.yaml` (the standard application home, overridden by `POLYTOKEN_QUOTA_HOME`), never in candidate policy.
+
+```yaml
+selection:
+  jev:
+    enabled: false
+    model: jev-1.13.0
+    timeout: 10s
+```
+
+`enabled` defaults to false; `model` is a versioned classifier pin; `timeout` must be a positive finite duration and defaults to 10s, not a latency SLA. Unknown keys in this new section are rejected. First initialization leaves it absent; forced initialization preserves it and refuses to overwrite unreadable or corrupt existing configuration.
+
+Only the runtime process environment's `TYPESAFE_API_KEY` supplies the credential, immediately before an enabled remote call. There is no key or endpoint field. Do not place the key in the validation subprocess environment file; it is excluded from that forwarding path. The fixed endpoint is `https://api.typesafe.ai/v1/systemone`. Explicit `--difficulty` needs neither consent nor a credential and does not read stdin. See [selection](selection.md) for disclosure limits, retention caveats, strict candidate policy and the separately authorized live evaluation gate.
+
 ## `global` and `projects`
 
 `global` describes the global Polytoken configuration root; each entry in

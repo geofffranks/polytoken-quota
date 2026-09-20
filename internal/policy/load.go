@@ -26,9 +26,7 @@ var defaultOperational = Operational{
 	BackupCount:        1,
 }
 
-// defaultQuotaFreshness is the freshness TTL applied when a quota section omits
-// freshness_ttl, matching the routing package's default.
-const defaultQuotaFreshness = 30 * time.Minute
+// quota freshness is carried by DefaultQuotaFreshness (types.go).
 
 // Load reads and validates desired.yaml at path, returning a fully resolved Desired
 // graph. It rejects unsupported versions, mappings without concrete model
@@ -129,6 +127,12 @@ func loadBytes(data []byte) (Desired, error) {
 	d.Operational = op
 
 	d.Routing = routingFromWire(w.Routing)
+
+	sel, err := selectionFromWire(w.Selection)
+	if err != nil {
+		return Desired{}, err
+	}
+	d.Selection = sel
 
 	if d.Global, err = targetFromWire(w.Global, true, modelOwner); err != nil {
 		return Desired{}, fmt.Errorf("policy: global target: %w", err)
@@ -342,6 +346,7 @@ type docWire struct {
 	Projects    []targetWire           `yaml:"projects"`
 	Operational *operationalWire       `yaml:"operational"`
 	Routing     *routingWire           `yaml:"routing"`
+	Selection   *selectionWire         `yaml:"selection"`
 }
 
 type mappingWire struct {
@@ -512,6 +517,173 @@ func routingFromWire(w *routingWire) RoutingConfig {
 	return RoutingConfig{Enabled: w.Enabled}
 }
 
+// selectionWire is the on-disk shape of the optional top-level `selection`
+// section. Unlike the legacy sections — which plain yaml decoding leaves
+// lenient so existing files never tighten — the selection section is decoded
+// strictly: unknown keys, duplicate keys, and non-mapping shapes are all
+// rejected. Decoding errors are fixed strings that name the allowed grammar
+// but never echo document-derived values back into diagnostics.
+type selectionWire struct {
+	Jev *jevWire `yaml:"jev"`
+}
+
+func (s *selectionWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Tag == "!!null" {
+		return nil // `selection:` with no value: every key defaults
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("policy: selection must be a mapping")
+	}
+	seenJev := false
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "jev":
+			if seenJev {
+				return errors.New("policy: selection: duplicate jev key")
+			}
+			seenJev = true
+			var jw jevWire
+			if err := value.Content[i+1].Decode(&jw); err != nil {
+				return fmt.Errorf("policy: selection: %w", err)
+			}
+			s.Jev = &jw
+		default:
+			return errors.New("policy: selection: unknown key (want jev)")
+		}
+	}
+	return nil
+}
+
+// jevWire is the on-disk shape of selection.jev. `enabled`, `model`, and
+// `timeout` are the only keys: model pins the versioned assessment model
+// (validated as jev-X.Y.Z; DocumentedJevModel when the key is omitted).
+// Duplicate keys are rejected instead of silently last-wins, and explicit
+// empty values are rejected rather than interpreted as omitted.
+type jevWire struct {
+	Enabled *bool
+	Model   string
+	Timeout string
+	// modelSet/timeoutSet distinguish an explicit key (including an explicit
+	// empty value, which must be rejected) from an omitted one, which defaults.
+	modelSet   bool
+	timeoutSet bool
+}
+
+func (j *jevWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Tag == "!!null" {
+		return nil // `jev:` with no value: every key defaults
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("policy: selection jev must be a mapping")
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "enabled":
+			if j.Enabled != nil {
+				return errors.New("policy: selection jev: duplicate enabled key")
+			}
+			if value.Content[i+1].ShortTag() == "!!null" {
+				// An explicit `enabled: null` (also ~ and aliases to null) is
+				// not a boolean: yaml would silently decode it as the zero
+				// value. Reject it with the same fixed, non-echoing error as
+				// any other non-boolean value.
+				return errors.New("policy: selection jev: enabled must be a boolean")
+			}
+			var b bool
+			if err := value.Content[i+1].Decode(&b); err != nil {
+				return errors.New("policy: selection jev: enabled must be a boolean")
+			}
+			j.Enabled = &b
+		case "model":
+			if j.modelSet {
+				return errors.New("policy: selection jev: duplicate model key")
+			}
+			j.modelSet = true
+			if err := value.Content[i+1].Decode(&j.Model); err != nil {
+				return errors.New("policy: selection jev: model must be a versioned pin like jev-1.13.0")
+			}
+		case "timeout":
+			if j.timeoutSet {
+				return errors.New("policy: selection jev: duplicate timeout key")
+			}
+			j.timeoutSet = true
+			if err := value.Content[i+1].Decode(&j.Timeout); err != nil {
+				return errors.New("policy: selection jev: timeout must be a positive duration (e.g. 10s)")
+			}
+		default:
+			return errors.New("policy: selection jev: unknown key (want enabled, model, or timeout)")
+		}
+	}
+	return nil
+}
+
+// ValidJevPin reports whether model has the documented versioned pin shape:
+// exactly `jev-X.Y.Z` with three non-empty numeric components. Like the quota
+// adapter names, the value is validated against a fixed grammar rather than
+// accepted as any non-empty string, so pins stay comparable across releases.
+// This is the single jev pin grammar for the whole tree: policy load uses it
+// for the desired configuration, and the selection package's ValidModelPin
+// delegates to it, so the two layers cannot drift.
+func ValidJevPin(model string) bool {
+	rest, ok := strings.CutPrefix(model, "jev-")
+	if !ok {
+		return false
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// defaultSelection is applied when desired.yaml omits the selection section
+// (or any key within it): JEV assessment disabled, pinned to
+// DocumentedJevModel, bounded by DefaultJevTimeout.
+func defaultSelection() SelectionConfig {
+	return SelectionConfig{Jev: JevSelectionConfig{Enabled: false, Model: DocumentedJevModel, Timeout: DefaultJevTimeout}}
+}
+
+// selectionFromWire translates the optional selection section into its
+// resolved form. An omitted section or key yields the documented default
+// (JEV disabled, DocumentedJevModel pin, DefaultJevTimeout). Explicit keys are
+// validated, never partially interpreted: the model pin must match jev-X.Y.Z,
+// the timeout must parse and be positive, and an explicit empty model or
+// timeout is an error rather than a silent default. Validation errors are
+// fixed strings that do not echo the offending config values.
+func selectionFromWire(w *selectionWire) (SelectionConfig, error) {
+	sel := defaultSelection()
+	if w == nil || w.Jev == nil {
+		return sel, nil
+	}
+	if w.Jev.Enabled != nil {
+		sel.Jev.Enabled = *w.Jev.Enabled
+	}
+	if w.Jev.modelSet {
+		if !ValidJevPin(w.Jev.Model) {
+			return SelectionConfig{}, errors.New("policy: selection jev model must be a versioned pin like jev-1.13.0")
+		}
+		sel.Jev.Model = w.Jev.Model
+	}
+	if w.Jev.timeoutSet {
+		d, err := time.ParseDuration(w.Jev.Timeout)
+		if err != nil || d <= 0 {
+			return SelectionConfig{}, errors.New("policy: selection jev timeout must be a positive duration (e.g. 10s)")
+		}
+		sel.Jev.Timeout = d
+	}
+	return sel, nil
+}
+
 // quotaFromWire translates a mapping's quota section into a QuotaConfig. The
 // mapping key is the adapter name and must be a known adapter, validated here
 // so an unknown key rejects policy load. The schedule, when present, is
@@ -555,7 +727,7 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	}
 	qc := &QuotaConfig{
 		Adapter:          adapter,
-		FreshnessTTL:     defaultQuotaFreshness,
+		FreshnessTTL:     DefaultQuotaFreshness,
 		BalanceGroup:     w.BalanceGroup,
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
@@ -568,7 +740,7 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	if mappingID == "anthropic" && mode == "api" && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
-	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)
+	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, DefaultQuotaFreshness)
 	if err != nil {
 		return nil, fmt.Errorf("policy: mapping %q: %w", mappingID, err)
 	}
