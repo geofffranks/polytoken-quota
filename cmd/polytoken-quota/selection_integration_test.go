@@ -8,7 +8,7 @@ package main
 //
 //	newCoordinator(config{temp utility root})
 //	  → real Coordinator with a real state.Store (temp StoreState)
-//	  → the production selectionSnapshot / selectionRefresh adapters
+//	  → the production Coordinator snapshot source / selectionRefresh adapter
 //	  → selection.SelectRunner with a fake NewAssessor factory
 //	  → cli.Run (the actual select command surface, exit codes and output)
 //
@@ -212,7 +212,7 @@ func newSelectionTestEnv(t *testing.T) *selectionTestEnv {
 // construct a live client, which tests must never do.
 func (e *selectionTestEnv) selectRunner() *selection.SelectRunner {
 	return &selection.SelectRunner{
-		Snapshot: selectionSnapshot{coord: e.coord},
+		Snapshot: e.coord,
 		Refresh:  selectionRefresh{coord: e.coord},
 		NewAssessor: func(model string, timeout time.Duration) (selection.Assessor, error) {
 			e.factoryCalls++

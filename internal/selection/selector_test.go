@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -813,4 +814,20 @@ func TestSelectPreservesReference(t *testing.T) {
 			t.Fatalf("json leaked observation internals: %s", got)
 		}
 	})
+}
+
+// D2: the confirm freshness fallback is the policy-owned quota default
+// (policy.DefaultQuotaFreshness), not a selection-local copy of 30 minutes.
+func TestConfirmTTLFallbackIsPolicyDefault(t *testing.T) {
+	ttl, confirmable := confirmTTL(&policy.Mapping{Quota: &policy.QuotaConfig{FreshnessTTL: -time.Second}})
+	if !confirmable || ttl != policy.DefaultQuotaFreshness {
+		t.Errorf("confirmTTL(non-positive) = (%s, %v), want (%s, true)", ttl, confirmable, policy.DefaultQuotaFreshness)
+	}
+	ttl, confirmable = confirmTTL(&policy.Mapping{Quota: &policy.QuotaConfig{FreshnessTTL: time.Hour}})
+	if !confirmable || ttl != time.Hour {
+		t.Errorf("confirmTTL(configured) = (%s, %v), want (1h, true)", ttl, confirmable)
+	}
+	if _, confirmable := confirmTTL(&policy.Mapping{}); confirmable {
+		t.Error("a mapping without quota configuration must not be confirmable")
+	}
 }

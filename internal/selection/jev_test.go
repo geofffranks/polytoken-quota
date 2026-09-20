@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"io"
 	"net/http"
 	"strings"
@@ -134,6 +135,58 @@ func TestValidModelPinForms(t *testing.T) {
 	for _, tc := range tests {
 		if got := ValidModelPin(tc.model); got != tc.want {
 			t.Errorf("ValidModelPin(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
+// MAINT01: the selection-side pin check is a delegation to the policy
+// grammar — the same validation the desired configuration's selection.jev
+// model passes at load — so the two layers accept exactly the same pins and
+// cannot drift.
+func TestValidModelPinDelegatesToPolicyGrammar(t *testing.T) {
+	probes := []string{
+		policy.DocumentedJevModel,
+		"jev-1.13.0", "jev-0.0.1", "jev-10.20.30",
+		"jev-latest", "jev-1.13", "jev-1.13.0.0", "jev-a.b.c",
+		"jev-1.13.0-rc1", "JEV-1.13.0", "jev_1.13.0", "gpt-4",
+		"", "jev", "jev-",
+	}
+	for _, model := range probes {
+		if got, want := ValidModelPin(model), policy.ValidJevPin(model); got != want {
+			t.Errorf("ValidModelPin(%q) = %v, policy.ValidJevPin = %v — pin grammars diverged", model, got, want)
+		}
+	}
+	if !ValidModelPin(policy.DocumentedJevModel) {
+		t.Errorf("documented pin %q must validate", policy.DocumentedJevModel)
+	}
+}
+
+// D2: the client-side timeout default is the policy-owned selection.jev
+// default, not a second 10s constant.
+func TestDefaultAssessTimeoutIsPolicyDefault(t *testing.T) {
+	if DefaultAssessTimeout != policy.DefaultJevTimeout {
+		t.Errorf("DefaultAssessTimeout = %s, want policy.DefaultJevTimeout (%s)", DefaultAssessTimeout, policy.DefaultJevTimeout)
+	}
+}
+
+// MAINT03: ValidateTask is the exported single bound set for task text, and
+// it is the exact rule the assessor applies to its prompt.
+func TestValidateTaskBounds(t *testing.T) {
+	cases := []struct {
+		name   string
+		prompt string
+		want   error
+	}{
+		{"empty", "", ErrPromptEmpty},
+		{"whitespace only", "   \n\t ", ErrPromptEmpty},
+		{"not utf-8", string([]byte{0xff, 0xfe}), ErrPromptNotUTF8},
+		{"over bound", strings.Repeat("a", MaxPromptBytes+1), ErrPromptTooLarge},
+		{"exact bound", strings.Repeat("a", MaxPromptBytes), nil},
+		{"plain task", "fix the typo in the readme example", nil},
+	}
+	for _, tc := range cases {
+		if got := ValidateTask(tc.prompt); !errors.Is(got, tc.want) {
+			t.Errorf("%s: ValidateTask = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

@@ -263,7 +263,7 @@ func TestLoadSelectionJevRejectsDuplicateKeys(t *testing.T) {
 // interpreted as omitted. The documented default DocumentedJevModel itself
 // satisfies the grammar.
 func TestLoadSelectionJevModelMustBeVersionedPin(t *testing.T) {
-	if !validJevPin(DocumentedJevModel) {
+	if !ValidJevPin(DocumentedJevModel) {
 		t.Fatalf("documented model %q must satisfy the pin grammar", DocumentedJevModel)
 	}
 	cases := []struct {

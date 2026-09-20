@@ -88,6 +88,16 @@ type fixtureDoc struct {
 // validation.
 const MaxFixtureBytes = 256 << 10
 
+// MaxFixtureCases conservatively bounds how many cases one fixture document
+// may declare. A live evaluation performs one real, paid remote request per
+// case, and the shipped synthetic set (docs/selection-fixtures.yaml, 15
+// cases) is the intended scale; 64 admits legitimate growth and rubric
+// coverage experiments while turning an accidentally or hostilely inflated
+// document into a parse rejection before any request can be sent. Raise the
+// bound deliberately, with a documented reason, when a larger shipped set is
+// actually wanted.
+const MaxFixtureCases = 64
+
 // LoadFixtureSet reads and parses a fixture document from disk. At most
 // MaxFixtureBytes+1 bytes are ever read: anything larger is rejected with a
 // fixed error before an unbounded allocation.
@@ -134,6 +144,9 @@ func ParseFixtureSet(data []byte) (*FixtureSet, error) {
 	if len(doc.Fixtures) == 0 {
 		return nil, errors.New("selection: fixtures: document contains no fixtures")
 	}
+	if len(doc.Fixtures) > MaxFixtureCases {
+		return nil, fmt.Errorf("selection: fixtures: document declares %d fixtures, over the %d case limit", len(doc.Fixtures), MaxFixtureCases)
+	}
 	seen := make(map[string]bool, len(doc.Fixtures))
 	for i := range doc.Fixtures {
 		f := &doc.Fixtures[i]
@@ -156,7 +169,7 @@ func validateFixture(f *Fixture) error {
 	if strings.TrimSpace(f.Phase) == "" {
 		return errors.New("phase must be nonempty")
 	}
-	if err := validatePrompt(f.Prompt); err != nil {
+	if err := ValidateTask(f.Prompt); err != nil {
 		return fmt.Errorf("prompt: %w", err)
 	}
 	hasTier := f.Expected.Tier != ""
@@ -172,29 +185,54 @@ func validateFixture(f *Fixture) error {
 	return nil
 }
 
+// coveredOutcome is the single phase/tier coverage encoding: phase must
+// exist in the policy and, unless the outcome is an abstention (abstention
+// is not a tier and references only the phase), the outcome's tier must be
+// covered by that phase. Missing coverage is an error, never a borrow from
+// another tier (docs/selection.md). PolicyCoverage applies it to expected
+// outcomes and OutcomeCoverage to actual outcomes.
+func coveredOutcome(p Policy, phase string, o Outcome) error {
+	pp, ok := p.Phases[phase]
+	if !ok {
+		return fmt.Errorf("phase %q is not covered by the candidate policy", phase)
+	}
+	if o.Abstained {
+		return nil
+	}
+	if _, ok := pp[o.Tier]; !ok {
+		return fmt.Errorf("tier %q is not covered for phase %q", o.Tier, phase)
+	}
+	return nil
+}
+
 // PolicyCoverage verifies that every fixture's phase — and, for tier
-// expectations, its tier — exists in the supplied candidate policy. Per
-// docs/selection.md, missing phase/tier coverage is an error; coverage is
-// never borrowed from another tier. Abstention fixtures reference only the
-// phase.
+// expectations, its tier — exists in the supplied candidate policy, using
+// the shared coveredOutcome encoding. Per docs/selection.md, missing
+// phase/tier coverage is an error; coverage is never borrowed from another
+// tier. Abstention fixtures reference only the phase.
 func PolicyCoverage(p Policy, set *FixtureSet) error {
 	if set == nil {
 		return errors.New("selection: fixtures: nil fixture set")
 	}
 	for i := range set.Fixtures {
 		f := &set.Fixtures[i]
-		phase, ok := p.Phases[f.Phase]
-		if !ok {
-			return fmt.Errorf("selection: fixtures: fixture %q: phase %q is not covered by the candidate policy", f.ID, f.Phase)
-		}
-		if f.Expected.Abstention {
-			continue
-		}
-		if _, ok := phase[f.Expected.Tier]; !ok {
-			return fmt.Errorf("selection: fixtures: fixture %q: tier %q is not covered for phase %q", f.ID, f.Expected.Tier, f.Phase)
+		if err := coveredOutcome(p, f.Phase, f.Outcome()); err != nil {
+			return fmt.Errorf("selection: fixtures: fixture %q: %w", f.ID, err)
 		}
 	}
 	return nil
+}
+
+// OutcomeCoverage returns an EvalOptions.ValidatePolicy function that marks
+// an actual outcome policy-rejected when its phase is not in the candidate
+// policy or its tier is not covered by that phase. Abstentions are never
+// rejected: abstention is an outcome, not a tier. It is the per-case
+// counterpart of PolicyCoverage and shares its coverage encoding, so
+// expected-outcome preflight and actual-outcome reporting can never drift.
+func OutcomeCoverage(p Policy) func(phase string, actual Outcome) error {
+	return func(phase string, actual Outcome) error {
+		return coveredOutcome(p, phase, actual)
+	}
 }
 
 // EvalRequest is one evaluation case handed to a EvalRunner. Only Prompt reaches the
@@ -265,7 +303,9 @@ type EvalOptions struct {
 	// ValidatePolicy, when set, is called for each successfully assessed
 	// case with the case's phase and actual outcome. A returned error marks
 	// the record policy-rejected (counted, never fatal). Wire
-	// selection.PolicyCoverage here to enforce candidate-policy coverage.
+	// selection.OutcomeCoverage(policy) here to enforce candidate-policy
+	// coverage per case; PolicyCoverage remains the expected-outcome
+	// preflight over a whole fixture set.
 	ValidatePolicy func(phase string, actual Outcome) error
 }
 

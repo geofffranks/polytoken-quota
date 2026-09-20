@@ -50,7 +50,7 @@ var helpDocs = map[string]helpDoc{
 		long:  "Initialize quota state from the current Polytoken configuration.",
 		usage: []string{"polytoken-quota init [--force]"},
 		flags: []flagDoc{
-			{"--force", "Overwrite existing state without confirmation"},
+			{"--force", "Overwrite existing state without confirmation; operator selection consent (selection.jev) is preserved, not reset"},
 		},
 	},
 	"status": {

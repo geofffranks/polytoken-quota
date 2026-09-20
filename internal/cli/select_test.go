@@ -506,6 +506,131 @@ func TestSelectEvalInvalidFlagsNeverCallRunner(t *testing.T) {
 	}
 }
 
+func TestSelectAttachedFlagLikeValueRejected(t *testing.T) {
+	// COR-2: an attached value that itself starts with "-" is the same
+	// invalid value the detached form rejects. "--exclude-family=-codex"
+	// must not slip a flag-shaped exclusion past the parse, and the
+	// rejection must happen before stdin is ever read.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"exclude family attached dash", []string{"select", "--policy", "p.yaml", "--phase", "execute", "--exclude-family=-codex"}},
+		{"policy attached dash", []string{"select", "--policy=-p.yaml", "--phase", "execute"}},
+		{"phase attached dash", []string{"select", "--policy", "p.yaml", "--phase=-execute"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &selectSpy{}
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), tc.args, &failingStdin{t}, &stdout, &stderr, spy.deps())
+			if code != ExitRejected {
+				t.Fatalf("exit=%d, want 1", code)
+			}
+			if spy.calls != 0 {
+				t.Fatal("runner called with a flag-shaped value")
+			}
+			if stderr.String() == "" {
+				t.Fatal("expected a stderr diagnostic")
+			}
+		})
+	}
+}
+
+func TestSelectJSONExplicitTierNoSelection(t *testing.T) {
+	// D1: an explicit-tier run that finds no candidate still stayed local,
+	// so explicit_tier must be true even though Result is zero for
+	// no_selection. An assessment-derived tier or an abstention is never
+	// explicit.
+	cases := []struct {
+		name    string
+		outcome selection.SelectOutcome
+		want    string
+	}{
+		{"explicit tier", selection.SelectOutcome{
+			Status: selection.SelectNoSelection, Reason: selection.ReasonNoEligibleCandidate,
+			Phase: "execute", Tier: selection.TierNormal,
+		}, `"explicit_tier":true`},
+		{"assessment tier", selection.SelectOutcome{
+			Status: selection.SelectNoSelection, Reason: selection.ReasonNoEligibleCandidate,
+			Phase: "execute", Tier: selection.TierNormal, AssessedTier: selection.TierNormal,
+		}, `"explicit_tier":false`},
+		{"abstained", selection.SelectOutcome{
+			Status: selection.SelectAssessmentUnavailable, Reason: selection.ReasonAssessmentAbstained,
+			Phase: "execute", Abstained: true,
+		}, `"explicit_tier":false`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &selectSpy{outcome: tc.outcome}
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), []string{"select", "--policy", "p.yaml", "--phase", "execute", "--difficulty", "normal", "--json"},
+				nil, &stdout, &stderr, spy.deps())
+			if code != ExitPending {
+				t.Fatalf("exit=%d, want 2", code)
+			}
+			if !strings.Contains(stdout.String(), tc.want) {
+				t.Fatalf("envelope missing %s: %s", tc.want, stdout.String())
+			}
+			assertSingleJSONObject(t, stdout.String())
+		})
+	}
+}
+
+func TestSelectJSONFatalProbabilitiesNeverNull(t *testing.T) {
+	// CR-COMP-39-3: every select --json envelope renders probabilities as
+	// an object — {} when empty, never null — including fatal failures
+	// from both argument parsing and the runner.
+	cases := []struct {
+		name string
+		args []string
+		spy  *selectSpy
+	}{
+		{"parse failure", []string{"select", "--phase", "execute", "--json"}, &selectSpy{}},
+		{"runner failure", []string{"select", "--policy", "p.yaml", "--phase", "execute", "--difficulty", "normal", "--json"},
+			&selectSpy{err: selection.Fatal(selection.FatalPolicy, errors.New("open /Users/op/secret/policy.yaml: no such file"))}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), tc.args, nil, &stdout, &stderr, tc.spy.deps())
+			if code != ExitRejected {
+				t.Fatalf("exit=%d, want 1", code)
+			}
+			out := stdout.String()
+			assertSingleJSONObject(t, out)
+			if !strings.Contains(out, `"probabilities":{}`) {
+				t.Fatalf("fatal envelope must render an empty probabilities object: %s", out)
+			}
+			if strings.Contains(out, `"probabilities":null`) {
+				t.Fatalf("probabilities must never be null: %s", out)
+			}
+			if !strings.Contains(out, `"status":"error"`) {
+				t.Fatalf("error envelope missing status: %s", out)
+			}
+		})
+	}
+}
+
+func TestSelectWhitespaceOnlyTaskRejectedAsEmpty(t *testing.T) {
+	// MAINT03: the CLI task bounds are selection.ValidateTask's — a
+	// whitespace-only task is empty exactly as the assessment path sees it,
+	// and the rejection renders the CLI's fixed empty-task sentence.
+	spy := &selectSpy{}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"select", "--policy", "p.yaml", "--phase", "execute"},
+		strings.NewReader("  \n\t "), &stdout, &stderr, spy.deps())
+	if code != ExitRejected {
+		t.Fatalf("exit=%d, want 1", code)
+	}
+	if spy.calls != 0 {
+		t.Fatal("runner called with a whitespace-only task")
+	}
+	if !strings.Contains(stderr.String(), "task is empty") {
+		t.Fatalf("expected the fixed empty-task sentence: %q", stderr.String())
+	}
+}
+
 // assertSingleJSONObject asserts the output is exactly one JSON object (the
 // AC.9 rule, applied to the select envelopes).
 func assertSingleJSONObject(t *testing.T, out string) {

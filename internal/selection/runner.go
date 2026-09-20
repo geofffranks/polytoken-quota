@@ -43,9 +43,9 @@ type Snapshot struct {
 }
 
 // SnapshotSource supplies the business snapshot exactly once per invocation.
-// The production implementation adapts service.Coordinator's narrow
-// SelectionInputs read; target diagnostic failures never reach a selection
-// because targets are never resolved on this path.
+// service.Coordinator satisfies it directly with its SelectionSnapshot read —
+// the runner's own snapshot type, no adapter or mirrored copy — and that read
+// resolves no targets, so target diagnostic failures never reach a selection.
 type SnapshotSource interface {
 	SelectionSnapshot(ctx context.Context) (Snapshot, error)
 }
@@ -99,6 +99,7 @@ const (
 	FatalCredential FatalKind = "credential" // runtime credential missing or unusable
 	FatalTask       FatalKind = "task"       // task empty, not UTF-8, or over the byte bound
 	FatalAssessor   FatalKind = "assessor"   // assessment client unavailable
+	FatalCanceled   FatalKind = "canceled"   // the run's context ended before completion
 )
 
 // fatalSentences are the fixed, safe Error() sentences per kind. They never
@@ -112,6 +113,7 @@ var fatalSentences = map[FatalKind]string{
 	FatalCredential: "selection: assessment credential is unavailable",
 	FatalTask:       "selection: task is empty, not valid UTF-8, or exceeds the 64 KiB limit",
 	FatalAssessor:   "selection: assessment is unavailable",
+	FatalCanceled:   "selection: run was canceled before completion",
 }
 
 // FatalError is a fatal orchestration failure. Error() is the fixed safe
@@ -282,8 +284,10 @@ func (r *SelectRunner) Run(ctx context.Context, req SelectRequest) (SelectOutcom
 		if r.NewAssessor == nil {
 			return SelectOutcome{}, fatal(FatalAssessor, errors.New("no assessor factory configured"))
 		}
-		// Local task validation before anything remote can see it.
-		if err := validateLocalTask(req.Prompt); err != nil {
+		// Local task validation before anything remote can see it, using the
+		// exported shared bound set (the same rule the assessor and the
+		// fixture parser apply).
+		if err := ValidateTask(req.Prompt); err != nil {
 			return SelectOutcome{}, fatal(FatalTask, err)
 		}
 	}
@@ -435,15 +439,6 @@ func (r *SelectRunner) Run(ctx context.Context, req SelectRequest) (SelectOutcom
 	return out, nil
 }
 
-// validateLocalTask mirrors the assessment request bounds locally so an
-// unusable task fails before any assessor is invoked. It delegates to the
-// shared request-side validator — one bound set for both paths: a
-// whitespace-only task is empty, and non-UTF-8 or over-MaxPromptBytes tasks
-// are rejected.
-func validateLocalTask(prompt string) error {
-	return validatePrompt(prompt)
-}
-
 // EvalInvocation is one select-eval invocation. Both paths are required; the
 // caller gates --live before invoking a live assessor.
 type EvalInvocation struct {
@@ -522,23 +517,20 @@ func (r *EvaluationRunner) RunEval(ctx context.Context, req EvalInvocation) (*Re
 		return nil, fatal(FatalAssessor, err)
 	}
 	// Per-case policy check: an actual tier outside the candidate policy is
-	// counted (policy_rejected), never fatal.
-	validate := func(phase string, actual Outcome) error {
-		pp, ok := p.Phases[phase]
-		if !ok {
-			return fmt.Errorf("phase %q is not in the candidate policy", phase)
-		}
-		if actual.Abstained {
-			return nil
-		}
-		if _, ok := pp[actual.Tier]; !ok {
-			return fmt.Errorf("tier %q is not covered for phase %q", actual.Tier, phase)
-		}
-		return nil
-	}
-	report, err := Evaluate(ctx, assessor, set, EvalOptions{ValidatePolicy: validate})
+	// counted (policy_rejected), never fatal. OutcomeCoverage is the same
+	// phase/tier encoding PolicyCoverage applies to expected outcomes — one
+	// shared coverage rule for both.
+	report, err := Evaluate(ctx, assessor, set, EvalOptions{ValidatePolicy: OutcomeCoverage(p)})
 	if err != nil {
-		if errors.Is(err, ErrNoAPIKey) {
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// The run stopped because its context ended — caller
+			// cancellation or deadline — not because any policy or fixture
+			// was invalid. The canceled kind carries the fixed safe
+			// cancellation sentence; the context identity stays wrapped for
+			// errors.Is classification.
+			return nil, fatal(FatalCanceled, err)
+		case errors.Is(err, ErrNoAPIKey):
 			// The credential failed at assessment time: fatal for the whole
 			// invocation, matching the select path — never a per-case
 			// unavailable report the CLI would treat as exit 2.

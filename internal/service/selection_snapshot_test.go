@@ -1,9 +1,11 @@
 package service
 
-// selection_inputs_test.go — the narrow business snapshot contract behind
-// the selection runner: policy/state fatal, missing state file yields an
-// empty state, the clock is sampled once, and target resolution is never
-// attempted (a Coordinator with no target registry still snapshots).
+// selection_snapshot_test.go — the narrow business snapshot contract behind
+// the selection runner: the coordinator produces the selection runner's own
+// snapshot type (and therefore satisfies selection.SnapshotSource directly),
+// policy/state fatals behave, a missing state file yields an empty state, the
+// clock is sampled once, and target resolution is never attempted (a
+// Coordinator with no target registry still snapshots).
 
 import (
 	"context"
@@ -12,8 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
+
+// The consolidated snapshot read satisfies the selection runner's source
+// interface directly; no adapter is needed.
+var _ selection.SnapshotSource = (*Coordinator)(nil)
 
 // minimalDesiredDoc is a small valid desired.yaml for snapshot tests. The
 // model names are synthetic, matching internal/policy test fixtures.
@@ -66,11 +73,11 @@ func newSnapshotCoordinator(t *testing.T, desired string) (*Coordinator, *snapsh
 	return coord, clock
 }
 
-func TestSelectionInputsReadsDesiredStateAndSamplesClockOnce(t *testing.T) {
+func TestSelectionSnapshotReadsDesiredStateAndSamplesClockOnce(t *testing.T) {
 	coord, clock := newSnapshotCoordinator(t, minimalDesiredDoc)
-	inputs, err := coord.SelectionInputs(context.Background())
+	inputs, err := coord.SelectionSnapshot(context.Background())
 	if err != nil {
-		t.Fatalf("SelectionInputs: %v", err)
+		t.Fatalf("SelectionSnapshot: %v", err)
 	}
 	if len(inputs.Desired.Providers) != 1 {
 		t.Fatalf("providers=%d, want the codex mapping", len(inputs.Desired.Providers))
@@ -86,9 +93,9 @@ func TestSelectionInputsReadsDesiredStateAndSamplesClockOnce(t *testing.T) {
 	}
 }
 
-func TestSelectionInputsPolicyFatal(t *testing.T) {
+func TestSelectionSnapshotPolicyFatal(t *testing.T) {
 	coord, _ := newSnapshotCoordinator(t, "") // no desired.yaml
-	if _, err := coord.SelectionInputs(context.Background()); err == nil {
+	if _, err := coord.SelectionSnapshot(context.Background()); err == nil {
 		t.Fatal("a missing desired.yaml must be fatal")
 	}
 
@@ -101,12 +108,12 @@ func TestSelectionInputsPolicyFatal(t *testing.T) {
 		Policy: FilePolicyLoader{Path: broken},
 		State:  StoreState{Store: state.Store{Path: filepath.Join(home, "state.json")}},
 	}
-	if _, err := coord2.SelectionInputs(context.Background()); err == nil {
+	if _, err := coord2.SelectionSnapshot(context.Background()); err == nil {
 		t.Fatal("an invalid desired.yaml must be fatal")
 	}
 }
 
-func TestSelectionInputsStateFatal(t *testing.T) {
+func TestSelectionSnapshotStateFatal(t *testing.T) {
 	home := t.TempDir()
 	desiredPath := filepath.Join(home, "desired.yaml")
 	if err := os.WriteFile(desiredPath, []byte(minimalDesiredDoc), 0o600); err != nil {
@@ -122,13 +129,13 @@ func TestSelectionInputsStateFatal(t *testing.T) {
 		Policy: FilePolicyLoader{Path: desiredPath},
 		State:  StoreState{Store: state.Store{Path: statePath}},
 	}
-	if _, err := coord.SelectionInputs(context.Background()); err == nil {
+	if _, err := coord.SelectionSnapshot(context.Background()); err == nil {
 		t.Fatal("an unreadable state file must be fatal")
 	}
 }
 
-func TestSelectionInputsNilDependenciesFatal(t *testing.T) {
-	if _, err := (&Coordinator{}).SelectionInputs(context.Background()); err == nil {
+func TestSelectionSnapshotNilDependenciesFatal(t *testing.T) {
+	if _, err := (&Coordinator{}).SelectionSnapshot(context.Background()); err == nil {
 		t.Fatal("a coordinator without a policy loader must be fatal")
 	}
 	home := t.TempDir()
@@ -137,7 +144,7 @@ func TestSelectionInputsNilDependenciesFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	coord := &Coordinator{Policy: FilePolicyLoader{Path: desiredPath}}
-	if _, err := coord.SelectionInputs(context.Background()); err == nil {
+	if _, err := coord.SelectionSnapshot(context.Background()); err == nil {
 		t.Fatal("a coordinator without a state store must be fatal")
 	}
 }

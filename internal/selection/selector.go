@@ -43,10 +43,6 @@ const (
 // excluded and no candidate remains — confirmed or uncertain.
 var ErrNoCandidate = errors.New("selection: no eligible candidate")
 
-// defaultFreshnessTTL matches the policy and routing default freshness
-// (30 minutes) for quota configurations that omit freshness_ttl.
-const defaultFreshnessTTL = 30 * time.Minute
-
 // Result is one selection outcome. It carries only sanitized, non-secret
 // fields and marshals to stable version-1 JSON; Headroom and Evidence are
 // omitted when they do not apply.
@@ -398,15 +394,16 @@ func corruptWindow(w quota.QuotaWindow) bool {
 // confirmTTL returns the freshness TTL a mapping's snapshot must satisfy to
 // confirm a selection, and whether the mapping is confirmable at all: a
 // mapping without a quota configuration has no configured TTL and is never
-// confirmable. A configured non-positive TTL falls back to the default,
-// matching the routing policy's freshness handling.
+// confirmable. A configured non-positive TTL falls back to the policy
+// package's DefaultQuotaFreshness (30 minutes, the routing default) — the
+// single shared freshness bound, not a selection-local copy.
 func confirmTTL(m *policy.Mapping) (time.Duration, bool) {
 	if m == nil || m.Quota == nil {
 		return 0, false
 	}
 	ttl := m.Quota.FreshnessTTL
 	if ttl <= 0 {
-		ttl = defaultFreshnessTTL
+		ttl = policy.DefaultQuotaFreshness
 	}
 	return ttl, true
 }

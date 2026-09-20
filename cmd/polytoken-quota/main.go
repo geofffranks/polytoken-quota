@@ -293,21 +293,6 @@ func newSelectionClient(model string, timeout time.Duration) (*selection.Client,
 	return selection.NewClient(model, resolveRuntimeKey, selection.ClientOptions{Timeout: timeout})
 }
 
-// selectionSnapshot adapts the coordinator's narrow business read to the
-// selection snapshot source. Target diagnostic failures cannot reach a
-// selection: targets are never resolved on this path.
-type selectionSnapshot struct {
-	coord *service.Coordinator
-}
-
-func (s selectionSnapshot) SelectionSnapshot(ctx context.Context) (selection.Snapshot, error) {
-	inputs, err := s.coord.SelectionInputs(ctx)
-	if err != nil {
-		return selection.Snapshot{}, err
-	}
-	return selection.Snapshot{Desired: inputs.Desired, State: inputs.State, AsOf: inputs.AsOf}, nil
-}
-
 // selectionRefresh adapts one opt-in quota check without reconciliation. A
 // rejected check is fatal; an accepted check with provider problems is not —
 // the last-good evidence stays usable.
@@ -331,16 +316,19 @@ func (r selectionRefresh) RefreshQuota(ctx context.Context) error {
 // credential resolver; the startup binary prerequisite is already enforced
 // by resolveConfig before either can run.
 func newSelectionRunners(coord *service.Coordinator) (*selection.SelectRunner, *selection.EvaluationRunner) {
-	snapshot := selectionSnapshot{coord: coord}
+	// The coordinator itself is the snapshot source: SelectionSnapshot
+	// returns selection.Snapshot directly, so no adapter or field copy is
+	// involved. Target diagnostic failures cannot reach a selection:
+	// targets are never resolved on this path.
 	selectRunner := &selection.SelectRunner{
-		Snapshot: snapshot,
+		Snapshot: coord,
 		Refresh:  selectionRefresh{coord: coord},
 		NewAssessor: func(model string, timeout time.Duration) (selection.Assessor, error) {
 			return newSelectionClient(model, timeout)
 		},
 	}
 	evalRunner := &selection.EvaluationRunner{
-		Snapshot: snapshot,
+		Snapshot: coord,
 		NewJev: func(model string, timeout time.Duration) (selection.EvalRunner, error) {
 			client, err := newSelectionClient(model, timeout)
 			if err != nil {

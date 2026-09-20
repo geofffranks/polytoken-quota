@@ -292,7 +292,7 @@ Headroom fractions are not comparable token counts across providers. Positive he
 | `assessment_unavailable` | `2` | No usable automatic assessment; model is null. |
 | `error` | `1` | Invalid invocation, policy/configuration/state, missing consent/credential, or another fatal failure. |
 
-Human output labels uncertainty explicitly. JSON includes `model`, `mapping` (the quota owner), effective `tier`, original `assessed_tier`, `assessed_model`, `reason`, quota `evidence` and `headroom`, and snapshot timestamps `as_of` / `evidence_checked_at` when relevant. Automatic results also carry validated `confidence` and `probabilities`; explicit-tier selection has no classifier assessment. Do not interpret its default confidence value as a classifier judgment.
+Human output labels uncertainty explicitly. JSON includes `version`, `explicit_tier`, `abstained`, `refreshed`, `model`, `mapping` (the quota owner), effective `tier`, original `assessed_tier`, `assessed_model`, `reason`, quota `evidence` and `headroom`, and snapshot timestamps `as_of` / `evidence_checked_at` when relevant. Automatic results also carry validated `confidence` and `probabilities`; explicit-tier selection has no classifier assessment. Do not interpret its default confidence value as a classifier judgment.
 
 For shell automation, preserve exit 2 and inspect the status instead of extracting a model blindly. This example requires `jq`:
 
@@ -318,9 +318,9 @@ polytoken-quota select-eval --policy candidates.yaml \
   --fixtures docs/selection-fixtures.yaml --live --json
 ```
 
-The candidate policy must cover every fixture's phase and expected tier, and all candidate models must be registered. The shipped fixtures cover all four tiers, abstention, misleading embedded instructions, short high-risk work, and non-English tasks. Fixture documents are bounded to 256 KiB and use non-sensitive synthetic prompts.
+The candidate policy must cover every fixture's phase and expected tier, and all candidate models must be registered. The shipped fixtures cover all four tiers, abstention, misleading embedded instructions, short high-risk work, and non-English tasks. Fixture documents are bounded to 256 KiB and 64 cases per invocation and use non-sensitive synthetic prompts. Each assessed case can incur one paid request; larger evaluations require separately authorized batches.
 
-The report includes case IDs, expected/actual assessments, safe errors, confusion counts, under/over-classification and abstention rates, classifier/rubric versions, latency, and token usage when provided—not task text or raw responses. Exit `0` means all fixtures matched; `2` means mismatches or unavailable assessments; `1` means invalid input/configuration or a missing credential. This report is not an adopted quality threshold.
+The report includes case IDs, expected/actual assessments, safe errors, confusion counts, under/over-classification and abstention rates, classifier/rubric versions, latency, and token usage when provided—not task text or raw responses. Exit `0` means all fixtures matched; `2` means mismatches, unavailable assessments, or policy-rejected cases; `1` means invalid input/configuration, cancellation, or a missing credential. This report is not an adopted quality threshold.
 
 Offline repository tests verify protocol handling, selection, persistence boundaries, and report arithmetic, **not live Jev quality or latency**. Review a separately authorized evaluation before adoption and repeat it when the model pin or rubric changes. No live evaluation or workflow migration is automatic. See the [selection guide](docs/selection.md) for the full contract and provider references, and the [configuration reference](docs/configuration.md#selectionjev) for operator settings.
 
@@ -346,7 +346,7 @@ The `routing` commands manage per-mapping routing state. The top-level `routing.
 
 Existing commands use `0` for an accepted clean result, `1` for a rejected request or diagnostic failure, and `2` for an accepted operation with a pending provider, quota, target, or validation problem. `check --json` and `status --json` emit one sanitized structured envelope for accepted and rejected requests.
 
-For `select`, `0` means `confirmed`; `2` means `uncertain`, `no_selection`, or `assessment_unavailable`; `1` means a fatal input/configuration/state error. Inspect status before using a recommendation: uncertainty is not known availability. For `select-eval`, `0` means every fixture matched, `2` means mismatches or unavailable assessments, and `1` means invalid input/configuration. Mocked tests do not establish Jev quality; the operator must review an explicitly authorized live evaluation before adoption.
+For `select`, `0` means `confirmed`; `2` means `uncertain`, `no_selection`, or `assessment_unavailable`; `1` means a fatal input/configuration/state error. Inspect status before using a recommendation: uncertainty is not known availability. For `select-eval`, `0` means every fixture matched, `2` means mismatches, unavailable assessments, or policy-rejected cases, and `1` means invalid input/configuration or cancellation. Mocked tests do not establish Jev quality; the operator must review an explicitly authorized live evaluation before adoption.
 
 ## Meaningful event history
 

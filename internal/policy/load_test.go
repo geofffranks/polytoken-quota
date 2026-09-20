@@ -469,7 +469,7 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 	}
 	for _, id := range []MappingID{"codex", "zai"} {
 		q := d.Providers[id].Quota
-		if q == nil || q.Adapter != string(id) || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 || q.Schedule != nil {
+		if q == nil || q.Adapter != string(id) || q.FreshnessTTL != DefaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 || q.Schedule != nil {
 			t.Fatalf("mapping %q quota=%+v, want normalized defaults", id, q)
 		}
 	}
@@ -484,7 +484,7 @@ func TestLoadOmittedQuotaDefaults(t *testing.T) {
 				t.Fatalf("Load: %v", err)
 			}
 			q := d.Providers[MappingID(id)].Quota
-			if q == nil || q.Adapter != id || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
+			if q == nil || q.Adapter != id || q.FreshnessTTL != DefaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
 				t.Fatalf("quota=%+v, want normalized defaults", q)
 			}
 		})
@@ -503,7 +503,7 @@ providers:
 		t.Fatalf("Load: %v", err)
 	}
 	q := d.Providers["codex"].Quota
-	if q == nil || q.Adapter != "codex" || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
+	if q == nil || q.Adapter != "codex" || q.FreshnessTTL != DefaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1 {
 		t.Fatalf("quota=%+v, want normalized defaults", q)
 	}
 }
@@ -539,7 +539,7 @@ func TestLoadAnthropicQuotaSemantics(t *testing.T) {
 			if (q == nil) != tc.wantNil {
 				t.Fatalf("quota=%+v, want nil=%v", q, tc.wantNil)
 			}
-			if q != nil && (q.MonthlyBudgetUSD != 250 || q.FreshnessTTL != defaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1) {
+			if q != nil && (q.MonthlyBudgetUSD != 250 || q.FreshnessTTL != DefaultQuotaFreshness || q.BalanceGroup != "default" || q.Weight != 1) {
 				t.Fatalf("quota=%+v, want positive-budget defaults", q)
 			}
 		})

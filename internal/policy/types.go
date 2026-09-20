@@ -149,7 +149,17 @@ const DocumentedJevModel = "jev-1.13.0"
 // DefaultJevTimeout bounds one JEV assessment when selection.jev omits
 // timeout. It must stay positive: Load rejects an explicit non-positive
 // timeout, so every resolved JevSelectionConfig carries a positive bound.
+// It is the single source of that bound; the selection package's
+// DefaultAssessTimeout delegates to it, so the two layers cannot drift.
 const DefaultJevTimeout = 10 * time.Second
+
+// DefaultQuotaFreshness is the freshness TTL a quota mapping must satisfy
+// when its configuration omits freshness_ttl. It matches the routing
+// package's default and is the single source of that bound: Load applies it
+// here, and the selection package falls back to it for mappings whose
+// configured TTL is non-positive, so one documented value governs every
+// freshness decision.
+const DefaultQuotaFreshness = 30 * time.Minute
 
 // SelectionConfig holds quota-aware model-selection settings (additive on
 // Desired). The whole section is optional: Load resolves an omitted selection

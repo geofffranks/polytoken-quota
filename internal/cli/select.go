@@ -15,7 +15,6 @@ import (
 	"io"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
@@ -67,7 +66,7 @@ func runSelect(ctx context.Context, args []string, deps Dependencies, stdin io.R
 		return selectFatal(stdout, stderr, jsonOut, selectFatalMessage(err))
 	}
 	if jsonOut {
-		encodeJSON(stdout, selectEnvelope(outcome, ""))
+		encodeJSON(stdout, selectEnvelope(outcome))
 	} else {
 		writeSelectText(stdout, outcome)
 	}
@@ -120,57 +119,67 @@ func parseSelectFlags(args []string) (req selection.SelectRequest, jsonOut, ok b
 	return req, jsonOut, true
 }
 
+// selectValueFlags is the single list of select/select-eval flags that carry
+// a value. Both the attached ("--flag=value") and detached ("--flag value")
+// forms derive from it, so the accepted forms can never drift apart.
+var selectValueFlags = [...]string{
+	"--policy", "--phase", "--difficulty", "--min-difficulty", "--exclude-family", "--fixtures",
+}
+
 // flagValue splits one value-flag token into its flag name and value. The
 // value may be attached ("--flag=value") or the next token ("--flag value");
 // *i is advanced past a consumed token. found is false when arg is not a
 // value flag, carries no value (trailing flag, or the next token is itself a
 // flag), or carries an explicitly empty value: a value flag never degrades
 // to a silently empty string, which for the difficulty flags would look
-// exactly like "tier not given" downstream.
+// exactly like "tier not given" downstream. An attached value that itself
+// starts with "-" is rejected exactly like the same token in the detached
+// position, so "--exclude-family=-codex" cannot slip a flag-shaped value
+// past the guard that "--exclude-family -codex" hits.
 func flagValue(args []string, i *int, arg string) (name, value string, found bool) {
-	for _, form := range [...]struct{ prefix, flag string }{
-		{"--policy=", "--policy"},
-		{"--phase=", "--phase"},
-		{"--difficulty=", "--difficulty"},
-		{"--min-difficulty=", "--min-difficulty"},
-		{"--exclude-family=", "--exclude-family"},
-		{"--fixtures=", "--fixtures"},
-	} {
-		if strings.HasPrefix(arg, form.prefix) {
-			// "--flag=" with nothing attached is an explicit empty value.
-			return form.flag, strings.TrimPrefix(arg, form.prefix), arg != form.prefix
+	for _, flag := range selectValueFlags {
+		if arg == flag {
+			if *i+1 >= len(args) || args[*i+1] == "" || strings.HasPrefix(args[*i+1], "-") {
+				return flag, "", false
+			}
+			*i++
+			return flag, args[*i], true
+		}
+		if prefix := flag + "="; strings.HasPrefix(arg, prefix) {
+			value := strings.TrimPrefix(arg, prefix)
+			// "--flag=" is an explicit empty value, and a value that
+			// starts with "-" reads as the next flag: both are invalid
+			// exactly as they are in the detached form.
+			if value == "" || strings.HasPrefix(value, "-") {
+				return flag, "", false
+			}
+			return flag, value, true
 		}
 	}
-	switch arg {
-	case "--policy", "--phase", "--difficulty", "--min-difficulty", "--exclude-family", "--fixtures":
-		if *i+1 >= len(args) || args[*i+1] == "" || strings.HasPrefix(args[*i+1], "-") {
-			return arg, "", false
-		}
-		*i++
-		return arg, args[*i], true
-	default:
-		return "", "", false
-	}
+	return "", "", false
 }
 
-// readSelectTask reads the bounded task text from stdin: nonempty, valid
-// UTF-8, at most selection.MaxPromptBytes. Rejected tasks are not truncated.
+// readSelectTask reads the bounded task text from stdin and validates it
+// against the single shared task bound set, selection.ValidateTask: nonempty
+// after trimming surrounding whitespace, valid UTF-8, and at most
+// selection.MaxPromptBytes. Rejected tasks are not truncated; each shared
+// bound violation renders the CLI's own fixed safe sentence.
 func readSelectTask(stdin io.Reader) (string, error) {
 	raw, err := io.ReadAll(io.LimitReader(stdin, selection.MaxPromptBytes+1))
 	if err != nil {
 		return "", fmt.Errorf("select: read task: %w", err)
 	}
-	if len(raw) > selection.MaxPromptBytes {
-		return "", fmt.Errorf("select: task exceeds the %d KiB limit; use explicit difficulty for large tasks", selection.MaxPromptBytes/1024)
-	}
 	prompt := string(raw)
-	if len(prompt) == 0 {
+	switch err := selection.ValidateTask(prompt); {
+	case err == nil:
+		return prompt, nil
+	case errors.Is(err, selection.ErrPromptTooLarge):
+		return "", fmt.Errorf("select: task exceeds the %d KiB limit; use explicit difficulty for large tasks", selection.MaxPromptBytes/1024)
+	case errors.Is(err, selection.ErrPromptNotUTF8):
+		return "", fmt.Errorf("select: task is not valid UTF-8")
+	default:
 		return "", fmt.Errorf("select: task is empty; provide a task on stdin or use --difficulty")
 	}
-	if !utf8.ValidString(prompt) {
-		return "", fmt.Errorf("select: task is not valid UTF-8")
-	}
-	return prompt, nil
 }
 
 // selectExitCode maps a selection status to its process exit code: confirmed
@@ -189,10 +198,12 @@ func selectExitCode(status selection.SelectStatus) int {
 }
 
 // selectFatal reports a fatal select failure: sanitized message on stderr,
-// or the JSON error envelope on stdout under --json. Exit 1.
+// or the JSON error envelope on stdout under --json. Exit 1. The JSON
+// envelope keeps the normative shape — probabilities stays an empty object,
+// never null.
 func selectFatal(stdout, stderr io.Writer, jsonOut bool, msg string) int {
 	if jsonOut {
-		encodeJSON(stdout, selectOutcomeJSON{Version: selectJSONVersion, Status: selectStatusError, Error: msg})
+		encodeJSON(stdout, selectErrorEnvelope(msg))
 		return ExitRejected
 	}
 	fmt.Fprintln(stderr, msg)

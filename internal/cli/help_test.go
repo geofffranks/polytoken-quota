@@ -335,3 +335,21 @@ func TestRoutingEnableHelpShowsArgument(t *testing.T) {
 		t.Errorf("routing enable help should mention <provider>:\n%s", stdout)
 	}
 }
+
+func TestInitHelpDocumentsSelectionConsent(t *testing.T) {
+	// GEN5: forced init overwrites quota state but preserves the
+	// operator's durable selection consent (selection.jev); the --force
+	// help must say so.
+	stdout, stderr, code := runHelpCapture(t, []string{"init", "--help"})
+	if code != ExitOK {
+		t.Fatalf("init help: expected exit %d, got %d (stderr=%q)", ExitOK, code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("init help: expected empty stderr, got %q", stderr)
+	}
+	for _, want := range []string{"--force", "selection consent", "selection.jev", "preserved"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("init help missing %q:\n%s", want, stdout)
+		}
+	}
+}

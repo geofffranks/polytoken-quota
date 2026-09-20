@@ -40,6 +40,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 )
 
 // Fixed endpoint and protocol bounds.
@@ -48,8 +50,10 @@ const (
 	ProdEndpoint = "https://api.typesafe.ai/v1/systemone"
 
 	// DefaultAssessTimeout is the positive per-attempt timeout applied when
-	// the caller does not configure one.
-	DefaultAssessTimeout = 10 * time.Second
+	// the caller does not configure one. It delegates to the policy package's
+	// DefaultJevTimeout — the documented selection.jev default — so the
+	// desired-config default and the client fallback are one bound, not two.
+	DefaultAssessTimeout = policy.DefaultJevTimeout
 
 	// MaxPromptBytes bounds the task prompt (the request state) per request.
 	// This is a conservative byte limit, not a tokenizer or provider limit.
@@ -80,9 +84,6 @@ const (
 	// decimal distributions parse to binary floats that need not sum to
 	// exactly 1.0.
 	probSumEpsilon = 1e-6
-
-	// modelPinPrefix is the required classifier model pin prefix.
-	modelPinPrefix = "jev-"
 )
 
 // Assessment is the outcome of one remote difficulty assessment.
@@ -132,26 +133,13 @@ type Client struct {
 // ValidModelPin reports whether model is a versioned jev classifier pin of
 // the form jev-N.N.N (for example jev-1.13.0). Unversioned aliases such as
 // "jev-latest" are rejected: selection requires an exact, reviewable pin.
+// The grammar is owned by policy.ValidJevPin — the same validation the
+// desired configuration's selection.jev model passes at load — so the
+// desired-config pin and the client-side pin can never diverge. It is kept
+// as a selection-level name because clients and callers of this package
+// validate pins without importing policy directly.
 func ValidModelPin(model string) bool {
-	rest, ok := strings.CutPrefix(model, modelPinPrefix)
-	if !ok {
-		return false
-	}
-	parts := strings.Split(rest, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" {
-			return false
-		}
-		for _, r := range part {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-	}
-	return true
+	return policy.ValidJevPin(model)
 }
 
 // NewClient constructs an assessment client. The model must be a versioned
@@ -323,7 +311,7 @@ func (c *Client) Assess(ctx context.Context, enabled bool, prompt string) (Asses
 	if !enabled {
 		return Assessment{}, ErrAssessmentDisabled
 	}
-	if err := validatePrompt(prompt); err != nil {
+	if err := ValidateTask(prompt); err != nil {
 		return Assessment{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -407,10 +395,15 @@ func drain(body io.Reader) {
 	_, _ = io.Copy(io.Discard, io.LimitReader(body, MaxResponseBytes+1))
 }
 
-// validatePrompt enforces the request-side bound: nonempty (a
-// whitespace-only prompt carries no assessable task), valid UTF-8, and at
-// most MaxPromptBytes.
-func validatePrompt(prompt string) error {
+// ValidateTask reports whether task text satisfies the assessment input
+// bounds: nonempty after trimming surrounding whitespace (a whitespace-only
+// task carries no assessable work), valid UTF-8, and at most MaxPromptBytes.
+// It is the single bound set for every task path — callers validate locally
+// before enabling a remote request, the assessment client re-checks before
+// encoding, and fixture parsing enforces the same bounds per case — so an
+// unusable task is rejected by the same rule everywhere, before any assessor
+// can be invoked.
+func ValidateTask(prompt string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return ErrPromptEmpty
 	}

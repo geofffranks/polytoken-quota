@@ -577,6 +577,59 @@ func TestEvaluationRunnerCancellationStopsRun(t *testing.T) {
 	}
 }
 
+// CR-COMP39-2: a canceled run is classified as its own fatal kind carrying
+// the fixed safe cancellation sentence — not FatalPolicy, which would claim
+// the candidate policy or fixtures were missing, unreadable, or invalid.
+func TestEvaluationRunnerCancellationIsClassifiedCanceled(t *testing.T) {
+	policyPath, fixturesPath := newEvalEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	stub := &evalStub{
+		responses: map[string]Assessment{
+			"case-1": {Model: "stub-eval", Tier: TierNormal, Confidence: 0.9},
+		},
+		onAssess: cancel, // the caller cancels during case-1's assessment
+	}
+
+	_, err := newEvaluationRunner(stub).RunEval(ctx,
+		EvalInvocation{PolicyPath: policyPath, FixturesPath: fixturesPath})
+	cancel()
+	var ferr *FatalError
+	if !errors.As(err, &ferr) {
+		t.Fatalf("err = %v (%T), want a *FatalError", err, err)
+	}
+	if ferr.Kind != FatalCanceled {
+		t.Fatalf("kind = %q, want %q — cancellation is not a policy failure", ferr.Kind, FatalCanceled)
+	}
+	if got, want := ferr.Error(), "selection: run was canceled before completion"; got != want {
+		t.Fatalf("fatal text = %q, want the fixed safe sentence %q", got, want)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cause chain lost context.Canceled: %v", err)
+	}
+}
+
+// CR-COMP39-2: an expired run deadline is the same classification as
+// cancellation — the run could not complete — never FatalPolicy.
+func TestEvaluationRunnerDeadlineIsClassifiedCanceled(t *testing.T) {
+	policyPath, fixturesPath := newEvalEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 0)
+	defer cancel()
+	stub := &evalStub{}
+
+	_, err := newEvaluationRunner(stub).RunEval(ctx,
+		EvalInvocation{PolicyPath: policyPath, FixturesPath: fixturesPath})
+	var ferr *FatalError
+	if !errors.As(err, &ferr) || ferr.Kind != FatalCanceled {
+		t.Fatalf("err = %v (%T), want FatalError{FatalCanceled}", err, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cause chain lost context.DeadlineExceeded: %v", err)
+	}
+	if stub.calls != 0 {
+		t.Fatalf("assessed %d cases under an expired deadline, want none", stub.calls)
+	}
+}
+
 func TestSelectRunnerWhitespaceTaskRejectedBeforeAssessor(t *testing.T) {
 	env := newRunnerEnv(t, func(d *policy.Desired) { d.Selection.Jev.Enabled = true })
 	r := &SelectRunner{Snapshot: env.snap, NewAssessor: env.newAssessor()}

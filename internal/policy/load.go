@@ -26,9 +26,7 @@ var defaultOperational = Operational{
 	BackupCount:        5,
 }
 
-// defaultQuotaFreshness is the freshness TTL applied when a quota section omits
-// freshness_ttl, matching the routing package's default.
-const defaultQuotaFreshness = 30 * time.Minute
+// quota freshness is carried by DefaultQuotaFreshness (types.go).
 
 // Load reads and validates desired.yaml at path, returning a fully resolved Desired
 // graph. It rejects unsupported versions, mappings without concrete model
@@ -616,11 +614,14 @@ func (j *jevWire) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// validJevPin reports whether model has the documented versioned pin shape:
+// ValidJevPin reports whether model has the documented versioned pin shape:
 // exactly `jev-X.Y.Z` with three non-empty numeric components. Like the quota
 // adapter names, the value is validated against a fixed grammar rather than
 // accepted as any non-empty string, so pins stay comparable across releases.
-func validJevPin(model string) bool {
+// This is the single jev pin grammar for the whole tree: policy load uses it
+// for the desired configuration, and the selection package's ValidModelPin
+// delegates to it, so the two layers cannot drift.
+func ValidJevPin(model string) bool {
 	rest, ok := strings.CutPrefix(model, "jev-")
 	if !ok {
 		return false
@@ -665,7 +666,7 @@ func selectionFromWire(w *selectionWire) (SelectionConfig, error) {
 		sel.Jev.Enabled = *w.Jev.Enabled
 	}
 	if w.Jev.modelSet {
-		if !validJevPin(w.Jev.Model) {
+		if !ValidJevPin(w.Jev.Model) {
 			return SelectionConfig{}, errors.New("policy: selection jev model must be a versioned pin like jev-1.13.0")
 		}
 		sel.Jev.Model = w.Jev.Model
@@ -723,7 +724,7 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	}
 	qc := &QuotaConfig{
 		Adapter:          adapter,
-		FreshnessTTL:     defaultQuotaFreshness,
+		FreshnessTTL:     DefaultQuotaFreshness,
 		BalanceGroup:     w.BalanceGroup,
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
@@ -736,7 +737,7 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 	if mappingID == "anthropic" && mode == "api" && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
-	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, defaultQuotaFreshness)
+	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, DefaultQuotaFreshness)
 	if err != nil {
 		return nil, fmt.Errorf("policy: mapping %q: %w", mappingID, err)
 	}

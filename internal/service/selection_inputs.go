@@ -3,46 +3,47 @@ package service
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"github.com/geofffranks/polytoken-quota/internal/policy"
-	"github.com/geofffranks/polytoken-quota/internal/state"
+	"github.com/geofffranks/polytoken-quota/internal/selection"
 )
 
-// SelectionInputs is the narrow read-only business snapshot the selection
-// runner consumes: the desired policy, the durable observed state, and the
-// single clock sample both are read against. It is deliberately narrower than
-// DiagnosticSnapshot: selection reads business inputs only and never resolves
-// targets, so target diagnostic failures cannot affect a selection.
-type SelectionInputs struct {
-	Desired policy.Desired
-	State   state.State
-	AsOf    time.Time
-}
-
-// SelectionInputs performs the only business reads a selection invocation
-// needs. The injected clock is sampled exactly once. A missing state file is
-// not an error (empty state, matching LoadState); a missing, unreadable, or
-// invalid desired.yaml and an unreadable state file are fatal — selection is
-// a read-only consumer of both, and there is no safe result without them.
+// SelectionSnapshot performs the only business reads a selection invocation
+// needs and returns the selection runner's own snapshot type directly: the
+// desired policy, the durable observed state, and the single clock sample
+// both are read against. Producing selection.Snapshot here makes *Coordinator
+// satisfy selection.SnapshotSource itself, so no mirrored type or field-copy
+// adapter exists. It is deliberately narrower than DiagnosticSnapshot:
+// selection reads business inputs only and never resolves targets, so target
+// diagnostic failures cannot affect a selection.
+//
+// The reads are intentionally lock-free. Every writer commits whole files by
+// rename under the mutation lock (Coordinator.transact), so each read
+// observes one complete version; selection never writes, and the reconcile
+// computations that need a mutually consistent desired/state pair re-read
+// both inside that locked path.
+//
+// The injected clock is sampled exactly once. A missing state file is not an
+// error (empty state, matching LoadState); a missing, unreadable, or invalid
+// desired.yaml and an unreadable state file are fatal — selection is a
+// read-only consumer of both, and there is no safe result without them.
 // Target resolution is never attempted, so target diagnostic failures cannot
 // reach or stop a selection.
-func (c *Coordinator) SelectionInputs(_ context.Context) (SelectionInputs, error) {
-	inputs := SelectionInputs{AsOf: c.now()}
+func (c *Coordinator) SelectionSnapshot(_ context.Context) (selection.Snapshot, error) {
+	inputs := selection.Snapshot{AsOf: c.now()}
 	if c.Policy == nil {
-		return SelectionInputs{}, fmt.Errorf("load policy failed")
+		return selection.Snapshot{}, fmt.Errorf("load policy failed")
 	}
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
-		return SelectionInputs{}, fmt.Errorf("load policy failed: %w", err)
+		return selection.Snapshot{}, fmt.Errorf("load policy failed: %w", err)
 	}
 	inputs.Desired = desired
 	if c.State == nil {
-		return SelectionInputs{}, fmt.Errorf("load state failed")
+		return selection.Snapshot{}, fmt.Errorf("load state failed")
 	}
 	observed, err := c.State.LoadState()
 	if err != nil {
-		return SelectionInputs{}, fmt.Errorf("load state failed: %w", err)
+		return selection.Snapshot{}, fmt.Errorf("load state failed: %w", err)
 	}
 	inputs.State = observed
 	return inputs, nil
