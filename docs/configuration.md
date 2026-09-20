@@ -142,7 +142,7 @@ valid.
 | `validation_timeout` | `30s` | Budget for validating a staged reconcile candidate. |
 | `lock_wait` | `10s` | How long to wait for the state mutation lock. |
 | `recovered_retention` | `168h` | How long recovered-error history is kept. |
-| `backup_count` | `5` | State backups retained. Must be at least 1. |
+| `backup_count` | `1` | Per-file pre-apply backups of managed files retained. Default 1; minimum 1; pruned oldest-first as files change. |
 | `notice_path` | `~/.local/polytoken-quota/notice.json` | Where the reconciliation notice is published. The path must be visible inside agent containers for the in-session hook to converge (bind-mount it at the same path, or point it at an already-shared location). |
 | `on_change` | none | Opt-in host-side actions run after a committed revision changed managed fields (see below). |
 
