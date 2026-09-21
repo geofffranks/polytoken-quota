@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -683,5 +684,71 @@ func TestSelectRunnerEvidenceCheckedAtNullable(t *testing.T) {
 	}
 	if out.EvidenceCheckedAt != nil {
 		t.Fatalf("evidence checked at = %v, want nil for a missing timestamp", out.EvidenceCheckedAt)
+	}
+}
+
+// TestSelectRunnerLayaBackendRoutesToLayaFactory proves an enabled laya
+// backend constructs (only) the laya assessor and assesses through it.
+func TestSelectRunnerLayaBackendRoutesToLayaFactory(t *testing.T) {
+	env := newRunnerEnv(t, func(d *policy.Desired) {
+		d.Selection.Jev.Enabled = false
+		d.Selection.Laya.Enabled = true
+	})
+	env.snap.st = freshCodexState()
+	env.assessor.tier = TierNormal
+	layaBuilt := 0
+	r := &SelectRunner{
+		Snapshot: env.snap,
+		Refresh:  env.refresher,
+		NewLayaAssessor: func(time.Duration) (Assessor, error) {
+			layaBuilt++
+			return env.assessor, nil
+		},
+	}
+	out, err := r.Run(context.Background(), SelectRequest{
+		PolicyPath: env.policyPath,
+		Phase:      "execution",
+		Prompt:     "refactor the quota reconciler lock",
+	})
+	if err != nil {
+		t.Fatalf("laya-backed run: %v", err)
+	}
+	if out.Status != SelectConfirmed || out.Tier != TierNormal {
+		t.Fatalf("status=%q tier=%q, want confirmed/normal", out.Status, out.Tier)
+	}
+	if layaBuilt != 1 {
+		t.Fatalf("laya factory built %d times, want exactly one", layaBuilt)
+	}
+	if env.built != 0 {
+		t.Fatalf("jev factory built %d times for a laya-backed request", env.built)
+	}
+}
+
+// TestSelectRunnerNoBackendEnabledIsConsent proves the both-disabled case is
+// a consent failure before any factory is consulted.
+func TestSelectRunnerNoBackendEnabledIsConsent(t *testing.T) {
+	env := newRunnerEnv(t, func(d *policy.Desired) { d.Selection.Jev.Enabled = false })
+	r := &SelectRunner{
+		Snapshot:        env.snap,
+		NewAssessor:     env.newAssessor(),
+		NewLayaAssessor: func(time.Duration) (Assessor, error) { return env.assessor, nil },
+	}
+	_, err := r.Run(context.Background(), SelectRequest{
+		PolicyPath: env.policyPath,
+		Phase:      "execution",
+		Prompt:     "refactor the quota reconciler lock",
+	})
+	if err == nil {
+		t.Fatal("both backends disabled must not assess")
+	}
+	var fe *FatalError
+	if !errors.As(err, &fe) || fe.Kind != FatalConsent {
+		t.Fatalf("err = %v, want a FatalConsent failure", err)
+	}
+	if cause := fe.Unwrap(); cause == nil || !strings.Contains(cause.Error(), "backend is enabled") {
+		t.Fatalf("cause = %v, want the backend consent cause", cause)
+	}
+	if env.built != 0 {
+		t.Fatalf("jev factory built %d times without consent", env.built)
 	}
 }

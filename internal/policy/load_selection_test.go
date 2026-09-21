@@ -136,7 +136,7 @@ func TestLoadSelectionJevRejectsInvalid(t *testing.T) {
 		{
 			name:      "unknown-selection-key",
 			selection: "selection:\n  bogus: true\n",
-			wantErr:   "selection: unknown key (want jev)",
+			wantErr:   "selection: unknown key (want jev or laya)",
 			hidden:    "bogus",
 		},
 		{
@@ -384,5 +384,190 @@ func TestLegacySectionsStayLenient(t *testing.T) {
 	}
 	if d.Version != 1 {
 		t.Fatalf("version = %d, want 1", d.Version)
+	}
+}
+
+// TestLoadSelectionLayaExplicit proves the laya section resolves its keys
+// and defaults the omitted timeout.
+func TestLoadSelectionLayaExplicit(t *testing.T) {
+	d, err := Load(writeTemp(t, selectionDoc("selection:\n  laya:\n    enabled: true\n")))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := LayaSelectionConfig{Enabled: true, Timeout: DefaultLayaTimeout}
+	if d.Selection.Laya != want {
+		t.Fatalf("laya = %+v, want %+v", d.Selection.Laya, want)
+	}
+	// The jev backend keeps its own defaults alongside an enabled laya.
+	if d.Selection.Jev.Enabled {
+		t.Fatal("jev must stay disabled when only laya is configured")
+	}
+	d, err = Load(writeTemp(t, selectionDoc("selection:\n  laya:\n    enabled: true\n    timeout: 3s\n")))
+	if err != nil {
+		t.Fatalf("Load with timeout: %v", err)
+	}
+	if d.Selection.Laya.Timeout != 3*time.Second {
+		t.Fatalf("timeout = %s, want 3s", d.Selection.Laya.Timeout)
+	}
+}
+
+// TestLoadSelectionLayaRejectsInvalid proves strict decoding for the laya
+// section: fixed error text, no echo of the rejected value.
+func TestLoadSelectionLayaRejectsInvalid(t *testing.T) {
+	cases := []struct {
+		name      string
+		selection string
+		wantErr   string
+		hidden    string
+	}{
+		{
+			name:      "enabled-not-boolean",
+			selection: "selection:\n  laya:\n    enabled: sometimes\n",
+			wantErr:   "selection laya: enabled must be a boolean",
+			hidden:    "sometimes",
+		},
+		{
+			name:      "unknown-key",
+			selection: "selection:\n  laya:\n    model: laya-1\n",
+			wantErr:   "selection laya: unknown key (want enabled or timeout)",
+			hidden:    "laya-1",
+		},
+		{
+			name:      "unparseable-timeout",
+			selection: "selection:\n  laya:\n    timeout: soon\n",
+			wantErr:   "selection laya timeout must be a positive duration (e.g. 5s)",
+			hidden:    "soon",
+		},
+		{
+			name:      "zero-timeout",
+			selection: "selection:\n  laya:\n    timeout: 0s\n",
+			wantErr:   "selection laya timeout must be a positive duration (e.g. 5s)",
+		},
+		{
+			name:      "empty-timeout",
+			selection: "selection:\n  laya:\n    timeout: \"\"\n",
+			wantErr:   "selection laya timeout must be a positive duration (e.g. 5s)",
+		},
+		{
+			name:      "not-a-mapping",
+			selection: "selection:\n  laya: true\n",
+			wantErr:   "selection laya must be a mapping",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, selectionDoc(tc.selection)))
+			if err == nil {
+				t.Fatal("Load should reject the malformed laya section")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
+			}
+			if tc.hidden != "" && strings.Contains(err.Error(), tc.hidden) {
+				t.Fatalf("error %q echoes the rejected config value %q", err, tc.hidden)
+			}
+		})
+	}
+}
+
+// TestLoadSelectionLayaRejectsDuplicateKeys proves last-wins decoding is
+// refused for every laya key.
+func TestLoadSelectionLayaRejectsDuplicateKeys(t *testing.T) {
+	docs := map[string]string{
+		"enabled": "selection:\n  laya:\n    enabled: true\n    enabled: false\n",
+		"timeout": "selection:\n  laya:\n    timeout: 1s\n    timeout: 2s\n",
+	}
+	for key, doc := range docs {
+		t.Run(key, func(t *testing.T) {
+			_, err := Load(writeTemp(t, selectionDoc(doc)))
+			if err == nil {
+				t.Fatalf("duplicate %s key should be rejected", key)
+			}
+			if !strings.Contains(err.Error(), "duplicate "+key+" key") {
+				t.Fatalf("error %q does not mention the duplicate %s key", err, key)
+			}
+		})
+	}
+}
+
+// TestLoadSelectionRejectsBothBackendsEnabled proves the mutual-exclusion
+// rule: enabling jev and laya together is a load error, not a precedence
+// question.
+func TestLoadSelectionRejectsBothBackendsEnabled(t *testing.T) {
+	doc := "selection:\n  jev:\n    enabled: true\n  laya:\n    enabled: true\n"
+	_, err := Load(writeTemp(t, selectionDoc(doc)))
+	if err == nil {
+		t.Fatal("Load should reject jev and laya both enabled")
+	}
+	if !strings.Contains(err.Error(), "jev and laya cannot both be enabled") {
+		t.Fatalf("error %q does not mention the mutual exclusion rule", err)
+	}
+}
+
+// TestSelectionLayaConfigRoundtrip proves rendered laya settings survive a
+// re-import and defaults stay omitted.
+func TestSelectionLayaConfigRoundtrip(t *testing.T) {
+	cases := []struct {
+		name        string
+		selection   string
+		want        LayaSelectionConfig
+		wantInBytes string
+		wantOmitted bool
+	}{
+		{
+			name:        "defaults-omit-section",
+			selection:   "",
+			want:        LayaSelectionConfig{Enabled: false, Timeout: DefaultLayaTimeout},
+			wantOmitted: true,
+		},
+		{
+			name:        "enabled-true",
+			selection:   "selection:\n  laya:\n    enabled: true\n",
+			want:        LayaSelectionConfig{Enabled: true, Timeout: DefaultLayaTimeout},
+			wantInBytes: "enabled: true",
+		},
+		{
+			name:        "custom-timeout",
+			selection:   "selection:\n  laya:\n    timeout: 8s\n",
+			want:        LayaSelectionConfig{Enabled: false, Timeout: 8 * time.Second},
+			wantInBytes: "timeout: 8s",
+		},
+		{
+			name:        "explicit-defaults-stay-omitted",
+			selection:   "selection:\n  laya:\n    timeout: 5s\n",
+			want:        LayaSelectionConfig{Enabled: false, Timeout: DefaultLayaTimeout},
+			wantOmitted: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			first, err := Load(writeTemp(t, selectionDoc(tc.selection)))
+			if err != nil {
+				t.Fatalf("first Load: %v", err)
+			}
+			if first.Selection.Laya != tc.want {
+				t.Fatalf("first load = %+v, want %+v", first.Selection.Laya, tc.want)
+			}
+			data, err := marshalDesired(first)
+			if err != nil {
+				t.Fatalf("marshalDesired: %v", err)
+			}
+			contains := bytes.Contains(data, []byte("selection:"))
+			if tc.wantOmitted && contains {
+				t.Fatalf("default selection should be omitted, got:\n%s", data)
+			}
+			if tc.wantInBytes != "" {
+				if !contains || !bytes.Contains(data, []byte(tc.wantInBytes)) {
+					t.Fatalf("rendered section missing %q, got:\n%s", tc.wantInBytes, data)
+				}
+			}
+			second, err := Load(writeTemp(t, string(data)))
+			if err != nil {
+				t.Fatalf("reload rendered policy: %v\n%s", err, data)
+			}
+			if second.Selection.Laya != tc.want {
+				t.Fatalf("round-trip = %+v, want %+v", second.Selection.Laya, tc.want)
+			}
+		})
 	}
 }

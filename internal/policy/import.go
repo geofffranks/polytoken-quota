@@ -645,7 +645,10 @@ func operationalIsZero(op Operational) bool {
 }
 
 type outSelection struct {
-	Jev outJev `yaml:"jev"`
+	// omitempty keeps a single-backend policy from rendering an empty
+	// section for the other backend (yaml.v3 omits zero-valued structs).
+	Jev  outJev  `yaml:"jev,omitempty"`
+	Laya outLaya `yaml:"laya,omitempty"`
 }
 
 // outJev renders only the non-default selection.jev keys, so an operator's
@@ -656,6 +659,14 @@ type outSelection struct {
 type outJev struct {
 	Enabled bool   `yaml:"enabled,omitempty"`
 	Model   string `yaml:"model,omitempty"`
+	Timeout string `yaml:"timeout,omitempty"`
+}
+
+// outLaya renders only the non-default selection.laya keys, mirroring outJev:
+// a laya backend at the documented defaults (disabled, DefaultLayaTimeout)
+// renders nothing.
+type outLaya struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
 	Timeout string `yaml:"timeout,omitempty"`
 }
 
@@ -673,8 +684,15 @@ func selectionOut(s SelectionConfig) *outSelection {
 	if s.Jev.Timeout != DefaultJevTimeout {
 		timeout = s.Jev.Timeout.String()
 	}
-	if !enabled && model == "" && timeout == "" {
+	layaTimeout := ""
+	if s.Laya.Timeout != DefaultLayaTimeout {
+		layaTimeout = s.Laya.Timeout.String()
+	}
+	if !enabled && model == "" && timeout == "" && !s.Laya.Enabled && layaTimeout == "" {
 		return nil
 	}
-	return &outSelection{Jev: outJev{Enabled: enabled, Model: model, Timeout: timeout}}
+	return &outSelection{
+		Jev:  outJev{Enabled: enabled, Model: model, Timeout: timeout},
+		Laya: outLaya{Enabled: s.Laya.Enabled, Timeout: layaTimeout},
+	}
 }

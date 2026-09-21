@@ -111,6 +111,21 @@ selection:
 
 Only the runtime process environment's `TYPESAFE_API_KEY` supplies the credential, immediately before an enabled remote call. There is no key or endpoint field. Do not place the key in the validation subprocess environment file; it is excluded from that forwarding path. The fixed endpoint is `https://api.typesafe.ai/v1/systemone`. Explicit `--difficulty` needs neither consent nor a credential and does not read stdin. See [selection](selection.md) for disclosure limits, retention caveats, strict candidate policy and the separately authorized live evaluation gate.
 
+## `selection.laya`
+
+Optional consent and settings for task assessment against a local laya daemon. Absence disables local assessment. This section belongs only in operator `desired.yaml`, never in candidate policy. At most one of `selection.jev` and `selection.laya` may be enabled; a configuration that enables both is rejected at load.
+
+```yaml
+selection:
+  laya:
+    enabled: false
+    timeout: 5s
+```
+
+`enabled` defaults to false; `timeout` must be a positive finite duration and defaults to 5s, not a latency SLA. Unknown keys are rejected, and there is deliberately no model key: the laya daemon pins its checkpoint at startup (its own `LAYA_MCP_MODEL`/`LAYA_MCP_DTYPE`/`LAYA_MCP_DEVICE` environment) and reports the served checkpoint in each response, which the assessment surfaces after validation.
+
+There is no credential and no endpoint field. The fixed endpoint is `http://127.0.0.1:8742/predict` — the loopback address of an operator-run [laya-mcp](https://github.com/wsargent/laya-mcp) daemon. The host binary never starts, stops, or supervises the daemon; when it is not running (connection refused) or still loading its model (HTTP 503), the assessment is unavailable and selection falls back to explicit difficulty exactly as for any Jev failure. Explicit `--difficulty` needs neither consent nor a daemon. See [selection](selection.md) for the shared assessment boundary.
+
 ## `global` and `projects`
 
 `global` describes the global Polytoken configuration root; each entry in

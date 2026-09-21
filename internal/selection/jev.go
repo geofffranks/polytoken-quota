@@ -464,7 +464,7 @@ func remoteErrorFor(status int) error {
 
 type systemOneRequest struct {
 	State     string                    `json:"state"`
-	Model     string                    `json:"model"`
+	Model     string                    `json:"model,omitempty"`
 	Questions map[string]choiceQuestion `json:"questions"`
 }
 
@@ -570,6 +570,15 @@ func parseAssessment(payload []byte, requestedModel string) (Assessment, error) 
 	if err := json.Unmarshal(payload, &parsed); err != nil {
 		return Assessment{}, fmt.Errorf("%w: invalid json", ErrMalformedResponse)
 	}
+	return buildAssessment(parsed, requestedModel)
+}
+
+// buildAssessment validates an already-decoded response envelope and derives
+// the assessment outcome from the validated distribution. model is the label
+// reported in the Assessment: the Jev client passes its requested pin, the
+// laya client the validated checkpoint the daemon reported. It is shared so
+// both backends apply byte-for-byte the same strict response contract.
+func buildAssessment(parsed systemOneResponse, model string) (Assessment, error) {
 	if len(parsed.Answers) != 1 {
 		return Assessment{}, fmt.Errorf("%w: expected exactly one answer", ErrMalformedResponse)
 	}
@@ -596,7 +605,7 @@ func parseAssessment(payload []byte, requestedModel string) (Assessment, error) 
 	}
 	tier, abstained := resolveOutcome(dist)
 	return Assessment{
-		Model:         requestedModel,
+		Model:         model,
 		Tier:          tier,
 		Abstained:     abstained,
 		Confidence:    confidence,

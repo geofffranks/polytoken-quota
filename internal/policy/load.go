@@ -524,7 +524,8 @@ func routingFromWire(w *routingWire) RoutingConfig {
 // rejected. Decoding errors are fixed strings that name the allowed grammar
 // but never echo document-derived values back into diagnostics.
 type selectionWire struct {
-	Jev *jevWire `yaml:"jev"`
+	Jev  *jevWire  `yaml:"jev"`
+	Laya *layaWire `yaml:"laya"`
 }
 
 func (s *selectionWire) UnmarshalYAML(value *yaml.Node) error {
@@ -534,7 +535,7 @@ func (s *selectionWire) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.MappingNode {
 		return errors.New("policy: selection must be a mapping")
 	}
-	seenJev := false
+	seenJev, seenLaya := false, false
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		switch value.Content[i].Value {
 		case "jev":
@@ -547,8 +548,18 @@ func (s *selectionWire) UnmarshalYAML(value *yaml.Node) error {
 				return fmt.Errorf("policy: selection: %w", err)
 			}
 			s.Jev = &jw
+		case "laya":
+			if seenLaya {
+				return errors.New("policy: selection: duplicate laya key")
+			}
+			seenLaya = true
+			var lw layaWire
+			if err := value.Content[i+1].Decode(&lw); err != nil {
+				return fmt.Errorf("policy: selection: %w", err)
+			}
+			s.Laya = &lw
 		default:
-			return errors.New("policy: selection: unknown key (want jev)")
+			return errors.New("policy: selection: unknown key (want jev or laya)")
 		}
 	}
 	return nil
@@ -617,6 +628,55 @@ func (j *jevWire) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// layaWire is the on-disk shape of selection.laya. `enabled` and `timeout`
+// are the only keys: the laya backend has no model pin because the daemon
+// pins its checkpoint at startup and reports the served checkpoint per
+// response. Duplicate keys are rejected instead of silently last-wins, and
+// explicit empty values are rejected rather than interpreted as omitted.
+type layaWire struct {
+	Enabled *bool
+	Timeout string
+	// timeoutSet distinguishes an explicit key (including an explicit empty
+	// value, which must be rejected) from an omitted one, which defaults.
+	timeoutSet bool
+}
+
+func (l *layaWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Tag == "!!null" {
+		return nil // `laya:` with no value: every key defaults
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("policy: selection laya must be a mapping")
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "enabled":
+			if l.Enabled != nil {
+				return errors.New("policy: selection laya: duplicate enabled key")
+			}
+			if value.Content[i+1].ShortTag() == "!!null" {
+				return errors.New("policy: selection laya: enabled must be a boolean")
+			}
+			var b bool
+			if err := value.Content[i+1].Decode(&b); err != nil {
+				return errors.New("policy: selection laya: enabled must be a boolean")
+			}
+			l.Enabled = &b
+		case "timeout":
+			if l.timeoutSet {
+				return errors.New("policy: selection laya: duplicate timeout key")
+			}
+			l.timeoutSet = true
+			if err := value.Content[i+1].Decode(&l.Timeout); err != nil {
+				return errors.New("policy: selection laya: timeout must be a positive duration (e.g. 5s)")
+			}
+		default:
+			return errors.New("policy: selection laya: unknown key (want enabled or timeout)")
+		}
+	}
+	return nil
+}
+
 // ValidJevPin reports whether model has the documented versioned pin shape:
 // exactly `jev-X.Y.Z` with three non-empty numeric components. Like the quota
 // adapter names, the value is validated against a fixed grammar rather than
@@ -647,10 +707,14 @@ func ValidJevPin(model string) bool {
 }
 
 // defaultSelection is applied when desired.yaml omits the selection section
-// (or any key within it): JEV assessment disabled, pinned to
-// DocumentedJevModel, bounded by DefaultJevTimeout.
+// (or any key within it): both backends disabled, JEV pinned to
+// DocumentedJevModel, JEV bounded by DefaultJevTimeout and laya by
+// DefaultLayaTimeout.
 func defaultSelection() SelectionConfig {
-	return SelectionConfig{Jev: JevSelectionConfig{Enabled: false, Model: DocumentedJevModel, Timeout: DefaultJevTimeout}}
+	return SelectionConfig{
+		Jev:  JevSelectionConfig{Enabled: false, Model: DocumentedJevModel, Timeout: DefaultJevTimeout},
+		Laya: LayaSelectionConfig{Enabled: false, Timeout: DefaultLayaTimeout},
+	}
 }
 
 // selectionFromWire translates the optional selection section into its
@@ -662,24 +726,43 @@ func defaultSelection() SelectionConfig {
 // fixed strings that do not echo the offending config values.
 func selectionFromWire(w *selectionWire) (SelectionConfig, error) {
 	sel := defaultSelection()
-	if w == nil || w.Jev == nil {
+	if w == nil {
 		return sel, nil
 	}
-	if w.Jev.Enabled != nil {
-		sel.Jev.Enabled = *w.Jev.Enabled
-	}
-	if w.Jev.modelSet {
-		if !ValidJevPin(w.Jev.Model) {
-			return SelectionConfig{}, errors.New("policy: selection jev model must be a versioned pin like jev-1.13.0")
+	if w.Jev != nil {
+		if w.Jev.Enabled != nil {
+			sel.Jev.Enabled = *w.Jev.Enabled
 		}
-		sel.Jev.Model = w.Jev.Model
-	}
-	if w.Jev.timeoutSet {
-		d, err := time.ParseDuration(w.Jev.Timeout)
-		if err != nil || d <= 0 {
-			return SelectionConfig{}, errors.New("policy: selection jev timeout must be a positive duration (e.g. 10s)")
+		if w.Jev.modelSet {
+			if !ValidJevPin(w.Jev.Model) {
+				return SelectionConfig{}, errors.New("policy: selection jev model must be a versioned pin like jev-1.13.0")
+			}
+			sel.Jev.Model = w.Jev.Model
 		}
-		sel.Jev.Timeout = d
+		if w.Jev.timeoutSet {
+			d, err := time.ParseDuration(w.Jev.Timeout)
+			if err != nil || d <= 0 {
+				return SelectionConfig{}, errors.New("policy: selection jev timeout must be a positive duration (e.g. 10s)")
+			}
+			sel.Jev.Timeout = d
+		}
+	}
+	if w.Laya != nil {
+		if w.Laya.Enabled != nil {
+			sel.Laya.Enabled = *w.Laya.Enabled
+		}
+		if w.Laya.timeoutSet {
+			d, err := time.ParseDuration(w.Laya.Timeout)
+			if err != nil || d <= 0 {
+				return SelectionConfig{}, errors.New("policy: selection laya timeout must be a positive duration (e.g. 5s)")
+			}
+			sel.Laya.Timeout = d
+		}
+	}
+	// Two enabled difficulty assessors is an ambiguous configuration, not a
+	// precedence question: reject it rather than silently preferring one.
+	if sel.Jev.Enabled && sel.Laya.Enabled {
+		return SelectionConfig{}, errors.New("policy: selection jev and laya cannot both be enabled")
 	}
 	return sel, nil
 }

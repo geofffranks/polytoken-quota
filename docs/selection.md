@@ -130,6 +130,12 @@ Prompts must be nonempty valid UTF-8 and at most 64 KiB; responses and whole fix
 
 Official references: [API](https://docs.typesafe.ai/api), [Python usage/schema](https://docs.typesafe.ai/sdk/python/usage), [models and version pinning](https://docs.typesafe.ai/models), [privacy policy](https://typesafe.ai/legal/privacy-policy). Published input pricing at design time was $0.042/million tokens, not a permanent price promise. The privacy policy states no input training but does not guarantee fixed ordinary-account retention or zero data retention. Review current terms before enabling disclosure.
 
+### Local laya backend
+
+`selection.laya.enabled` selects a local alternative to the remote endpoint: the same single rubric question is evaluated by an operator-run [laya-mcp](https://github.com/wsargent/laya-mcp) daemon at the fixed loopback address `http://127.0.0.1:8742/predict`. The request carries the task as `state` and the trusted rubric — nothing else — and the strict response contract (normalized probabilities over exactly the rubric options, maximum-probability choice, bounded confidence and usage) is shared verbatim with the Jev backend.
+
+The differences are deliberate: no credential exists (loopback, unauthenticated), no per-request model pin exists (the daemon pins its checkpoint at startup and reports it per response; the reported checkpoint is bounded and validated before it reaches any report), and no task text leaves the machine. Timeouts, cancellation, redirects, malformed responses, a daemon that is not running, and a daemon still loading its model (HTTP 503) all return the same safe assessment-unavailable results as their Jev counterparts, without automatic retry. Offline tests establish protocol and plumbing correctness only; local rubric quality and latency still require an operator-authorized `select-eval` run before adoption.
+
 ## Operator evaluation gate
 
 Offline tests validate plumbing, protocol handling, and report arithmetic—not Jev accuracy or real latency. Before workflow adoption, the operator must separately authorize and run an evaluation with externally supplied credentials:

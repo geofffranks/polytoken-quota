@@ -309,6 +309,13 @@ func newSelectionClient(model string, timeout time.Duration) (*selection.Client,
 	return selection.NewClient(model, resolveRuntimeKey, selection.ClientOptions{Timeout: timeout})
 }
 
+// newSelectionLayaClient constructs the local laya-daemon assessment client
+// for the desired configuration's timeout. The endpoint is fixed inside the
+// selection package; there is no credential to resolve.
+func newSelectionLayaClient(timeout time.Duration) (*selection.LayaClient, error) {
+	return selection.NewLayaClient(selection.LayaClientOptions{Timeout: timeout})
+}
+
 // selectionRefresh adapts one opt-in quota check without reconciliation. A
 // rejected check is fatal; an accepted check with provider problems is not —
 // the last-good evidence stays usable.
@@ -342,6 +349,9 @@ func newSelectionRunners(coord *service.Coordinator) (*selection.SelectRunner, *
 		NewAssessor: func(model string, timeout time.Duration) (selection.Assessor, error) {
 			return newSelectionClient(model, timeout)
 		},
+		NewLayaAssessor: func(timeout time.Duration) (selection.Assessor, error) {
+			return newSelectionLayaClient(timeout)
+		},
 	}
 	evalRunner := &selection.EvaluationRunner{
 		Snapshot: coord,
@@ -354,6 +364,13 @@ func newSelectionRunners(coord *service.Coordinator) (*selection.SelectRunner, *
 			// the desired configuration; the runner passes it explicitly
 			// on every request.
 			return &selection.JevEvalRunner{Client: client, Enabled: true}, nil
+		},
+		NewLaya: func(timeout time.Duration) (selection.EvalRunner, error) {
+			client, err := newSelectionLayaClient(timeout)
+			if err != nil {
+				return nil, err
+			}
+			return &selection.LayaEvalRunner{Client: client, Enabled: true}, nil
 		},
 	}
 	return selectRunner, evalRunner

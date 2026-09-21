@@ -73,11 +73,16 @@ type SelectRunner struct {
 	Snapshot SnapshotSource
 	// Refresh is required only when a request asks for --refresh.
 	Refresh QuotaRefresher
-	// NewAssessor constructs the assessor for the desired configuration's
+	// NewAssessor constructs the Jev assessor for the desired configuration's
 	// model pin and timeout. It is invoked only after the desired-config
 	// consent check passes, and the returned assessor resolves the runtime
 	// credential itself, immediately before its enabled request.
 	NewAssessor func(model string, timeout time.Duration) (Assessor, error)
+	// NewLayaAssessor constructs the local laya-daemon assessor for the
+	// desired configuration's timeout. Like NewAssessor it is invoked only
+	// after the consent check passes; there is no credential and no
+	// client-side model pin, so timeout is its only parameter.
+	NewLayaAssessor func(timeout time.Duration) (Assessor, error)
 	// Selector is the pure selection function; nil uses Select.
 	Selector SelectorFunc
 	// ReadPolicyFile reads the candidate policy document; nil uses the
@@ -109,7 +114,7 @@ var fatalSentences = map[FatalKind]string{
 	FatalPolicy:     "selection: candidate policy or fixtures are missing, unreadable, or invalid",
 	FatalSnapshot:   "selection: desired configuration or state is unreadable or invalid",
 	FatalRefresh:    "selection: quota refresh failed; selection stopped",
-	FatalConsent:    "selection: disclosure requires selection.jev.enabled in the desired configuration",
+	FatalConsent:    "selection: disclosure requires an enabled assessment backend (selection.jev or selection.laya) in the desired configuration",
 	FatalCredential: "selection: assessment credential is unavailable",
 	FatalTask:       "selection: task is empty, not valid UTF-8, or exceeds the 64 KiB limit",
 	FatalAssessor:   "selection: assessment is unavailable",
@@ -281,7 +286,7 @@ func (r *SelectRunner) Run(ctx context.Context, req SelectRequest) (SelectOutcom
 	// The explicit-tier path never assesses: no task read, no credential,
 	// no consent, no network.
 	if req.Tier == "" {
-		if r.NewAssessor == nil {
+		if r.NewAssessor == nil && r.NewLayaAssessor == nil {
 			return SelectOutcome{}, fatal(FatalAssessor, errors.New("no assessor factory configured"))
 		}
 		// Local task validation before anything remote can see it, using the
@@ -347,10 +352,21 @@ func (r *SelectRunner) Run(ctx context.Context, req SelectRequest) (SelectOutcom
 	if req.Tier == "" {
 		// Consent is enforced here, before any assessor is constructed or
 		// invoked: the desired configuration alone permits disclosure.
-		if !snap.Desired.Selection.Jev.Enabled {
-			return SelectOutcome{}, fatal(FatalConsent, errors.New("selection.jev.enabled is false"))
+		// Exactly one backend may be enabled — Load rejects a configuration
+		// that enables both — so the switch is unambiguous.
+		var assessor Assessor
+		var aerr error
+		switch {
+		case snap.Desired.Selection.Jev.Enabled:
+			assessor, aerr = r.NewAssessor(snap.Desired.Selection.Jev.Model, snap.Desired.Selection.Jev.Timeout)
+		case snap.Desired.Selection.Laya.Enabled:
+			if r.NewLayaAssessor == nil {
+				return SelectOutcome{}, fatal(FatalAssessor, errors.New("no laya assessor factory configured"))
+			}
+			assessor, aerr = r.NewLayaAssessor(snap.Desired.Selection.Laya.Timeout)
+		default:
+			return SelectOutcome{}, fatal(FatalConsent, errors.New("no selection assessment backend is enabled (selection.jev or selection.laya)"))
 		}
-		assessor, aerr := r.NewAssessor(snap.Desired.Selection.Jev.Model, snap.Desired.Selection.Jev.Timeout)
 		if aerr != nil {
 			return SelectOutcome{}, fatal(FatalAssessor, aerr)
 		}
@@ -458,11 +474,15 @@ type EvalInvocation struct {
 // responses.
 type EvaluationRunner struct {
 	Snapshot SnapshotSource
-	// NewJev constructs the live assessor for the configured model pin and
-	// timeout. The credential is resolved inside, immediately before each
-	// enabled request. Required; the offline FakeEvalRunner is for package
-	// tests, not this command.
+	// NewJev constructs the live Jev assessor for the configured model pin
+	// and timeout. The credential is resolved inside, immediately before
+	// each enabled request. Required; the offline FakeEvalRunner is for
+	// package tests, not this command.
 	NewJev func(model string, timeout time.Duration) (EvalRunner, error)
+	// NewLaya constructs the live local laya-daemon assessor for the
+	// configured timeout. Required when selection.laya is the enabled
+	// backend; there is no credential and no client-side model pin.
+	NewLaya func(timeout time.Duration) (EvalRunner, error)
 	// ReadPolicyFile reads the candidate policy document; nil uses the
 	// package bounded reader. Injected for tests.
 	ReadPolicyFile func(path string) ([]byte, error)
@@ -476,7 +496,7 @@ func (r *EvaluationRunner) RunEval(ctx context.Context, req EvalInvocation) (*Re
 	if req.PolicyPath == "" || req.FixturesPath == "" {
 		return nil, fatal(FatalRequest, errors.New("policy and fixtures paths are required"))
 	}
-	if r.NewJev == nil {
+	if r.NewJev == nil && r.NewLaya == nil {
 		return nil, fatal(FatalAssessor, errors.New("no live assessor configured"))
 	}
 	if r.Snapshot == nil {
@@ -508,11 +528,23 @@ func (r *EvaluationRunner) RunEval(ctx context.Context, req EvalInvocation) (*Re
 		return nil, fatal(FatalPolicy, err)
 	}
 	// Persistent consent is the desired configuration alone, enforced here
-	// before any assessor is constructed.
-	if !snap.Desired.Selection.Jev.Enabled {
-		return nil, fatal(FatalConsent, errors.New("selection.jev.enabled is false"))
+	// before any assessor is constructed. Exactly one backend may be enabled
+	// — Load rejects a configuration that enables both.
+	var assessor EvalRunner
+	switch {
+	case snap.Desired.Selection.Jev.Enabled:
+		if r.NewJev == nil {
+			return nil, fatal(FatalAssessor, errors.New("no live jev assessor configured"))
+		}
+		assessor, err = r.NewJev(snap.Desired.Selection.Jev.Model, snap.Desired.Selection.Jev.Timeout)
+	case snap.Desired.Selection.Laya.Enabled:
+		if r.NewLaya == nil {
+			return nil, fatal(FatalAssessor, errors.New("no live laya assessor configured"))
+		}
+		assessor, err = r.NewLaya(snap.Desired.Selection.Laya.Timeout)
+	default:
+		return nil, fatal(FatalConsent, errors.New("no selection assessment backend is enabled (selection.jev or selection.laya)"))
 	}
-	assessor, err := r.NewJev(snap.Desired.Selection.Jev.Model, snap.Desired.Selection.Jev.Timeout)
 	if err != nil {
 		return nil, fatal(FatalAssessor, err)
 	}

@@ -97,7 +97,10 @@ func TestForcedInitWithoutSelectionStaysDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reloaded replacement: %v", err)
 	}
-	if loaded.Selection != (policy.SelectionConfig{Jev: policy.JevSelectionConfig{Enabled: false, Model: policy.DocumentedJevModel, Timeout: policy.DefaultJevTimeout}}) {
+	if loaded.Selection != (policy.SelectionConfig{
+		Jev:  policy.JevSelectionConfig{Enabled: false, Model: policy.DocumentedJevModel, Timeout: policy.DefaultJevTimeout},
+		Laya: policy.LayaSelectionConfig{Enabled: false, Timeout: policy.DefaultLayaTimeout},
+	}) {
 		t.Fatalf("selection = %+v, want defaults", loaded.Selection)
 	}
 	if bytes.Contains(data, []byte("selection:")) {

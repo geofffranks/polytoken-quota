@@ -153,6 +153,16 @@ const DocumentedJevModel = "jev-1.13.0"
 // DefaultAssessTimeout delegates to it, so the two layers cannot drift.
 const DefaultJevTimeout = 10 * time.Second
 
+// DefaultLayaTimeout bounds one laya assessment when selection.laya omits
+// timeout. It must stay positive: Load rejects an explicit non-positive
+// timeout, so every resolved LayaSelectionConfig carries a positive bound.
+// Like DefaultJevTimeout it is the single source of the bound; the selection
+// package's DefaultLayaAssessTimeout delegates to it so the two layers cannot
+// drift. The default is tighter than Jev's because the fixed loopback
+// endpoint has no Wide-Area Network in its path, though the bound is not a
+// latency SLA.
+const DefaultLayaTimeout = 5 * time.Second
+
 // DefaultQuotaFreshness is the freshness TTL a quota mapping must satisfy
 // when its configuration omits freshness_ttl. It matches the routing
 // package's default and is the single source of that bound: Load applies it
@@ -171,6 +181,12 @@ type SelectionConfig struct {
 	// so code constructing Desired by hand must set Selection explicitly where
 	// it means "as loaded" (the same contract as Routing).
 	Jev JevSelectionConfig
+
+	// Laya holds the local laya-daemon assessment enablement. At most one of
+	// Jev and Laya may be enabled; Load rejects a configuration that enables
+	// both. The struct zero value is disabled with no timeout; only Load and
+	// propose apply DefaultLayaTimeout.
+	Laya LayaSelectionConfig
 }
 
 // JevSelectionConfig is the resolved selection.jev configuration. Enabled
@@ -187,6 +203,20 @@ type JevSelectionConfig struct {
 	// Load and propose always resolve it.
 	Model string
 	// Timeout is positive after Load; DefaultJevTimeout when the key is
+	// omitted.
+	Timeout time.Duration
+}
+
+// LayaSelectionConfig is the resolved selection.laya configuration: the local
+// laya-daemon assessment backend. Enabled defaults to false: like JEV, local
+// assessment is strictly opt-in. There is deliberately no model key — the
+// laya daemon pins its checkpoint at startup (LAYA_MCP_MODEL and friends) and
+// reports the checkpoint it served in each response, so the pin lives with
+// the daemon, not in this file. Timeout is positive after Load;
+// DefaultLayaTimeout when the key is omitted.
+type LayaSelectionConfig struct {
+	Enabled bool
+	// Timeout is positive after Load; DefaultLayaTimeout when the key is
 	// omitted.
 	Timeout time.Duration
 }

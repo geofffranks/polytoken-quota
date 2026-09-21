@@ -9,6 +9,8 @@ Keep probabilistic difficulty assessment separate from deterministic, quota-awar
 ## Contracts and boundaries
 
 - Operator `desired.yaml` owns Jev consent, model pin and timeout. Candidate YAML supplies only registered phase/tier groups and cannot authorize disclosure.
+- At most one assessment backend may be enabled: `selection.jev` (remote, credential-resolved) or `selection.laya` (local loopback daemon, no credential). Load rejects both enabled; the consent gate is backend-neutral.
+- The laya backend shares the Jev rubric, wire contract, bounds and sentinels, fixes its endpoint to the documented loopback daemon address, omits the per-request model pin (the daemon owns it and reports the served checkpoint), and treats a not-running or still-loading daemon as assessment-unavailable, never fatal.
 - Explicit difficulty bypasses stdin, credentials and remote assessment. Floors apply only to valid assessments, never abstention.
 - Select within one phase/tier and one desired/state/as-of snapshot. Known exclusions survive stale evidence; missing evidence cannot manufacture confirmation. Empty legacy provider axes are not evidence: a fresh complete quota snapshot confirms, while explicit bad state (corrupt axes, manual disable, exhausted, or a snapshot not explicitly available) still excludes or demotes. Search all confirmed groups before uncertain fallback.
 - Return exact registered references, preserve suffixes, and expose uncertainty. Headroom is neither reserved capacity nor comparable token counts.
