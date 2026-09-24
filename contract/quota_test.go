@@ -308,6 +308,7 @@ func buildReleaseRegistry() *quota.EvidenceRegistry {
 	reg.Register(quota.AnthropicEvidence(time.Now()))
 	reg.Register(quota.AnthropicSubscriptionEvidence(time.Now()))
 	reg.Register(quota.NeuralwattEvidence(time.Now()))
+	reg.Register(quota.OpenCodeGoEvidence(time.Now()))
 	return reg
 }
 
