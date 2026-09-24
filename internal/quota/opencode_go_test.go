@@ -99,8 +99,8 @@ func TestOpenCodeGoEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 // guarantee: absent or expired evidence yields an error and zero HTTP calls.
 func TestOpenCodeGoEvidenceGateFailsClosedWithoutRequest(t *testing.T) {
 	for name, evidence := range map[string]bool{
-		"absent":   false,
-		"expired":  true,
+		"absent":  false,
+		"expired": true,
 	} {
 		t.Run(name, func(t *testing.T) {
 			src, doer := opencodeGoTestSource(t, "{}", http.StatusOK, evidence)
@@ -181,13 +181,13 @@ func TestOpenCodeGoUnresolvedCredentialFailsClosedWithoutRequest(t *testing.T) {
 
 func TestOpenCodeGoQuotedKeyIsTrimmed(t *testing.T) {
 	for name, tc := range map[string]struct{ in, want string }{
-		"plain":            {in: " k0 ", want: "k0"},
-		"double quotes":    {in: `"k1"`, want: "k1"},
-		"single quotes":    {in: "'k2'", want: "k2"},
-		"quoted + spaces":  {in: ` "k3" `, want: "k3"},
-		"mismatched":       {in: `"k4'`, want: `"k4'`},
-		"inner only":       {in: `"k5", "k6"`, want: `k5", "k6`},
-		"nested":           {in: `""k7""`, want: `"k7"`},
+		"plain":           {in: " k0 ", want: "k0"},
+		"double quotes":   {in: `"k1"`, want: "k1"},
+		"single quotes":   {in: "'k2'", want: "k2"},
+		"quoted + spaces": {in: ` "k3" `, want: "k3"},
+		"mismatched":      {in: `"k4'`, want: `"k4'`},
+		"inner only":      {in: `"k5", "k6"`, want: `k5", "k6`},
+		"nested":          {in: `""k7""`, want: `"k7"`},
 	} {
 		if got := cleanOpenCodeGoKey(tc.in); got != tc.want {
 			t.Fatalf("%s: cleanOpenCodeGoKey(%q)=%q want %q", name, tc.in, got, tc.want)
@@ -203,14 +203,390 @@ func TestOpenCodeGoQuotedKeyIsTrimmed(t *testing.T) {
 	}
 }
 
-// TestOpenCodeGoTwoHundredWithStubDecoderFailsClosed documents the skeleton
-// boundary: before the decode task lands, any 2xx body fails closed rather
-// than inventing a fresh snapshot.
-func TestOpenCodeGoTwoHundredWithStubDecoderFailsClosed(t *testing.T) {
-	src, doer := opencodeGoTestSource(t, `{"usage":{"rolling":{"status":"ok","percent":10}}}`, http.StatusOK, true)
+func opencodeGoFullUsageBody() string {
+	return `{"usage":{` +
+		`"rolling":{"status":"ok","percent":42.5,"resetsAt":"2026-08-15T16:00:00Z"},` +
+		`"weekly":{"status":"rate-limited","percent":31.25,"resetsAt":"2026-08-17T00:00:00Z"},` +
+		`"monthly":{"status":"ok","percent":88.75,"resetsAt":"2026-08-31T00:00:00Z"}` +
+		`}}`
+}
+
+// TestOpenCodeGoFullUsageFetch covers the all-three-windows row: every window
+// decodes, order is the fixed rolling/weekly/monthly priority, Used/Limit stay
+// nil, every window carries its Period (including the sub-24h rolling window),
+// and a fully reset-bearing payload is SourceFresh.
+func TestOpenCodeGoFullUsageFetch(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, opencodeGoFullUsageBody(), http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Status != SourceFresh || snap.Availability != QuotaAvailable {
+		t.Fatalf("snapshot=%+v", snap)
+	}
+	if !snap.CheckedAt.Equal(opencodeGoTestNow) {
+		t.Fatalf("checked_at = %v, want the local clock %v (payload has no snapshot_at)", snap.CheckedAt, opencodeGoTestNow)
+	}
+	if len(snap.Windows) != 3 {
+		t.Fatalf("windows=%d", len(snap.Windows))
+	}
+	wantOrder := []string{"rolling", "weekly", "monthly"}
+	wantPercent := []float64{42.5, 31.25, 88.75}
+	wantPeriods := []time.Duration{opencodeGoRollingPeriod, opencodeGoWeeklyPeriod, opencodeGoMonthlyPeriod}
+	for i, w := range snap.Windows {
+		if w.Name != wantOrder[i] {
+			t.Fatalf("window[%d]=%q want %q (fixed decode order)", i, w.Name, wantOrder[i])
+		}
+		if w.Used != nil || w.Limit != nil {
+			t.Fatalf("window[%d] must not carry Used/Limit", i)
+		}
+		if w.UsagePercent == nil || *w.UsagePercent != wantPercent[i] {
+			t.Fatalf("window[%d] percent=%v want %v", i, w.UsagePercent, wantPercent[i])
+		}
+		if w.Period == nil || *w.Period != wantPeriods[i] {
+			t.Fatalf("window[%d] period=%v want %v", i, w.Period, wantPeriods[i])
+		}
+		if w.ResetAt == nil {
+			t.Fatalf("window[%d] missing reset", i)
+		}
+	}
+	if !snap.Windows[0].ResetAt.Equal(time.Date(2026, 8, 15, 16, 0, 0, 0, time.UTC)) {
+		t.Fatalf("rolling reset=%v", snap.Windows[0].ResetAt)
+	}
+}
+
+// TestOpenCodeGoRequestShapeAndCredentials pins the wire contract: GET on the
+// usage endpoint with the Bearer credential, Accept and User-Agent headers, no
+// query string, and the env-based credential resolver reference.
+func TestOpenCodeGoRequestShapeAndCredentials(t *testing.T) {
+	src, doer := opencodeGoTestSource(t, opencodeGoFullUsageBody(), http.StatusOK, true)
+	resolver := src.Credentials.(*opencodeGoResolver)
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	req := doer.lastCall()
+	if req.Method != http.MethodGet || req.URL.String() != opencodeGoUsageEndpoint || (req.Body != nil && req.Body != http.NoBody) || req.URL.RawQuery != "" {
+		t.Fatalf("request=%s %s query=%q", req.Method, req.URL, req.URL.RawQuery)
+	}
+	if req.Header.Get("Authorization") != "Bearer "+opencodeGoTestKey || req.Header.Get("Accept") != "application/json" || req.Header.Get("User-Agent") != "polytoken-quota" {
+		t.Fatalf("request headers=%v", req.Header)
+	}
+	if resolver.ref.Kind != CredentialEnv || resolver.ref.Locator != opencodeGoAPIKeyEnv {
+		t.Fatalf("credential ref=%+v", resolver.ref)
+	}
+}
+
+// TestOpenCodeGoWindowStatusVariants covers the status rows of the matrix:
+// both recognized values decode, while a missing or unrecognized status fails
+// that window closed (as partial, so long as another window decodes).
+func TestOpenCodeGoWindowStatusVariants(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body            string
+		wantStatus      SourceStatus
+		wantWindows     int
+		wantPercentName string
+		wantPercent     float64
+		wantAvailable   QuotaAvailability
+	}{
+		"ok decodes": {
+			`{"usage":{"rolling":{"status":"ok","percent":12.5,"resetsAt":"2026-08-15T16:00:00Z"}}}`,
+			SourcePartial, 1, "rolling", 12.5, QuotaAvailable,
+		},
+		"rate-limited decodes, advisory only": {
+			`{"usage":{"rolling":{"status":"rate-limited","percent":12.5,"resetsAt":"2026-08-15T16:00:00Z"}}}`,
+			SourcePartial, 1, "rolling", 12.5, QuotaAvailable,
+		},
+		"unrecognized status fails closed": {
+			`{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-15T16:00:00Z"},"weekly":{"status":"exhausted","percent":90,"resetsAt":"2026-08-17T00:00:00Z"}}}`,
+			SourcePartial, 1, "rolling", 10, QuotaAvailable,
+		},
+		"missing status fails closed": {
+			`{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-15T16:00:00Z"},"weekly":{"percent":90}}}`,
+			SourcePartial, 1, "rolling", 10, QuotaAvailable,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src, _ := opencodeGoTestSource(t, tc.body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != tc.wantStatus || len(snap.Windows) != tc.wantWindows {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			w := snap.Windows[0]
+			if w.Name != tc.wantPercentName || w.UsagePercent == nil || *w.UsagePercent != tc.wantPercent {
+				t.Fatalf("window=%+v", w)
+			}
+			if snap.Availability != tc.wantAvailable {
+				t.Fatalf("availability=%s want %s", snap.Availability, tc.wantAvailable)
+			}
+		})
+	}
+}
+
+// TestOpenCodeGoPercentVariants covers the percent-validation rows: missing,
+// non-numeric (string), and overflow-to-Inf (1e400) percent values fail that
+// window closed — no fallback onto a weaker window occurs. A literal NaN is
+// syntactically invalid JSON, so it fails the whole payload at the envelope
+// decode instead (also fail-closed; encoding/json never accepts NaN).
+func TestOpenCodeGoPercentVariants(t *testing.T) {
+	weekly := `"weekly":{"status":"ok","percent":20,"resetsAt":"2026-08-17T00:00:00Z"}`
+	for name, body := range map[string]string{
+		"percent missing":      `{"usage":{"rolling":{"status":"ok","resetsAt":"2026-08-15T16:00:00Z"},` + weekly + `}}`,
+		"percent non-numeric":  `{"usage":{"rolling":{"status":"ok","percent":"50"},` + weekly + `}}`,
+		"percent Inf overflow": `{"usage":{"rolling":{"status":"ok","percent":1e400},` + weekly + `}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourcePartial || len(snap.Windows) != 1 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			// The rolling window must never decode; only the weaker weekly
+			// window survives.
+			if snap.Windows[0].Name != "weekly" || snap.Windows[0].UsagePercent == nil || *snap.Windows[0].UsagePercent != 20 {
+				t.Fatalf("window=%+v", snap.Windows[0])
+			}
+		})
+	}
+	t.Run("percent NaN literal fails the whole payload", func(t *testing.T) {
+		body := `{"usage":{"rolling":{"status":"ok","percent":NaN},` + weekly + `}}`
+		src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+		snap, err := src.Fetch(context.Background())
+		if err == nil || snap.Status != SourceFailed || !strings.Contains(snap.Error, "could not decode JSON") {
+			t.Fatalf("snapshot=%+v err=%v", snap, err)
+		}
+	})
+}
+
+// TestOpenCodeGoPercentClampsAtBothEnds covers clamping at 0 and 100
+// (negative and >100 inputs stay finite and decode; they never error).
+func TestOpenCodeGoPercentClampsAtBothEnds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		percent       string
+		wantClamped   float64
+		wantAvailable QuotaAvailability
+	}{
+		"negative clamps to zero":    {"-5", 0, QuotaAvailable},
+		"over 100 clamps to hundred": {"125.5", 100, QuotaUnavailable},
+		"exactly 100 is unavailable": {"100", 100, QuotaUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"usage":{"rolling":{"status":"ok","percent":` + tc.percent + `,"resetsAt":"2026-08-15T16:00:00Z"}}}`
+			src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourcePartial {
+				t.Fatalf("snapshot=%+v err=%v (percent >= 100 must not be an error)", snap, err)
+			}
+			if snap.Availability != tc.wantAvailable {
+				t.Fatalf("availability=%s want %s", snap.Availability, tc.wantAvailable)
+			}
+			if *snap.Windows[0].UsagePercent != tc.wantClamped {
+				t.Fatalf("percent=%v want clamp to %v", *snap.Windows[0].UsagePercent, tc.wantClamped)
+			}
+		})
+	}
+}
+
+// TestOpenCodeGoResetAtVariants covers the resetsAt rows: a valid RFC3339
+// value sets ResetAt; absent or unparseable values decode the window without
+// ResetAt and mark the snapshot partial.
+func TestOpenCodeGoResetAtVariants(t *testing.T) {
+	for name, tc := range map[string]struct {
+		resetsAt   string // raw JSON key, "" to omit
+		wantReset  bool
+		wantStatus SourceStatus
+	}{
+		"valid sets reset": {`"2026-08-15T16:00:00Z"`, true, SourcePartial},
+		"unparseable":      {`"soon-ish"`, false, SourcePartial},
+		"key omitted":      {``, false, SourcePartial},
+		"null is absent":   {`null`, false, SourcePartial},
+	} {
+		t.Run(name, func(t *testing.T) {
+			window := `{"status":"ok","percent":10,"resetsAt":` + tc.resetsAt + `}`
+			if tc.resetsAt == "" {
+				window = `{"status":"ok","percent":10}`
+			}
+			body := `{"usage":{"rolling":` + window + `}}`
+			src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != tc.wantStatus || len(snap.Windows) != 1 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if tc.wantReset {
+				if snap.Windows[0].ResetAt == nil || !snap.Windows[0].ResetAt.Equal(time.Date(2026, 8, 15, 16, 0, 0, 0, time.UTC)) {
+					t.Fatalf("reset=%v want 2026-08-15T16:00:00Z", snap.Windows[0].ResetAt)
+				}
+			} else if snap.Windows[0].ResetAt != nil {
+				t.Fatalf("reset=%v want nil", snap.Windows[0].ResetAt)
+			}
+			// The window still carried its Period.
+			if snap.Windows[0].Period == nil || *snap.Windows[0].Period != opencodeGoRollingPeriod {
+				t.Fatalf("period=%v want 5h", snap.Windows[0].Period)
+			}
+		})
+	}
+}
+
+// TestOpenCodeGoPartialWhenOnlySomeWindowsDecode covers the occupancy rows:
+// one of three windows present ⇒ SourcePartial; a present-but-malformed
+// window alongside valid ones ⇒ SourcePartial, and the malformed window
+// contributes nothing.
+func TestOpenCodeGoPartialWhenOnlySomeWindowsDecode(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body        string
+		wantWindows int
+		wantNames   []string
+	}{
+		"single window is partial": {
+			`{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-15T16:00:00Z"}}}`,
+			1, []string{"rolling"},
+		},
+		"unusable window among valid ones": {
+			// weekly is a bare string: JSON-valid (so the envelope still
+			// decodes), but it fails that window closed while rolling and
+			// monthly still decode.
+			`{"usage":{"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-15T16:00:00Z"},"weekly":"twenty","monthly":{"status":"ok","percent":30,"resetsAt":"2026-08-31T00:00:00Z"}}}`,
+			2, []string{"rolling", "monthly"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src, _ := opencodeGoTestSource(t, tc.body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourcePartial || len(snap.Windows) != tc.wantWindows {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			for i, want := range tc.wantNames {
+				if snap.Windows[i].Name != want {
+					t.Fatalf("window[%d]=%q want %q", i, snap.Windows[i].Name, want)
+				}
+			}
+			if snap.Availability != QuotaAvailable {
+				t.Fatalf("availability=%s want available", snap.Availability)
+			}
+		})
+	}
+}
+
+// TestOpenCodeGoNoWindowDecodesFailsClosed covers the hard-failure row: an
+// absent usage object, an empty usage object, and a payload whose only
+// windows are unusable all hard-fail instead of returning an empty fresh
+// snapshot.
+func TestOpenCodeGoNoWindowDecodesFailsClosed(t *testing.T) {
+	for name, body := range map[string]string{
+		"no usage object":       `{"account":"c"}`,
+		"empty usage object":    `{"usage":{}}`,
+		"only unusable windows": `{"usage":{"rolling":{"percent":5},"weekly":{"status":"bogus","percent":6}}}`,
+		"invalid json":          `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown || snap.Error == "" {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if err.Error() != snap.Error {
+				t.Fatalf("error/snapshot mismatch err=%q snap.Error=%q", err.Error(), snap.Error)
+			}
+			if len(snap.Windows) != 0 {
+				t.Fatalf("windows=%v, want none", snap.Windows)
+			}
+		})
+	}
+}
+
+// TestOpenCodeGoEmptyBodyFailsClosed covers the empty-body row.
+func TestOpenCodeGoEmptyBodyFailsClosed(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, "", http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || err.Error() != "opencode-go: empty response body" {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+}
+
+// TestOpenCodeGoHTTPFailuresFailClosed covers the 401, 403, and other-non-2xx
+// rows: fail closed with sanitized diagnostics; 401 names the env var and
+// 403 distinguishes a valid key without a subscription from an auth failure;
+// neither leaks the credential or a credentialed URL.
+func TestOpenCodeGoHTTPFailuresFailClosed(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, `{"error":{"type":"AuthError","message":"Missing API key."}}`, http.StatusUnauthorized, true)
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || !strings.Contains(err.Error(), opencodeGoAPIKeyEnv) {
+		t.Fatalf("401 snapshot=%+v err=%v", snap, err)
+	}
+	if strings.Contains(err.Error(), opencodeGoTestKey) || strings.Contains(snap.Error, opencodeGoUsageEndpoint) {
+		t.Fatalf("401 diagnostic leaked secrets: %q / %q", err.Error(), snap.Error)
+	}
+
+	src, _ = opencodeGoTestSource(t, `{"error":{"type":"EntitlementError","message":"no zen go subscription"}}`, http.StatusForbidden, true)
+	snap, err = src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed {
+		t.Fatalf("403 snapshot=%+v err=%v", snap, err)
+	}
+	if !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "subscription") {
+		t.Fatalf("403 diagnostic must distinguish valid-key-no-subscription: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("403 diagnostic must not read as an auth failure: %q", err.Error())
+	}
+
+	src, _ = opencodeGoTestSource(t, "{}", http.StatusInternalServerError, true)
+	snap, err = src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || err.Error() != "opencode-go: server error (HTTP 500)" {
+		t.Fatalf("500 snapshot=%+v err=%v", snap, err)
+	}
+}
+
+// TestOpenCodeGo429RateLimited covers both 429 rows: with a Retry-After
+// header and without one.
+func TestOpenCodeGo429RateLimited(t *testing.T) {
+	withHeader := func(retryAfter ...string) *OpenCodeGoSource {
+		t.Helper()
+		reg := NewEvidenceRegistry()
+		reg.Register(OpenCodeGoEvidence(opencodeGoTestNow))
+		resp := bodyResponse(http.StatusTooManyRequests, []byte(`{"usage":{}}`))
+		if len(retryAfter) > 0 {
+			resp.Header = http.Header{"Retry-After": retryAfter}
+		}
+		doer := &recordingDoer{resp: resp}
+		return &OpenCodeGoSource{
+			mappingID: "opencode-go-test", Client: &BoundedClient{Transport: doer},
+			Credentials: &opencodeGoResolver{}, Evidence: reg,
+			Now: func() time.Time { return opencodeGoTestNow },
+		}
+	}
+	src := withHeader("120")
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if !strings.Contains(err.Error(), "rate limited") || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "Retry-After: 120s") {
+		t.Fatalf("429 diagnostic=%q", err.Error())
+	}
+	src = withHeader() // no Retry-After supplied
+	snap, err = src.Fetch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "no Retry-After supplied") {
+		t.Fatalf("429-without-header diagnostic=%q", err.Error())
+	}
+}
+
+// TestOpenCodeGoTransportErrorSanitization pins the sanitization row: a
+// transport error echoing a credentialed URL and a bearer token must not
+// surface them in the returned error or the snapshot error.
+func TestOpenCodeGoTransportErrorSanitization(t *testing.T) {
+	reg := NewEvidenceRegistry()
+	reg.Register(OpenCodeGoEvidence(opencodeGoTestNow))
+	doer := &recordingDoer{err: errors.New(`Get "https://user:secretpass@opencode.ai/zen/go/v1/usage": dial tcp: bearer sk-synthetic-AbCd1234`)}
+	src := &OpenCodeGoSource{
+		mappingID: "opencode-go-test", Client: &BoundedClient{Transport: doer},
+		Credentials: &opencodeGoResolver{}, Evidence: reg, Now: func() time.Time { return opencodeGoTestNow },
+	}
 	snap, err := src.Fetch(context.Background())
 	if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
 		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	for _, msg := range []string{err.Error(), snap.Error} {
+		if strings.Contains(msg, "secretpass") || strings.Contains(msg, "sk-synthetic-AbCd1234") || strings.Contains(msg, "user@") {
+			t.Fatalf("diagnostic leaked secrets: %q", msg)
+		}
 	}
 	if len(doer.calls) != 1 {
 		t.Fatalf("calls=%d, want exactly 1", len(doer.calls))

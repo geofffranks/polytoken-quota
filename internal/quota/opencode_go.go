@@ -23,6 +23,7 @@ package quota
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -75,11 +76,11 @@ type OpenCodeGoSource struct {
 // record. The dates are release-owned and do not renew on construction.
 func OpenCodeGoEvidence(_ time.Time) Evidence {
 	return Evidence{
-		Provider:   opencodeGoProviderName,
-		Endpoint:   opencodeGoUsageEndpoint,
-		Method:     http.MethodGet,
-		AuthType:   "bearer-api-key",
-		SchemaNote: "three windows: rolling/weekly/monthly, each {status, percent, resetsAt}; percent is percent USED (never dollars); windows decode in fixed order rolling, weekly, monthly; errors: 401 AuthError envelope, 403 EntitlementError envelope with a valid key that has no OpenCode Go subscription; contract derived from the provider's first-party open-source console code and not officially documented — re-verify at the quarterly evidence review",
+		Provider:    opencodeGoProviderName,
+		Endpoint:    opencodeGoUsageEndpoint,
+		Method:      http.MethodGet,
+		AuthType:    "bearer-api-key",
+		SchemaNote:  "three windows: rolling/weekly/monthly, each {status, percent, resetsAt}; percent is percent USED (never dollars); windows decode in fixed order rolling, weekly, monthly; errors: 401 AuthError envelope, 403 EntitlementError envelope with a valid key that has no OpenCode Go subscription; contract derived from the provider's first-party open-source console code and not officially documented — re-verify at the quarterly evidence review",
 		FixturePath: "contract/testdata/quota/opencode-go/usage.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review; contract is not officially documented
@@ -185,7 +186,7 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		return o.fail(msg), errors.New(msg)
 	}
 	checkedAt := o.now()
-	windows, partial, err := parseOpenCodeGoUsage(resp.Body, checkedAt)
+	windows, partial, err := parseOpenCodeGoUsage(resp.Body)
 	if err != nil {
 		msg := SanitizeError(err)
 		return o.fail(msg), errors.New(msg)
@@ -216,10 +217,69 @@ type opencodeGoUsageWindow struct {
 	ResetsAt *string  `json:"resetsAt"`
 }
 
-// parseOpenCodeGoUsage is implemented by the opencode-go decoding task; the
-// skeleton fails closed on any 2xx body until then.
-func parseOpenCodeGoUsage([]byte, time.Time) ([]QuotaWindow, bool, error) {
-	return nil, false, errors.New("opencode-go: usage decoding is not implemented yet")
+// parseOpenCodeGoUsage decodes the OpenCode Go usage payload. The payload has
+// no snapshot timestamp; the caller stamps CheckedAt from the local clock.
+//
+// Windows decode in the fixed opencodeGoWindowOrder. A window key absent from
+// the payload is simply skipped without syntax damage, but a snapshot
+// covering fewer than the three known windows is still only partial.
+// A syntactically malformed document (including invalid JSON inside any
+// window value, e.g. a trailing comma or a NaN literal) fails the whole
+// payload at the envelope decode. A window that is JSON-valid but semantically
+// unusable (wrong type, missing/unrecognized status, missing/non-numeric/
+// non-finite percent) fails that window closed and marks the snapshot partial
+// — a present-but-unusable signal must never fall back to a weaker window.
+// A window missing (or carrying an unparseable) resetsAt still decodes,
+// without ResetAt, and also marks the snapshot partial. If no window decodes
+// at all (including an absent/empty usage object), the payload has no usable
+// signal and the caller hard-fails.
+func parseOpenCodeGoUsage(body []byte) ([]QuotaWindow, bool, error) {
+	var envelope struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, false, errors.New("opencode-go: invalid response body (could not decode JSON)")
+	}
+	windows := make([]QuotaWindow, 0, len(opencodeGoWindowOrder))
+	partial := false
+	for _, name := range opencodeGoWindowOrder {
+		raw, ok := envelope.Usage[name]
+		if !ok {
+			continue // window absent from the payload; not an error by itself
+		}
+		var decoded opencodeGoUsageWindow
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			partial = true // window present but semantically malformed (JSON-valid) fails that window closed
+			continue
+		}
+		if decoded.Status == nil || (*decoded.Status != "ok" && *decoded.Status != "rate-limited") {
+			partial = true // status is advisory, but missing/unrecognized still fails the window closed
+			continue
+		}
+		if decoded.Percent == nil || !finite(*decoded.Percent) {
+			partial = true // a present-but-unusable percent must not fall back to a weaker window
+			continue
+		}
+		usagePercent := clampRange(*decoded.Percent, 0, 100)
+		window := QuotaWindow{Name: name, UsagePercent: &usagePercent}
+		period := opencodeGoWindowPeriods[name]
+		window.Period = &period // every decoded window carries its Period
+		if decoded.ResetsAt == nil {
+			partial = true // decodes without ResetAt; the reset is unknown
+		} else if reset, err := time.Parse(time.RFC3339, *decoded.ResetsAt); err == nil {
+			window.ResetAt = &reset
+		} else {
+			partial = true // unparseable reset still decodes the window, without ResetAt
+		}
+		windows = append(windows, window)
+	}
+	if len(windows) == 0 {
+		return nil, false, errors.New("opencode-go: response has no usable usage window")
+	}
+	if len(windows) < len(opencodeGoWindowOrder) {
+		partial = true // only some of the known windows decoded
+	}
+	return windows, partial, nil
 }
 
 var _ QuotaSource = (*OpenCodeGoSource)(nil)
