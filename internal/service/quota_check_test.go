@@ -747,3 +747,49 @@ func snapshotUsed(snap *quota.QuotaSnapshot) (float64, bool) {
 	}
 	return *snap.Windows[0].Used, true
 }
+
+// TestQuotaFailureEventWithZeroCheckedAtSavesThroughStore is a regression test
+// for the live failure reported by operators: every adapter's fail path returns
+// a snapshot with a zero CheckedAt, and appendQuotaEvents used to stamp that
+// zero onto the event's At. The real state save then rejected the history with
+// "state: invalid event metadata at 0", so a `check` with any failed provider
+// could never persist anything. This drives the produced event through the
+// actual state.Store.Save (which runs SanitizeEventHistory, BoundEventHistory,
+// and ValidateEventHistory on save — validation the coordinator spy store used
+// elsewhere in this file does not perform).
+func TestQuotaFailureEventWithZeroCheckedAtSavesThroughStore(t *testing.T) {
+	attempts := map[string]quota.QuotaSnapshot{
+		"opencode-go": failedSnap("opencode-go", "credential unresolved"),
+	}
+	now := time.Date(2026, 7, 19, 12, 30, 0, 0, time.UTC)
+
+	// Mirror production: the check bumps the revision before recording events
+	// against the new state, so the event carries a non-zero Revision.
+	st := state.State{
+		Schema:              state.CurrentSchema,
+		Revision:            2,
+		Providers:           map[string]state.ProviderState{},
+		Targets:             map[string]state.TargetState{},
+		NextEventSequence:   1,
+		NextArrivalSequence: 1,
+	}
+	st = appendQuotaEvents(st, attempts, now)
+
+	if len(st.EventHistory.Events) != 1 {
+		t.Fatalf("expected exactly 1 failure event, got %d", len(st.EventHistory.Events))
+	}
+
+	// The real durability path, with a temp state file — never live config.
+	// Save runs SanitizeEventHistory, BoundEventHistory, and
+	// ValidateEventHistory; a zero At is rejected as "invalid event metadata".
+	store := state.Store{Path: filepath.Join(t.TempDir(), "state.json"), Now: func() time.Time { return now }}
+	if err := store.Save(st); err != nil {
+		t.Fatalf("state save rejected the quota failure event history: %v", err)
+	}
+	// A failure has no observation time; the check time is the honest
+	// substitute, and the event must always carry a real UTC instant.
+	e := st.EventHistory.Events[0]
+	if e.At.IsZero() || e.At.Location() != time.UTC || !e.At.Equal(now) {
+		t.Fatalf("failure event At should fall back to the check time %v as UTC; got %v", now, e.At)
+	}
+}
