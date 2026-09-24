@@ -193,13 +193,22 @@ func TestOpenCodeGoQuotedKeyIsTrimmed(t *testing.T) {
 			t.Fatalf("%s: cleanOpenCodeGoKey(%q)=%q want %q", name, tc.in, got, tc.want)
 		}
 	}
-	// The cleaned key, not the raw value, reaches the Authorization header.
+	// The cleaned key, not the raw value, must reach the Authorization header on
+	// the wire. Asserting only cleanOpenCodeGoKey's return value would leave the
+	// call site inside Fetch unpinned: dropping it would send `Bearer "k"` and
+	// no other test would fail. So drive a real fetch with a quoted credential.
 	src, doer := opencodeGoTestSource(t, "{}", http.StatusOK, true)
 	resolver := src.Credentials.(*opencodeGoResolver)
 	resolver.value = `"` + opencodeGoTestKey + `"`
-	_ = doer
-	if cleanOpenCodeGoKey(resolver.value) != opencodeGoTestKey {
-		t.Fatalf("cleaned=%q", cleanOpenCodeGoKey(resolver.value))
+	if _, err := src.Fetch(context.Background()); err == nil {
+		t.Fatal("expected the window-less body to fail closed")
+	}
+	req := doer.lastCall()
+	if req == nil {
+		t.Fatal("quoted-key fetch made no request")
+	}
+	if got, want := req.Header.Get("Authorization"), "Bearer "+opencodeGoTestKey; got != want {
+		t.Fatalf("Authorization=%q want %q (the trimmed key must reach the wire)", got, want)
 	}
 }
 
