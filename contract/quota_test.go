@@ -772,6 +772,24 @@ func TestOpenCodeGoContractFixtures(t *testing.T) {
 	})
 }
 
+// TestOpenCodeGoContractFixturesAreSecretFree asserts the committed opencode-go
+// fixture files contain no bearer tokens, account IDs, or key/value secrets.
+func TestOpenCodeGoContractFixturesAreSecretFree(t *testing.T) {
+	entries, err := os.ReadDir(filepath.Join("testdata", "quota", "opencode-go"))
+	if err != nil {
+		t.Fatalf("read fixture dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		body := loadOpenCodeGoFixture(t, e.Name())
+		if secretPattern.MatchString(string(body)) {
+			t.Fatalf("fixture %s contains a secret pattern", e.Name())
+		}
+	}
+}
+
 // --- z.ai adapter fixture acceptance -------------------------------------
 //
 // These acceptance tests load the sanitized z.ai fixture files from the
