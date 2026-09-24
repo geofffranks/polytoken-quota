@@ -11,7 +11,7 @@ The tool never contacts a running Polytoken daemon from the host; change propaga
 | Component | Minimum | Notes |
 |-----------|---------|-------|
 | Go toolchain | `go 1.26.5` | Exact version match (`go env GOVERSION`). |
-| Polytoken | `0.6.6` | Supported validation contract (resolved from `PATH`). |
+| Polytoken | none | Opt-in contract suite pins behavior, not a release number; resolved from `POLYTOKEN_CONTRACT_BIN` (or `POLYTOKEN_BIN`). |
 
 ## Install and initial setup
 

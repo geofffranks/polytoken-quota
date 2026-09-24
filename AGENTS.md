@@ -21,10 +21,13 @@ Approved plan: `docs/superpowers/polytoken-quota-reconciler/plan.md`
 - **Module path:** `github.com/geofffranks/polytoken-quota`
 - **Supported targets (GOOS/GOARCH):** `darwin/arm64`, `darwin/amd64`,
   `linux/amd64`, `linux/arm64`
-- **Polytoken contract binary:** resolved from `PATH` (currently
-  `0.6.6`), overridable via `POLYTOKEN_BINARY`.
-  Version policy: minimum-current — keep the supported binary at the latest stable
-  release.
+- **Polytoken contract binary:** the opt-in contract suite resolves it from
+  `POLYTOKEN_CONTRACT_BIN` (or `POLYTOKEN_BIN`) and does not fall back to `PATH`.
+  No release number is pinned: the suite pins behavior, and a contract that needs
+  a specific surface asserts that surface directly (see
+  `requireDaemonCapabilities` in `contract/daemon_reload_test.go`).
+  Separately, `select`/`select-eval` resolve their `polytoken` prerequisite from
+  `PATH`, overridable via `POLYTOKEN_BINARY`.
 
 ## Install / release convention
 
@@ -59,7 +62,7 @@ Repository settings required for these workflows: enable **Allow auto-merge**; s
 | Workflow policy | `scripts/test-workflows.sh` |
 | Contract | `scripts/test-contract.sh` (opt-in external binary) |
 
-Contract tests invoke the real Polytoken binary against complete private staging roots; they are opt-in and never run as part of the default `go test ./...`. They require `POLYTOKEN_BINARY` or a `polytoken` binary on `PATH`, and they must not target live configuration.
+Contract tests invoke the real Polytoken binary against complete private staging roots; they are opt-in and never run as part of the default `go test ./...`. They require `POLYTOKEN_CONTRACT_BIN` (or `POLYTOKEN_BIN`) to name an executable supported Polytoken binary, and they must not target live configuration.
 
 ## Artifact policy
 
