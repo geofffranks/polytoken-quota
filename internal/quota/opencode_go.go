@@ -10,7 +10,7 @@
 // lengths below; prefer provider-reported window lengths if the payload ever
 // exposes them.
 //
-// Credentials are transient: OPENCODE_API_KEY is resolved for the immediate
+// Credentials are transient: OPENCODE_GO_API_KEY is resolved for the immediate
 // request, attached as a Bearer header, and discarded. No key, account
 // identity, raw response, or provider-controlled message is persisted or
 // returned.
@@ -36,7 +36,7 @@ const (
 	// 401 with an AuthError envelope (not a 404), so the path exists.
 	opencodeGoUsageEndpoint = "https://opencode.ai/zen/go/v1/usage"
 	opencodeGoProviderName  = "opencode-go"
-	opencodeGoAPIKeyEnv     = "OPENCODE_API_KEY"
+	opencodeGoAPIKeyEnv     = "OPENCODE_GO_API_KEY"
 )
 
 // opencodeGoWindowOrder is the fixed, documented decode priority order. It is
@@ -151,7 +151,7 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 	key, err := o.Credentials.Resolve(CredentialRef{Kind: CredentialEnv, Locator: opencodeGoAPIKeyEnv})
 	key = cleanOpenCodeGoKey(key)
 	if err != nil || key == "" {
-		msg := "opencode-go: could not resolve OPENCODE_API_KEY"
+		msg := "opencode-go: could not resolve OPENCODE_GO_API_KEY"
 		return o.fail(msg), errors.New(msg)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opencodeGoUsageEndpoint, nil)
@@ -171,7 +171,7 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		msg := fmt.Sprintf("opencode-go: server error (HTTP %d)", resp.StatusCode)
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			msg = "opencode-go: authentication failed; check OPENCODE_API_KEY"
+			msg = "opencode-go: authentication failed; check OPENCODE_GO_API_KEY"
 		case http.StatusForbidden:
 			// Distinct from an auth failure: the EntitlementError envelope
 			// means the key authenticated but has no OpenCode Go subscription.

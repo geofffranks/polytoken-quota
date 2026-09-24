@@ -61,6 +61,16 @@ func TestOpenCodeGoKnownAdapterContract(t *testing.T) {
 	}
 }
 
+// TestOpenCodeGoCredentialVariableName pins the credential variable the adapter
+// resolves. The name is an operator-facing contract: renaming it silently leaves
+// every existing host's credential unresolved, which the adapter can only report
+// as a fail-closed "could not resolve" diagnostic.
+func TestOpenCodeGoCredentialVariableName(t *testing.T) {
+	if opencodeGoAPIKeyEnv != "OPENCODE_GO_API_KEY" {
+		t.Fatalf("credential variable = %q, want OPENCODE_GO_API_KEY", opencodeGoAPIKeyEnv)
+	}
+}
+
 func TestOpenCodeGoEvidenceContract(t *testing.T) {
 	ev := OpenCodeGoEvidence(opencodeGoTestNow)
 	if ev.Endpoint != opencodeGoUsageEndpoint || ev.Method != http.MethodGet || ev.AuthType != "bearer-api-key" {
@@ -169,7 +179,7 @@ func TestOpenCodeGoUnresolvedCredentialFailsClosedWithoutRequest(t *testing.T) {
 			if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
 				t.Fatalf("snapshot=%+v err=%v", snap, err)
 			}
-			if err.Error() != "opencode-go: could not resolve OPENCODE_API_KEY" {
+			if err.Error() != "opencode-go: could not resolve "+opencodeGoAPIKeyEnv {
 				t.Fatalf("err=%v", err)
 			}
 			if len(doer.calls) != 0 {

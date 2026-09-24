@@ -763,8 +763,8 @@ func TestOpenCodeGoContractFixtures(t *testing.T) {
 		if len(snap.Windows) != 0 {
 			t.Fatalf("windows=%v, want none on auth failure", snap.Windows)
 		}
-		if !strings.Contains(err.Error(), "OPENCODE_API_KEY") {
-			t.Fatalf("error=%q, want a diagnostic naming OPENCODE_API_KEY", err.Error())
+		if !strings.Contains(err.Error(), "OPENCODE_GO_API_KEY") {
+			t.Fatalf("error=%q, want a diagnostic naming OPENCODE_GO_API_KEY", err.Error())
 		}
 		if strings.Contains(err.Error(), "Missing API key") {
 			t.Fatalf("error=%q must not echo the provider-controlled message", err.Error())

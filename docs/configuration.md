@@ -45,9 +45,11 @@ chain positions and are visible in diagnostics but are never quota-ranked or
 polled.
 
 Provider note: `opencode-go` reports percentages rather than dollars, so it needs
-no `monthly_budget_usd` and may omit `quota` or use `quota: {}`. It polls three
-windows (`rolling`, `weekly`, `monthly`) and is subject to the same fail-closed
-evidence gate as every other adapter. See the
+no `monthly_budget_usd` and may omit `quota` or use `quota: {}`. Its credential is
+the transient `OPENCODE_GO_API_KEY`; when that variable is unresolved the adapter
+fails closed and makes no HTTP request. It polls three windows (`rolling`,
+`weekly`, `monthly`) and is subject to the same fail-closed evidence gate as every
+other adapter. See the
 [OpenCode Go adapter](../README.md#opencode-go-adapter) section of the README.
 
 ### `models`
