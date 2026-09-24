@@ -592,3 +592,188 @@ func TestOpenCodeGoTransportErrorSanitization(t *testing.T) {
 		t.Fatalf("calls=%d, want exactly 1", len(doer.calls))
 	}
 }
+
+// --- Class / EffectiveRemaining / NextResetAt integration ------------------
+
+// opencodeGoClassUsageBody builds a full three-window usage payload (rolling,
+// weekly, monthly) with the given raw percent values at fixed future resets:
+// rolling resets 2026-08-15T16:00:00Z (earliest), weekly 2026-08-17T00:00:00Z,
+// monthly 2026-08-31T00:00:00Z (latest). With the pinned opencodeGoTestNow of
+// 2026-08-15T12:00:00Z every reset is future, so NextResetAt anchoring is
+// deterministic.
+func opencodeGoClassUsageBody(rolling, weekly, monthly string) string {
+	return `{"usage":{` +
+		`"rolling":{"status":"ok","percent":` + rolling + `,"resetsAt":"2026-08-15T16:00:00Z"},` +
+		`"weekly":{"status":"ok","percent":` + weekly + `,"resetsAt":"2026-08-17T00:00:00Z"},` +
+		`"monthly":{"status":"ok","percent":` + monthly + `,"resetsAt":"2026-08-31T00:00:00Z"}` +
+		`}}`
+}
+
+// TestOpenCodeGoClassNormalAnchorsMonthlyReset covers the all-three-windows-
+// normal case: Class() is ClassNormal, EffectiveRemaining() is the minimum
+// across the windows, and NextResetAt() anchors on the monthly window — the
+// longest window whose Period is at least MinQuotaCyclePeriod with a future
+// reset — even though the 5h rolling window carries the earliest reset. This
+// also pins the "rolling never anchors" property: if the shortest window won,
+// the anchor would be the 2026-08-15T16:00:00Z rolling reset.
+func TestOpenCodeGoClassNormalAnchorsMonthlyReset(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, opencodeGoClassUsageBody("12.5", "25", "50"), http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourceFresh || snap.Availability != QuotaAvailable {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if got := snap.Class(); got != ClassNormal {
+		t.Fatalf("class=%s want %s", got, ClassNormal)
+	}
+	if rem := snap.EffectiveRemaining(); rem == nil || *rem != 0.5 {
+		t.Fatalf("effective remaining=%v want 0.5", rem)
+	}
+	reset := snap.NextResetAt()
+	if reset == nil || !reset.Equal(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next reset=%v want the monthly reset 2026-08-31T00:00:00Z", reset)
+	}
+}
+
+// TestOpenCodeGoPercentHundredIsExhausted covers the exhaustion trigger: one
+// window at percent:100 makes the snapshot QuotaUnavailable and Class()
+// ClassExhausted, with EffectiveRemaining() bottoming out at 0 — even though
+// the other windows are healthy.
+func TestOpenCodeGoPercentHundredIsExhausted(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, opencodeGoClassUsageBody("12.5", "100", "50"), http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourceFresh {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if snap.Availability != QuotaUnavailable {
+		t.Fatalf("availability=%s want %s", snap.Availability, QuotaUnavailable)
+	}
+	if got := snap.Class(); got != ClassExhausted {
+		t.Fatalf("class=%s want %s", got, ClassExhausted)
+	}
+	if rem := snap.EffectiveRemaining(); rem == nil || *rem != 0 {
+		t.Fatalf("effective remaining=%v want 0", rem)
+	}
+}
+
+// TestOpenCodeGoRollingExhaustionDrivesClass pins the plan's documented R4
+// behaviour *deliberately*: EffectiveRemaining() takes the minimum across all
+// usable windows, so an exhausted 5-hour rolling window exhausts the whole
+// snapshot even when the weekly and monthly windows are healthy — exactly how
+// Codex's 5-hour session window behaves. This is a visible decision, not an
+// accident: a short-window exhaustion must surface, not be masked by longer,
+// healthier windows.
+func TestOpenCodeGoRollingExhaustionDrivesClass(t *testing.T) {
+	src, _ := opencodeGoTestSource(t, opencodeGoClassUsageBody("100", "25", "50"), http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourceFresh {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if snap.Availability != QuotaUnavailable {
+		t.Fatalf("availability=%s want %s", snap.Availability, QuotaUnavailable)
+	}
+	if got := snap.Class(); got != ClassExhausted {
+		t.Fatalf("class=%s want %s (rolling exhaustion must drive the class)", got, ClassExhausted)
+	}
+	if rem := snap.EffectiveRemaining(); rem == nil || *rem != 0 {
+		t.Fatalf("effective remaining=%v want 0", rem)
+	}
+}
+
+// TestOpenCodeGoRollingWindowNeverAnchorsReset pins the reset side of R4: the
+// rolling window is not the quota-cycle anchor because its 5-hour period is
+// below MinQuotaCyclePeriod (types.go, 24h). When rolling is the only window
+// reporting a future reset, no window qualifies as a quota cycle and
+// NextQuotaResetAt's documented fallback — the earliest future reset among all
+// windows, for providers that only report short rate-limit windows — supplies
+// the value. The 5h window may be *returned* through that fallback only; it
+// must never *anchor* over a qualifying (>= MinQuotaCyclePeriod) window. The
+// anchor-over-fallback precedence itself is pinned by
+// TestOpenCodeGoClassNormalAnchorsMonthlyReset, where the earliest (rolling)
+// reset loses to the monthly anchor.
+func TestOpenCodeGoRollingWindowNeverAnchorsReset(t *testing.T) {
+	// Only the rolling window is present, so weekly and monthly carry no
+	// usable reset by absence.
+	body := `{"usage":{"rolling":{"status":"ok","percent":12.5,"resetsAt":"2026-08-15T16:00:00Z"}}}`
+	src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourcePartial || len(snap.Windows) != 1 {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	// The rolling window's Period must be the sub-cycle 5h value, which
+	// disqualifies it from anchoring.
+	if snap.Windows[0].Period == nil || *snap.Windows[0].Period != opencodeGoRollingPeriod {
+		t.Fatalf("period=%v want %v", snap.Windows[0].Period, opencodeGoRollingPeriod)
+	}
+	rollingReset := time.Date(2026, 8, 15, 16, 0, 0, 0, time.UTC)
+	reset := snap.NextResetAt()
+	// Via the documented short-window fallback (not via anchoring), the only
+	// future reset in the snapshot is surfaced.
+	if reset == nil || !reset.Equal(rollingReset) {
+		t.Fatalf("next reset=%v want the rolling reset %v via the short-window fallback", reset, rollingReset)
+	}
+}
+
+// TestOpenCodeGoPartialClassStillDerivesFromDecodedWindows covers the partial
+// payload case: a snapshot that decodes only some of the three windows still
+// reports SourcePartial while producing a sensible Class() and a valid
+// NextResetAt() anchor from the windows that did decode.
+func TestOpenCodeGoPartialClassStillDerivesFromDecodedWindows(t *testing.T) {
+	// Two of three windows decode (monthly absent from the payload).
+	body := `{"usage":{` +
+		`"rolling":{"status":"ok","percent":10,"resetsAt":"2026-08-15T16:00:00Z"},` +
+		`"weekly":{"status":"ok","percent":60,"resetsAt":"2026-08-17T00:00:00Z"}` +
+		`}}`
+	src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourcePartial {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if snap.Availability != QuotaAvailable {
+		t.Fatalf("availability=%s want %s", snap.Availability, QuotaAvailable)
+	}
+	if got := snap.Class(); got != ClassNormal {
+		t.Fatalf("class=%s want %s from the decoded windows", got, ClassNormal)
+	}
+	if rem := snap.EffectiveRemaining(); rem == nil || *rem != 0.4 {
+		t.Fatalf("effective remaining=%v want 0.4", rem)
+	}
+	// Weekly is now the longest qualifying window with a future reset, so it
+	// anchors.
+	reset := snap.NextResetAt()
+	if reset == nil || !reset.Equal(time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("next reset=%v want the weekly reset 2026-08-17T00:00:00Z", reset)
+	}
+}
+
+// TestOpenCodeGoRemainingContract pins the single-source-of-truth
+// percent → UsagePercent → Remaining() chain (types.go) directly on the
+// decoded window, not only transitively through Class/EffectiveRemaining:
+// a window at percent:40 has Remaining() == 0.6, and percent:100 has
+// Remaining() == 0.
+func TestOpenCodeGoRemainingContract(t *testing.T) {
+	for name, tc := range map[string]struct {
+		rawPercent string
+		usage      float64
+		want       float64
+	}{
+		"percent 40 remains 0.6": {"40", 40, 0.6},
+		"percent 100 remains 0":  {"100", 100, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"usage":{"rolling":{"status":"ok","percent":` + tc.rawPercent + `,"resetsAt":"2026-08-15T16:00:00Z"}}}`
+			src, _ := opencodeGoTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || len(snap.Windows) != 1 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			w := snap.Windows[0]
+			if w.UsagePercent == nil || *w.UsagePercent != tc.usage {
+				t.Fatalf("usage percent=%v want %v", w.UsagePercent, tc.usage)
+			}
+			rem := w.Remaining()
+			if rem == nil || *rem != tc.want {
+				t.Fatalf("remaining=%v want %v", rem, tc.want)
+			}
+		})
+	}
+}
