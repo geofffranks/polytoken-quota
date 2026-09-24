@@ -33,6 +33,7 @@ block, the key must also name a built-in quota adapter:
 | `zai` | Z.ai allowance polling |
 | `anthropic` | Anthropic Admin API spend against `monthly_budget_usd` |
 | `neuralwatt` | Neuralwatt Cloud quota endpoint |
+| `opencode-go` | OpenCode Go usage-window polling |
 
 A quota block under any other key is rejected at load with the valid names.
 Supported non-Anthropic mappings may omit `quota` or use `quota: {}`; both forms
@@ -42,6 +43,14 @@ pollable only with a positive `monthly_budget_usd`. Unknown/manual mappings
 without a supported quota adapter may use any key; they keep their configured
 chain positions and are visible in diagnostics but are never quota-ranked or
 polled.
+
+Provider note: `opencode-go` reports percentages rather than dollars, so it needs
+no `monthly_budget_usd` and may omit `quota` or use `quota: {}`. Its credential is
+the transient `OPENCODE_GO_API_KEY`; when that variable is unresolved the adapter
+fails closed and makes no HTTP request. It polls three windows (`rolling`,
+`weekly`, `monthly`) and is subject to the same fail-closed evidence gate as every
+other adapter. See the
+[OpenCode Go adapter](../README.md#opencode-go-adapter) section of the README.
 
 ### `models`
 

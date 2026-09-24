@@ -11,7 +11,7 @@ The tool never contacts a running Polytoken daemon from the host; change propaga
 | Component | Minimum | Notes |
 |-----------|---------|-------|
 | Go toolchain | `go 1.26.5` | Exact version match (`go env GOVERSION`). |
-| Polytoken | `0.6.6` | Supported validation contract (resolved from `PATH`). |
+| Polytoken | none | Opt-in contract suite pins behavior, not a release number; resolved from `POLYTOKEN_CONTRACT_BIN` (or `POLYTOKEN_BIN`). |
 
 ## Install and initial setup
 
@@ -111,6 +111,26 @@ See **[docs/configuration.md](docs/configuration.md)** for the complete referenc
 The `neuralwatt` adapter polls Neuralwatt Cloud's read-only quota endpoint (`GET /v1/quota`) with a transient `NEURALWATT_API_KEY` Bearer credential. It selects the first present boundary in this order: key-specific allowance, subscription energy allowance, then provider-reported USD credit balance for PAYG accounts. A present but malformed boundary fails closed rather than falling back to a weaker signal. A blocked key, subscription overage, exhausted balance, authentication failure, or missing/invalid selected limit is never treated as healthy.
 
 The adapter reports the selected provider boundary as one routing window. Usage and energy totals are retained only as provider diagnostics in the response contract; they are not used as a synthetic quota when no enforceable allowance or balance is available. The account balance path does not invent a reset time when the provider does not report one.
+
+### OpenCode Go adapter
+
+The `opencode-go` adapter polls OpenCode Go's read-only usage endpoint (`GET /zen/go/v1/usage`) with a transient `OPENCODE_GO_API_KEY` Bearer credential. The response reports up to three usage windows — `rolling` (5 hours), `weekly`, and `monthly` — each as a percentage of a monthly per-model cap alongside a reset timestamp.
+
+`percent` is **percent used**, never dollars, so this adapter needs no `monthly_budget_usd`. All three windows participate in routing, and the provider's effective remaining allowance is the minimum across them — the same conservative rule the Codex adapter applies to its 5-hour session window. A `rolling` window at 100% therefore demotes the provider for the remainder of that 5-hour window even when the monthly allowance is largely unused. That is deliberate and matches existing repo-wide behaviour, not an OpenCode-specific rule.
+
+Reset anchoring uses the longest window reporting a future reset (in practice `monthly`). The 5-hour `rolling` window is shorter than the one-day quota-cycle floor, so it never drives next-reset or pace projection — but it does still govern availability.
+
+Fail-closed semantics:
+
+- Window `status` is advisory (`ok` or `rate-limited`) and availability derives from `percent`. A window with a missing or unrecognized `status`, or a missing, non-numeric, or non-finite `percent`, fails that window closed rather than falling back to a weaker signal. A payload in which no window decodes is an error, never an empty healthy snapshot.
+- A window without a parseable reset timestamp still decodes, without a reset time, and marks the snapshot `partial`. Reset times are never invented.
+- An exhausted window (`percent: 100`) is reported as unavailable and classed `exhausted` — not as an error.
+- `401` (missing or invalid key) and `403` (valid key with no OpenCode Go subscription) fail closed with distinct, sanitized diagnostics. `429` fails closed with a `Retry-After`-aware message and retries on the next scheduled check.
+- A check with absent, expired, or incomplete contract evidence — or with `OPENCODE_GO_API_KEY` unresolved — returns an error **without making any HTTP request**.
+
+Not synthesized: the endpoint exposes no dollar amounts and no per-model breakdown, so the adapter reports no monetary budget and no per-model windows. Nothing is inferred from the provider's Zen credit balance, and the adapter never reads OpenCode's own credential store — it uses only `OPENCODE_GO_API_KEY`.
+
+The endpoint contract is derived from OpenCode's first-party open-source console code and is **not officially documented**, so its evidence is reviewed quarterly rather than annually. If OpenCode changes or withdraws the route, the adapter fails closed instead of reporting a stale or invented allowance.
 
 ### Anthropic adapters
 

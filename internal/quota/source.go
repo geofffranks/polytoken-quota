@@ -316,6 +316,15 @@ var builtInAdapters = []AdapterDefinition{
 			return NewNeuralwattSource(id, client, creds, reg, now)
 		},
 	},
+	{
+		Name:     opencodeGoProviderName,
+		Evidence: OpenCodeGoEvidence,
+		// Percent-based quota needs no user budget; the budget parameter is deliberately unused,
+		// mirroring neuralwatt.
+		New: func(id string, client *BoundedClient, creds CredentialResolver, _ float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewOpenCodeGoSource(id, client, creds, reg, now)
+		},
+	},
 }
 
 // AdapterDefinitions returns the built-in adapter definitions in stable name

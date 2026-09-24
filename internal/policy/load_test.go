@@ -581,7 +581,7 @@ providers:
 	if err == nil {
 		t.Fatal("expected rejection of unknown adapter mapping key, got nil")
 	}
-	for _, want := range []string{"codex2", "codex", "zai", "anthropic", "neuralwatt"} {
+	for _, want := range []string{"codex2", "codex", "zai", "anthropic", "neuralwatt", "opencode-go"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err.Error(), want)
 		}

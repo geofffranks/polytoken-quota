@@ -165,7 +165,15 @@ func appendQuotaEvents(next state.State, attempts map[string]quota.QuotaSnapshot
 		if snap.Status != quota.SourceFailed {
 			continue
 		}
-		e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: snap.CheckedAt.UTC(), RecordedAt: now.UTC(), Category: state.EventQuotaFailure, Action: "refresh_failed", MappingID: id, Result: state.EventFailed, Reason: quota.SanitizeText(snap.Error), Status: string(snap.Status)}
+		// A failure snapshot carries no observation time (every adapter's fail
+		// path returns a zero CheckedAt), so the check time is the honest
+		// substitute: ValidateEventHistory rejects a zero At, and the event must
+		// always carry a real UTC instant to be durable.
+		at := snap.CheckedAt
+		if at.IsZero() {
+			at = now
+		}
+		e := state.EventRecord{Sequence: nextEventSequence(&next), Revision: next.Revision, Ordinal: len(next.EventHistory.Events), At: at.UTC(), RecordedAt: now.UTC(), Category: state.EventQuotaFailure, Action: "refresh_failed", MappingID: id, Result: state.EventFailed, Reason: quota.SanitizeText(snap.Error), Status: string(snap.Status)}
 		next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
 	}
 	return next

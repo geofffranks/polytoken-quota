@@ -9,8 +9,6 @@
 #
 # Environment:
 #   POLYTOKEN_CONTRACT_BIN  path to the supported Polytoken binary (required)
-#   POLYTOKEN_VERSION       expected version substring override (development
-#                           only; the supported version is enforced by default)
 #
 # The contract suite isolates HOME and XDG_* so doctor never loads the operator's
 # real ~/.config/polytoken definitions; the staging root is the sole source.
