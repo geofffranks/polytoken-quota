@@ -28,7 +28,9 @@ func (r FilesystemSourceReader) Global(ctx context.Context) (SourceSet, error) {
 
 func (r FilesystemSourceReader) Projects(ctx context.Context) ([]SourceSet, error) {
 	if r.DesiredPath == "" {
-		return nil, errors.New("policy: source reader requires desired policy for registered projects")
+		// Without a policy path there are no registered projects to read;
+		// registration comes only from the policy, never from a scan.
+		return nil, nil
 	}
 	d, err := Load(r.DesiredPath)
 	if err != nil {

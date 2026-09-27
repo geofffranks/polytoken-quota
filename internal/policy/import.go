@@ -180,8 +180,10 @@ func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 // InitProviderOnly proposes the opt-in provider-only starter policy from live
 // Polytoken sources without writing anything. It enrolls the global
 // configuration's provider IDs verbatim — never model groups, model
-// enumeration, chains, or definitions — and records the global root as the
-// single reconciliation target. Enrolled providers start without quota
+// enumeration, chains, or definitions — records the global root, and preserves
+// the explicitly registered project roots as id/root-only targets. Registered
+// roots come only from the reader (the registered policy), never from a scan of
+// arbitrary workspace roots. Enrolled providers start without quota
 // configuration (visible but unpollable, like an unconfigured legacy mapping);
 // operators author quota adapter configuration explicitly. Persistence is the
 // caller's job.
@@ -218,6 +220,28 @@ func InitProviderOnly(ctx context.Context, r SourceReader) (Desired, error) {
 		d.Providers[MappingID(id)] = Mapping{}
 	}
 	d.Global = Target{ID: "global", Root: global.Root, Global: true}
+
+	// Preserve explicitly registered project roots as id/root-only targets so
+	// a migration never drops a registered root (read-only global+project
+	// safety assessment keeps covering it) and never adopts an unregistered
+	// one. Roots are read through the reader's registered-projects view; there
+	// is no discovery step.
+	registered, err := r.Projects(ctx)
+	if err != nil {
+		return Desired{}, fmt.Errorf("policy: read registered project roots: %w", err)
+	}
+	sort.Slice(registered, func(i, j int) bool { return registered[i].ID < registered[j].ID })
+	seenProjects := make(map[string]bool, len(registered))
+	for _, set := range registered {
+		if set.ID == "" {
+			return Desired{}, errors.New("policy: provider-only init found a registered project without an id")
+		}
+		if seenProjects[set.ID] {
+			return Desired{}, fmt.Errorf("policy: provider-only init found registered project %q more than once", set.ID)
+		}
+		seenProjects[set.ID] = true
+		d.Projects = append(d.Projects, Target{ID: set.ID, Root: set.Root})
+	}
 	return d, nil
 }
 

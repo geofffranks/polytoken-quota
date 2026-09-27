@@ -146,8 +146,8 @@ func loadBytes(data []byte) (Desired, error) {
 		return Desired{}, fmt.Errorf("policy: global target: %w", err)
 	}
 	d.Projects = make([]Target, 0, len(w.Projects))
-	for i, pw := range w.Projects {
-		t, err := targetFromWire(&pw, false, modelOwner)
+	for i := range w.Projects {
+		t, err := targetFromWire(&w.Projects[i].targetWire, false, modelOwner)
 		if err != nil {
 			return Desired{}, fmt.Errorf("policy: project %d: %w", i, err)
 		}
@@ -352,10 +352,28 @@ type docWire struct {
 	Mode        string                 `yaml:"mode"`
 	Providers   map[string]mappingWire `yaml:"providers"`
 	Global      *targetWire            `yaml:"global"`
-	Projects    []targetWire           `yaml:"projects"`
+	Projects    []projectWire          `yaml:"projects"`
 	Operational *operationalWire       `yaml:"operational"`
 	Routing     *routingWire           `yaml:"routing"`
 	Selection   *selectionWire         `yaml:"selection"`
+}
+
+// projectWire is one entry of the top-level `projects` sequence. It records the
+// observed top-level keys so provider-only load can reject unsupported project
+// fields exactly; legacy load decodes the same wire shape and ignores unknown
+// keys as before.
+type projectWire struct {
+	targetWire
+	keys []string
+}
+
+func (p *projectWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			p.keys = append(p.keys, value.Content[i].Value)
+		}
+	}
+	return value.Decode(&p.targetWire)
 }
 
 // adapterNames lists the known quota adapter names for rejection diagnostics.
@@ -383,11 +401,13 @@ func modeFromWire(s string) (PolicyMode, error) {
 }
 
 // loadProviderOnly parses the strictly opt-in provider-only policy: enrolled
-// Polytoken provider IDs with optional quota adapter configuration and a global
-// target. Legacy target/model fields — model enumeration, chain definitions,
-// registered projects, and the routing/selection sections — conflict with the
-// mode and are rejected without mutating anything, so a mixed file can never
-// half-convert an installation.
+// Polytoken provider IDs with optional quota adapter configuration, a global
+// target, and registered project roots for read-only global+project safety
+// assessment. Legacy target/model fields — model enumeration, chain definitions,
+// and the routing/selection sections — conflict with the mode and are rejected
+// without mutating anything, so a mixed file can never half-convert an
+// installation. Project entries carry exactly id and root: any other field
+// (legacy chains, definitions, or unsupported keys) is rejected.
 func loadProviderOnly(w docWire) (Desired, error) {
 	if len(w.Providers) == 0 {
 		return Desired{}, errors.New("policy: provider-only policy must enroll at least one provider")
@@ -428,9 +448,11 @@ func loadProviderOnly(w docWire) (Desired, error) {
 	if w.Selection != nil {
 		return Desired{}, errors.New("policy: provider-only policy must not set selection (model selection is a legacy behavior)")
 	}
-	if len(w.Projects) > 0 {
-		return Desired{}, errors.New("policy: provider-only policy must not register projects (provider-only manages the global target only)")
+	projects, err := providerOnlyProjectRoots(w.Projects)
+	if err != nil {
+		return Desired{}, err
 	}
+	d.Projects = projects
 	if w.Global == nil {
 		return Desired{}, errors.New("policy: provider-only policy requires a global target with a root")
 	}
@@ -472,6 +494,36 @@ func providerOnlyTargetFromWire(w *targetWire) error {
 		return errors.New("definitions are legacy fields and conflict with provider-only mode (remove them)")
 	}
 	return nil
+}
+
+// providerOnlyProjectRoots converts strictly-shaped project entries into
+// id/root-only targets. Provider-only projects register reconciliation roots so
+// read-only safety assessment can cover every registered target; they carry no
+// legacy chains, definitions, or any other field. Non-empty unique ids and
+// roots are required, and the document order is preserved.
+func providerOnlyProjectRoots(wire []projectWire) ([]Target, error) {
+	projects := make([]Target, 0, len(wire))
+	seen := make(map[string]bool, len(wire))
+	for i, pw := range wire {
+		for _, key := range pw.keys {
+			if key != "id" && key != "root" {
+				return nil, fmt.Errorf("policy: project %d: field %q is not supported in provider-only mode (projects register id and root only)", i, key)
+			}
+		}
+		id := strings.TrimSpace(pw.ID)
+		if id == "" {
+			return nil, fmt.Errorf("policy: project %d: provider-only projects require a non-empty id", i)
+		}
+		if strings.TrimSpace(pw.Root) == "" {
+			return nil, fmt.Errorf("policy: project %q: provider-only projects require a non-empty root", id)
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("policy: project %q is registered more than once", id)
+		}
+		seen[id] = true
+		projects = append(projects, Target{ID: id, Root: pw.Root})
+	}
+	return projects, nil
 }
 
 type mappingWire struct {

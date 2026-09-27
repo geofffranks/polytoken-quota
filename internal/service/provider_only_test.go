@@ -147,21 +147,22 @@ func TestProviderOnlyCommandCompatibilityMatrix(t *testing.T) {
 // legacyMigrationFixture is a legacy desired.yaml carrying exactly the fields
 // quota authored in legacy mode: defaults/classifier chains, a definition
 // chain, enumerated models, a registered project, and operator-authored
-// operational settings a migration must preserve.
+// operational settings a migration must preserve. %GLOBAL% and %PROJ% are
+// replaced with real fixture directories.
 const legacyMigrationFixture = `version: 1
 providers:
   codex:
     models:
       - codex/gpt-5.6-sol
 global:
-  root: ROOT
+  root: %GLOBAL%
   full: [codex/gpt-5.6-sol]
   definitions:
     - path: facets/reader.md
       chain: [codex/gpt-5.6-sol]
 projects:
   - id: proj
-    root: /home/user/proj
+    root: %PROJ%
     mini: [codex/gpt-5.6-sol]
 operational:
   validation_timeout: 45s
@@ -171,8 +172,9 @@ operational:
 // newMigrationFixture wires a fully real Coordinator over temp directories:
 // a legacy desired.yaml, a global Polytoken config dir with two providers, a
 // real state store, journal, and backup root. It returns the coordinator, the
-// desired path, the global dir, and the exact legacy bytes.
-func newMigrationFixture(t *testing.T) (*Coordinator, string, string, []byte) {
+// desired path, the global dir, the registered project dir, and the exact
+// legacy bytes.
+func newMigrationFixture(t *testing.T) (*Coordinator, string, string, string, []byte) {
 	t.Helper()
 	home := t.TempDir()
 	globalDir := filepath.Join(home, "polytoken-config")
@@ -184,7 +186,15 @@ func newMigrationFixture(t *testing.T) (*Coordinator, string, string, []byte) {
 		t.Fatal(err)
 	}
 	desiredPath := filepath.Join(home, "desired.yaml")
-	legacy := strings.ReplaceAll(legacyMigrationFixture, "ROOT", globalDir)
+	legacy := strings.ReplaceAll(legacyMigrationFixture, "%GLOBAL%", globalDir)
+	projectDir := filepath.Join(home, "proj")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "config.yaml"), []byte("providers:\n  proj-llm:\n    base_url: http://127.0.0.1:9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy = strings.ReplaceAll(legacy, "%PROJ%", projectDir)
 	if err := os.WriteFile(desiredPath, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +216,7 @@ func newMigrationFixture(t *testing.T) (*Coordinator, string, string, []byte) {
 		JournalPath: journalPath,
 		BackupsPath: filepath.Join(home, "backups"),
 	}
-	return coord, desiredPath, globalDir, []byte(legacy)
+	return coord, desiredPath, globalDir, projectDir, []byte(legacy)
 }
 
 // TestProviderOnlyMigrationPreviewAndLegacyBytePreservation proves the
@@ -218,7 +228,7 @@ func newMigrationFixture(t *testing.T) (*Coordinator, string, string, []byte) {
 // configuration bytes and the replaced policy file.
 func TestProviderOnlyMigrationPreviewAndLegacyBytePreservation(t *testing.T) {
 	ctx := context.Background()
-	coord, desiredPath, globalDir, legacyBytes := newMigrationFixture(t)
+	coord, desiredPath, globalDir, projectDir, legacyBytes := newMigrationFixture(t)
 
 	configBefore, err := os.ReadFile(filepath.Join(globalDir, "config.yaml"))
 	if err != nil {
@@ -283,6 +293,17 @@ func TestProviderOnlyMigrationPreviewAndLegacyBytePreservation(t *testing.T) {
 	}
 	if len(loaded.Providers) != 2 || loaded.Global.Root != globalDir {
 		t.Fatalf("migrated policy=%+v", loaded)
+	}
+	// The migration preserves the explicitly registered project root as an
+	// id/root-only target — never chains, definitions, or unregistered roots.
+	if len(loaded.Projects) != 1 {
+		t.Fatalf("migrated projects=%+v want the registered root preserved", loaded.Projects)
+	}
+	reg := loaded.Projects[0]
+	if reg.ID != "proj" || reg.Root != projectDir || reg.Global ||
+		len(reg.Definitions) != 0 || len(reg.Full) != 0 || len(reg.Mini) != 0 ||
+		len(reg.Nano) != 0 || len(reg.Classifier) != 0 {
+		t.Fatalf("migrated project=%+v want id/root-only registration at %s", reg, projectDir)
 	}
 	if loaded.Operational.NoticePath != "/tmp/pq-notice.json" {
 		t.Fatalf("operational section not preserved: %+v", loaded.Operational)

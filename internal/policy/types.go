@@ -205,9 +205,11 @@ const (
 	// legacy policy can document its mode.
 	ModeLegacy PolicyMode = "legacy"
 	// ModeProviderOnly selects the provider-only policy: enrolled Polytoken
-	// provider IDs, optional per-provider quota adapter configuration, and a
-	// global target. Model enumeration, chain definitions, projects, and the
-	// routing/selection sections are rejected in this mode.
+	// provider IDs, optional per-provider quota adapter configuration, a
+	// global target, and registered project roots (id and root only) for
+	// read-only safety assessment. Model enumeration, chain definitions, and
+	// the routing/selection sections are rejected in this mode, as is any
+	// project field beyond id and root.
 	ModeProviderOnly PolicyMode = "provider-only"
 )
 
@@ -228,7 +230,8 @@ type Desired struct {
 	// Mode records the policy mode. In ModeProviderOnly the Providers map
 	// carries the enrolled Polytoken provider IDs (Models is nil, Quota holds
 	// the explicit quota adapter configuration when enrolled with one), Global
-	// carries only the target identity and root, and Projects is empty.
+	// carries only the target identity and root, and Projects carries only the
+	// registered project identity and root for each entry.
 	Mode PolicyMode
 
 	// Routing holds the top-level routing enablement. Load defaults it to

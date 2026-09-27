@@ -26,8 +26,9 @@ global:
 // TestProviderOnlyRejectsLegacyChainsAndModels proves the opt-in provider-only
 // mode rejects every conflicting legacy target/model field: enumerated models
 // under a provider, desired chains on the global target, definition chains,
-// registered projects, and the routing/selection sections. Each rejection must
-// be a load error — never a silently tolerated or stripped field.
+// legacy fields on registered projects, and the routing/selection sections.
+// Each rejection must be a load error — never a silently tolerated or stripped
+// field.
 func TestProviderOnlyRejectsLegacyChainsAndModels(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -109,7 +110,7 @@ global:
 			wantErr: `definitions are legacy fields`,
 		},
 		{
-			name: "registered projects",
+			name: "project with legacy chain field",
 			doc: `version: 1
 mode: provider-only
 providers:
@@ -119,8 +120,26 @@ global:
 projects:
   - id: proj
     root: /home/user/proj
+    full: [codex/gpt-5.6-sol]
 `,
-			wantErr: `must not register projects`,
+			wantErr: `field "full" is not supported in provider-only mode`,
+		},
+		{
+			name: "project with definitions",
+			doc: `version: 1
+mode: provider-only
+providers:
+  codex: {}
+global:
+  root: /home/user/.config/polytoken
+projects:
+  - id: proj
+    root: /home/user/proj
+    definitions:
+      - path: facets/reader.md
+        chain: [codex/gpt-5.6-sol]
+`,
+			wantErr: `field "definitions" is not supported in provider-only mode`,
 		},
 		{
 			name: "routing section",
