@@ -37,6 +37,13 @@ func (c *Coordinator) SelectionSnapshot(_ context.Context) (selection.Snapshot, 
 	if err != nil {
 		return selection.Snapshot{}, fmt.Errorf("load policy failed: %w", err)
 	}
+	if desired.ProviderOnly() {
+		// Selection ranks enumerated models and projects managed chains —
+		// exactly the fields a provider-only policy rejects. Return the clear
+		// unsupported result instead of silently selecting over an empty graph.
+		return selection.Snapshot{}, providerOnlyUnsupported("select/select-eval",
+			"model selection projects managed model chains, which a provider-only policy does not define")
+	}
 	inputs.Desired = desired
 	if c.State == nil {
 		return selection.Snapshot{}, fmt.Errorf("load state failed")

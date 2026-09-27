@@ -57,6 +57,11 @@ type Outcome struct {
 	Problem bool
 	// ProviderAttempts carries sanitized quota polling diagnostics for CLI reports.
 	ProviderAttempts []QuotaAttemptDiagnostic
+	// Migration is the provider-only migration preview, set by a provider-only
+	// init that replaced an existing policy. It documents the legacy
+	// quota-authored edits that persist as operator-owned plus backup/journal
+	// references and rollback guidance. Nil for every other transaction.
+	Migration *MigrationPreview
 }
 
 // PendingCount returns the number of targets that remain pending (not fully

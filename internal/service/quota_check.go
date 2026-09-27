@@ -39,6 +39,14 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	if in.Reconcile && desired.ProviderOnly() {
+		// Polling quota is a maintained provider-only function; the reconcile
+		// half is chain projection plus (not-yet-implemented) provider gating.
+		// Reject the combined invocation explicitly rather than polling and
+		// silently skipping the reconciliation the operator asked for.
+		return Outcome{Accepted: false, Error: providerOnlyUnsupported("check --reconcile",
+			"provider gating is not implemented; run check without --reconcile to poll quota only")}
+	}
 	c.step("load-state")
 	observed := recovered
 

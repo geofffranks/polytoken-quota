@@ -37,6 +37,10 @@ type DiagnosticError struct {
 type DiagnosticSnapshot struct {
 	asOf           time.Time
 	routingEnabled bool
+	// providerOnly records the loaded policy's mode so diagnostic views can
+	// state explicitly that chain-dependent projections are not applicable,
+	// instead of rendering them as silently empty.
+	providerOnly   bool
 	providers      []ProviderProjection
 	ranks          []RankEntryReport
 	routes         []RouteProjection
@@ -117,6 +121,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	}
 
 	snapshot.routingEnabled = desired.Routing.Enabled
+	snapshot.providerOnly = desired.ProviderOnly()
 	snapshot.revision = observed.Revision
 	snapshot.targets, snapshot.pending, snapshot.drift = projectLegacyTargets(observed)
 	snapshot.pendingTargets = projectPendingTargets(observed)

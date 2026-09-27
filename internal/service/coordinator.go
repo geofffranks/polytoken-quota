@@ -69,6 +69,11 @@ type Coordinator struct {
 	// left on disk). It is nil-safe: when empty the reconcile-pending check is
 	// skipped.
 	JournalPath string
+	// BackupsPath is the bounded backup store root holding pre-apply backups
+	// of managed files. It is surfaced by the provider-only migration preview
+	// so rollback guidance can reference it. Nil-safe: when empty the preview
+	// omits the backup reference.
+	BackupsPath string
 	// tracer is the observability seam that records each transaction step. It
 	// is nil in production; tests inject a recording tracer.
 	tracer Tracer
@@ -111,6 +116,12 @@ type transactionInput struct {
 	// silently resets operator selection intent. It is nil for every other
 	// transaction kind and for first init.
 	ExistingPolicy *policy.Desired
+	// ProviderOnly selects the opt-in provider-only init: the created or
+	// replaced policy enrolls provider IDs only, with no model enumeration,
+	// chains, or definitions. Legacy forced init over an existing provider-only
+	// policy is rejected — replacing provider-only mode with legacy mode is a
+	// deliberate migration, never a side effect of a plain forced refresh.
+	ProviderOnly bool
 }
 
 // defaultValidationTimeout is used when the policy omits an operational timeout.
@@ -119,16 +130,25 @@ const defaultValidationTimeout = 30 * time.Second
 // --- public mutators (each enters the single transact path) -----------------
 
 // InitOptions controls whether init may replace an existing valid desired.yaml
-// by importing the current managed Polytoken fields.
+// by importing the current managed Polytoken fields, and whether the created
+// or replaced policy is the opt-in provider-only mode.
 type InitOptions struct {
 	Force bool
+	// ProviderOnly creates or replaces desired.yaml as the strictly opt-in
+	// provider-only policy: enrolled Polytoken provider IDs, optional explicit
+	// quota adapter configuration, and a global target — never model
+	// enumeration, chains, definitions, or groups. Replacing an existing
+	// policy is a migration: it preserves the operator's operational section,
+	// keeps a copy of the replaced legacy policy, and surfaces the migration
+	// preview on the outcome.
+	ProviderOnly bool
 }
 
 // InitWithOptions classifies desired.yaml under the lock before state loading or
 // journal recovery. Plain init creates only when absent; forced init replaces
 // only an existing valid policy.
 func (c *Coordinator) InitWithOptions(ctx context.Context, opts InitOptions) Outcome {
-	return c.transact(ctx, txInit, transactionInput{Force: opts.Force})
+	return c.transact(ctx, txInit, transactionInput{Force: opts.Force, ProviderOnly: opts.ProviderOnly})
 }
 
 // Reconcile regenerates candidates from the current policy and persisted state.
@@ -206,6 +226,12 @@ func (c *Coordinator) transact(ctx context.Context, kind transactionKind, in tra
 				c.step("desired-exists")
 				return Outcome{Error: policy.ErrDesiredExists}
 			}
+			if loaded.ProviderOnly() && !in.ProviderOnly {
+				// Replacing provider-only mode with legacy chain management is
+				// a deliberate migration, never a side effect of a plain
+				// forced refresh.
+				return Outcome{Error: errors.New("service: existing desired.yaml is provider-only; rerun with --provider-only to replace it with a provider-only policy")}
+			}
 			// The existing file parsed cleanly; keep it so forced init can
 			// import operator-owned sections. A corrupt or unreadable file
 			// falls through to the abort below — it is never replaced.
@@ -262,14 +288,19 @@ func (c *Coordinator) dispatchTransact(ctx context.Context, recovered state.Stat
 }
 
 // transactInit builds either a starter proposal or a forced import after the
-// locked preflight and recovery have completed.
+// locked preflight and recovery have completed. The opt-in provider-only form
+// enrolls live provider IDs only: it never resolves or reconciles chain
+// targets, and a replacement migration preserves the operator's operational
+// section and the replaced legacy policy while surfacing the migration preview.
 func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, in transactionInput, existing bool) Outcome {
 	if c.Sources == nil {
 		return Outcome{Accepted: false, Error: errors.New("service: init requires a source reader")}
 	}
 	var desired policy.Desired
 	var err error
-	if in.Force {
+	if in.ProviderOnly {
+		desired, err = policy.InitProviderOnly(ctx, c.Sources)
+	} else if in.Force {
 		desired, _, err = policy.Import(ctx, c.Sources, recovered, true)
 	} else {
 		desired, _, err = policy.Init(ctx, c.Sources)
@@ -277,7 +308,16 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	if in.ExistingPolicy != nil {
+	var migration *MigrationPreview
+	if in.ProviderOnly {
+		if in.ExistingPolicy != nil {
+			// The operational section is operator-authored durable config
+			// (timeouts, notice path, on_change actions, backup retention);
+			// the migration carries it into the replacement so adopting
+			// provider-only mode never silently resets operator intent.
+			desired.Operational = in.ExistingPolicy.Operational
+		}
+	} else if in.ExistingPolicy != nil {
 		// Forced init imports the existing policy's selection section: the
 		// replacement adopts live managed fields, but operator selection
 		// intent (selection.jev) is durable config and must survive the
@@ -285,15 +325,27 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 		// documented defaults.
 		desired.Selection = in.ExistingPolicy.Selection
 	}
-	c.step("load-sources")
-	initTargets, err := c.Targets.ResolveTargets(desired)
-	if err != nil {
-		return Outcome{Accepted: false, Error: err}
+	var initTargets []RegisteredTarget
+	if !in.ProviderOnly {
+		c.step("load-sources")
+		initTargets, err = c.Targets.ResolveTargets(desired)
+		if err != nil {
+			return Outcome{Accepted: false, Error: err}
+		}
 	}
 	var published policy.PublicationResult
-	if existing {
+	switch {
+	case existing && in.ProviderOnly:
+		// A migration preserves the replaced legacy policy before replacing
+		// it; failing to preserve it aborts the migration.
+		if br, ok := c.PolicyWriter.(policy.BackupReplacer); ok {
+			published, err = br.ReplaceAtomicWithBackup(ctx, desired)
+		} else {
+			published, err = c.PolicyWriter.ReplaceAtomic(ctx, desired)
+		}
+	case existing:
 		published, err = c.PolicyWriter.ReplaceAtomic(ctx, desired)
-	} else {
+	default:
 		published, err = c.PolicyWriter.CreateAtomic(ctx, desired)
 	}
 	if err != nil || !published.Committed {
@@ -302,22 +354,33 @@ func (c *Coordinator) transactInit(ctx context.Context, recovered state.State, i
 		}
 		return Outcome{Accepted: false, Error: err}
 	}
+	if in.ProviderOnly && in.ExistingPolicy != nil {
+		m := c.buildMigrationPreview(desired, in.ExistingPolicy)
+		migration = &m
+	}
 	observed := recovered
 	next := observed
 	if next.Revision == 0 {
 		next.Revision = 1
 	}
-	next, outcomes := c.reconcileAll(ctx, desired, observed, next, true)
-	next = c.recordTargetOutcomes(next, outcomes)
+	var outcomes []TargetOutcome
+	if !in.ProviderOnly {
+		next, outcomes = c.reconcileAll(ctx, desired, observed, next, true)
+		next = c.recordTargetOutcomes(next, outcomes)
+	}
 	c.recordHistoryIfQualified(&next, txInit, in, outcomes, initTargets, desired)
 	c.step("save-state")
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: outcomes, Error: errors.Join(published.Warning, err)}
 	}
-	if c.notifyTargets(desired, &next, initTargets, outcomes) {
-		_ = c.State.Save(next) // best-effort persist of a notice-failure event
+	if !in.ProviderOnly {
+		// Provider-only init never edits managed files, so there is no proven
+		// change to notify on; the legacy path notifies its proven changes.
+		if c.notifyTargets(desired, &next, initTargets, outcomes) {
+			_ = c.State.Save(next) // best-effort persist of a notice-failure event
+		}
 	}
-	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning}
+	return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: published.Warning, Migration: migration}
 }
 func nextEventSequence(s *state.State) uint64 {
 	if s.NextEventSequence == 0 {
@@ -371,6 +434,13 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	if desired.ProviderOnly() {
+		// Provider gating is not part of this slice and a provider-only policy
+		// carries no chains to project: an explicit rejection, never a silent
+		// no-op.
+		return Outcome{Accepted: false, Error: providerOnlyUnsupported("reconcile",
+			"provider gating is not implemented and a provider-only policy has no managed chains to reconcile; no changes were made")}
+	}
 	c.step("load-state")
 	observed := recovered
 	c.step("load-sources")
@@ -402,12 +472,22 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 }
 
 // transactManual resolves exact mapping IDs, applies one manual transition, and
-// reconciles all targets with the Set/Clear coarse trace.
+// reconciles all targets with the Set/Clear coarse trace. The routing
+// transitions are chain-dependent: under a provider-only policy they return a
+// clear unsupported result, since a provider-only policy rejects the routing
+// section entirely and its state metadata would never be projected.
 func (c *Coordinator) transactManual(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind) Outcome {
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
+	}
+	if desired.ProviderOnly() {
+		switch kind {
+		case txDisable, txEnable, txReset:
+			return Outcome{Accepted: false, Error: providerOnlyUnsupported("routing enable/disable/reset",
+				"chain-based routing is a legacy-policy behavior; provider-only quota never reorders model chains")}
+		}
 	}
 	if kind != txReset {
 		if in.Provider == "" {

@@ -45,15 +45,15 @@ func readDesiredFile(t *testing.T, path string) string {
 func TestRoutingToggleToleratesAnchorsElsewhere(t *testing.T) {
 	cases := map[string]struct{ in, want string }{
 		"distant anchor and alias": {
-			in: "version: 1\nproviders:\n  openai: &std\n    models:\n      - gpt-5\n  anthropic: *std\nrouting:\n  enabled: true\n",
+			in:   "version: 1\nproviders:\n  openai: &std\n    models:\n      - gpt-5\n  anthropic: *std\nrouting:\n  enabled: true\n",
 			want: "version: 1\nproviders:\n  openai: &std\n    models:\n      - gpt-5\n  anthropic: *std\nrouting:\n  enabled: false\n",
 		},
 		"distant merge key": {
-			in: "version: 1\ndefaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n",
+			in:   "version: 1\ndefaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n",
 			want: "version: 1\ndefaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: false\n",
 		},
 		"distant duplicate keys": {
-			in: "a: 1\na: 2\nrouting:\n  enabled: true\n",
+			in:   "a: 1\na: 2\nrouting:\n  enabled: true\n",
 			want: "a: 1\na: 2\nrouting:\n  enabled: false\n",
 		},
 	}

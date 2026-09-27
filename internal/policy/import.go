@@ -115,6 +115,33 @@ type Writer interface {
 	ReplaceAtomic(context.Context, Desired) (PublicationResult, error)
 }
 
+// PolicyBackupSuffix names the sibling file a BackupReplacer preserves the
+// replaced policy bytes at: <desired path>.before-provider-only.
+const PolicyBackupSuffix = ".before-provider-only"
+
+// BackupReplacer is implemented by Writers that preserve the replaced policy
+// bytes at a sibling path before replacing. The provider-only migration uses
+// it (via type assertion, so minimal test doubles stay valid) so a migration
+// never silently destroys the legacy policy an operator may need to roll back.
+type BackupReplacer interface {
+	ReplaceAtomicWithBackup(ctx context.Context, d Desired) (PublicationResult, error)
+}
+
+// ReplaceAtomicWithBackup preserves the existing policy bytes at
+// <path><PolicyBackupSuffix> via a same-directory hard link, then replaces the
+// policy atomically. A backup failure aborts the replacement — the legacy
+// policy is never destroyed when it cannot be preserved.
+func (w *fileWriter) ReplaceAtomicWithBackup(ctx context.Context, d Desired) (PublicationResult, error) {
+	backup := w.path + PolicyBackupSuffix
+	if err := w.fs.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return PublicationResult{}, fmt.Errorf("policy: clear previous preserved policy: %w", err)
+	}
+	if err := w.fs.Link(w.path, backup); err != nil {
+		return PublicationResult{}, fmt.Errorf("policy: preserve replaced policy: %w", err)
+	}
+	return w.ReplaceAtomic(ctx, d)
+}
+
 // --- proposal core ----------------------------------------------------------
 
 // offGraphRef records a managed reference whose base model is not enumerated in
@@ -171,6 +198,10 @@ func InitProviderOnly(ctx context.Context, r SourceReader) (Desired, error) {
 		Mode:        ModeProviderOnly,
 		Providers:   map[MappingID]Mapping{},
 		Operational: defaultOperational,
+		// Match Load's default for an omitted selection section (marshalDesired
+		// writes no selection section for the resolved defaults) so the
+		// proposal and the file a caller persists from it agree.
+		Selection: defaultSelection(),
 	}
 	ids := make([]string, 0, len(global.Config.Providers))
 	for _, sm := range global.Config.Providers {
