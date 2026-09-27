@@ -56,6 +56,12 @@ type Plan struct {
 	TargetID string
 	Revision uint64
 	Edits    []FieldEdit
+	// ProviderOnly marks a plan from the provider-only gate: staging publishes
+	// its global config.yaml from the RAW global layer bytes (plus the exact
+	// plan edits) instead of the merged effective config, so unrelated bytes —
+	// comments, key order, absent-versus-false key shape — are preserved
+	// verbatim. Legacy plans keep the zero value and the merged base.
+	ProviderOnly bool
 }
 
 // EmptyChainError is the typed render failure returned when a required chain has no

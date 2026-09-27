@@ -397,9 +397,17 @@ func buildPublishDir(publishDir string, global, project Layer, projectScoped boo
 	// Build the real (un-redacted) config once.
 	var cfgBytes []byte
 	var err error
-	if projectScoped {
+	switch {
+	case projectScoped:
 		cfgBytes = project.Config
-	} else {
+	case plan.ProviderOnly:
+		// Provider-only plans publish the raw global layer with the exact
+		// plan edits applied: the gate only ever edits enrolled global
+		// providers.<id>.enabled fields and must preserve every unrelated
+		// byte, so the merged effective config (a parse-and-remarshal) is
+		// never a publication base.
+		cfgBytes = global.Config
+	default:
 		cfgBytes, _, err = buildEffectiveConfig(global.Config, project.Config, AuthTransientSource)
 		if err != nil {
 			return err
