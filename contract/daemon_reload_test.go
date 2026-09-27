@@ -64,7 +64,7 @@ func spawnDaemon(t *testing.T, work string) *daemonSpawn {
 	bin := polytokenBin(t)
 
 	home := filepath.Join(work, "isohome")
-	sessions := filepath.Join(home, ".local", "share", "polytoken", "sessions")
+	sessions := filepath.Join(work, "sessions")
 	fixture := filepath.Join("testdata", "polytoken", "global")
 	cfg := filepath.Join(home, ".config", "polytoken")
 	if err := os.MkdirAll(cfg, 0o700); err != nil {
@@ -98,34 +98,34 @@ func spawnDaemon(t *testing.T, work string) *daemonSpawn {
 	sp := &daemonSpawn{bin: bin, sessions: sessions, sessionID: m[1]}
 	fmt.Sscanf(m[2], "%d", &sp.port)
 
-	sessDir := filepath.Join(sessions, sp.sessionID)
-	deadline := time.Now().Add(10 * time.Second)
+	startupPath := filepath.Join(filepath.Dir(sessions), "sessions-v1", sp.sessionID, "startup.json")
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		var startup struct {
-			State string `json:"state"`
-			PID   int    `json:"pid"`
-			Port  int    `json:"port"`
+			State         string `json:"state"`
+			PID           int    `json:"pid"`
+			Port          int    `json:"port"`
+			CredentialURL string `json:"credential_file_path"`
 		}
-		if b, rerr := os.ReadFile(filepath.Join(sessDir, "startup.json")); rerr == nil && json.Unmarshal(b, &startup) == nil {
-			if startup.State == "ready" && startup.Port > 0 {
-				sp.pid = startup.PID
+		if b, rerr := os.ReadFile(startupPath); rerr == nil && json.Unmarshal(b, &startup) == nil {
+			if startup.State == "ready" && startup.PID > 0 && startup.Port > 0 && startup.CredentialURL != "" {
+				sp.pid, sp.port = startup.PID, startup.Port
+				var cred struct {
+					Token string `json:"token"`
+				}
+				cb, crerr := os.ReadFile(startup.CredentialURL)
+				if crerr != nil || json.Unmarshal(cb, &cred) != nil || cred.Token == "" {
+					t.Fatalf("read private session credential: %v", crerr)
+				}
+				sp.token = cred.Token
 				break
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("daemon never reached ready state (sessions dir: %s)", sessDir)
+			t.Fatalf("daemon never reached ready state (startup file: %s)", startupPath)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	var cred struct {
-		Token string `json:"token"`
-	}
-	if b, rerr := os.ReadFile(filepath.Join(sessDir, "credential.json")); rerr != nil {
-		t.Fatalf("read credential: %v", rerr)
-	} else if err := json.Unmarshal(b, &cred); err != nil || cred.Token == "" {
-		t.Fatalf("parse credential: %v", err)
-	}
-	sp.token = cred.Token
 
 	t.Cleanup(func() { sp.terminate(t) })
 	return sp
@@ -217,11 +217,10 @@ func TestNoticeHookReloadsRealDaemon(t *testing.T) {
 
 	noticePath := filepath.Join(work, "notice.json")
 	noticeDoc := map[string]any{
-		"schema":          1,
-		"revision":        5,
-		"routing_enabled": true,
-		"targets":         []any{},
-		"disabled_models": []any{},
+		"schema":        1,
+		"revision":      5,
+		"provider_only": true,
+		"providers":     []any{map[string]any{"id": "synthetic", "enabled": false}},
 	}
 	nb, err := json.Marshal(noticeDoc)
 	if err != nil {

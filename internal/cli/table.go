@@ -105,6 +105,9 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 		checked = r.LastChecked.UTC().Format("2006-01-02 15:04 UTC")
 	}
 	fmt.Fprintf(w, "%s %s    %s %s\n", s.dim("routing:"), enabledStyle(enabledText), s.dim("last checked:"), checked)
+	if r.ProviderOnly {
+		fmt.Fprintf(w, "%s %s\n", s.dim("mode:"), "provider-only (chain/route projections not applicable; routes are empty by design)")
+	}
 
 	if len(r.Providers) > 0 {
 		fmt.Fprintln(w)
@@ -297,7 +300,21 @@ func writeMutationText(w io.Writer, o service.Outcome, label string, s styler) {
 
 // writeInitText prints the post-init guidance after a successful create or
 // forced import. No sync/hook references remain: just init --force.
-func writeInitText(w io.Writer, forced bool) {
+// writeInitText prints the post-init guidance. The provider-only variant
+// points at quota adapter configuration instead of the legacy reconcile step.
+func writeInitText(w io.Writer, forced, providerOnly bool) {
+	if providerOnly {
+		if forced {
+			fmt.Fprintln(w, "provider-only desired.yaml written.")
+		} else {
+			fmt.Fprintln(w, "provider-only desired.yaml created.")
+		}
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Review the enrolled providers, then author quota adapter configuration (providers.<id>.quota.adapter) for each provider you want polled.")
+		fmt.Fprintln(w, "Provider-level status is available via: polytoken-quota status")
+		fmt.Fprintln(w, "Chain-dependent commands (reconcile, routing, select, select-eval, check --reconcile) are unsupported in provider-only mode.")
+		return
+	}
 	if forced {
 		fmt.Fprintln(w, "desired.yaml updated.")
 	} else {

@@ -578,8 +578,8 @@ func TestEditScopedAmbiguityRefusesOnEditPath(t *testing.T) {
 // without it, the same distant-ambiguity documents are still refused whole.
 func TestEditScopedAmbiguityStrictDefaultUnchanged(t *testing.T) {
 	cases := map[string][]byte{
-		"anchor and alias":   []byte("providers:\n  openai: &base\n    quota: 1\nrouting:\n  enabled: true\n"),
-		"merge key":          []byte("defaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n"),
+		"anchor and alias":       []byte("providers:\n  openai: &base\n    quota: 1\nrouting:\n  enabled: true\n"),
+		"merge key":              []byte("defaults: &d\n  full: x\nother:\n  <<: *d\nrouting:\n  enabled: true\n"),
 		"distant duplicate keys": []byte("a: 1\na: 2\nrouting:\n  enabled: true\n"),
 	}
 	for name, in := range cases {

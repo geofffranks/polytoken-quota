@@ -64,7 +64,7 @@ func driftNotice() map[string]any {
 func decodeDecision(t *testing.T, out string) (string, string) {
 	t.Helper()
 	var d struct {
-		Outcome          string `json:"outcome"`
+		Outcome           string `json:"outcome"`
 		AdditionalContext string `json:"additional_context"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &d); err != nil {

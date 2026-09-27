@@ -26,6 +26,10 @@ import (
 // holds the global scalar fields and per-model enable flags.
 const configFile = "config.yaml"
 
+// modelGroupsSkipReason is the sanitized reason reported for every tier-default
+// field a modelgroups-stamped target leaves operator-owned.
+const modelGroupsSkipReason = "config uses modelgroups"
+
 // ModelRef is a normalized desired chain entry. Spelling is the exact desired
 // preference (including any reasoning suffix); Base is the portion used for
 // provider-mode matching; Suffix is the reasoning level without its parentheses
@@ -50,12 +54,34 @@ type FieldEdit struct {
 	Remove   bool
 }
 
+// SkippedEdit names one managed field Build deliberately left unwritten, with
+// the sanitized reason. Skipped fields never appear in Edits: the operator owns
+// their current value, and the reconcile proceeds with the remaining managed
+// fields.
+type SkippedEdit struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
 // Plan is the reconciled set of managed edits for one target, stamped with the
 // observed state revision it was computed from.
 type Plan struct {
 	TargetID string
 	Revision uint64
 	Edits    []FieldEdit
+	// Skipped carries sanitized diagnostics for managed tier-default fields
+	// this plan deliberately left operator-owned. It is populated only when
+	// the target is stamped UsesModelGroups: Polytoken rejects a version-4
+	// config that combines a legacy tier default with an explicit model-group
+	// definition, so those fields are never written and the reason is reported
+	// instead.
+	Skipped []SkippedEdit
+	// ProviderOnly marks a plan from the provider-only gate: staging publishes
+	// its global config.yaml from the RAW global layer bytes (plus the exact
+	// plan edits) instead of the merged effective config, so unrelated bytes —
+	// comments, key order, absent-versus-false key shape — are preserved
+	// verbatim. Legacy plans keep the zero value and the merged base.
+	ProviderOnly bool
 }
 
 // EmptyChainError is the typed render failure returned when a required chain has no
@@ -159,6 +185,14 @@ func Build(desired policy.Desired, observed state.State, target policy.Target, r
 	}
 
 	// Scalar config fields: write only the first survivor, never a fallback.
+	// When the target's composed config surface uses modelgroups, every
+	// tier-default write would produce a candidate Polytoken rejects (a legacy
+	// tier default cannot combine with an explicit model-group definition, and
+	// the staged merge composes the global and project layers), so those
+	// fields — including any routing-driven reorder of their first survivor —
+	// are left operator-owned and reported as skipped. The routing overlay can
+	// only surface in the plan through these fields or the definition files,
+	// and definitions keep working.
 	for _, sp := range []struct {
 		field string
 		path  []string
@@ -171,6 +205,10 @@ func Build(desired policy.Desired, observed state.State, target policy.Target, r
 	} {
 		if len(sp.chain) == 0 {
 			continue // unmanaged for this target
+		}
+		if target.UsesModelGroups {
+			plan.Skipped = append(plan.Skipped, SkippedEdit{Field: sp.field, Reason: modelGroupsSkipReason})
+			continue
 		}
 		sv, err := survivors(sp.chain)
 		if err != nil {

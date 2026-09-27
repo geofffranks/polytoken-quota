@@ -93,6 +93,7 @@ func RunHook(d HookDeps) int {
 type noticeDoc struct {
 	Schema         int            `json:"schema"`
 	Revision       uint64         `json:"revision"`
+	ProviderOnly   bool           `json:"provider_only"`
 	Targets        []noticeTarget `json:"targets"`
 	DisabledModels []*string      `json:"disabled_models"`
 }
@@ -123,7 +124,7 @@ func (d HookDeps) handlePrompt() {
 	state := readHookState(statePath)
 
 	var lines []string
-	if doc, ok := d.readNotice(); ok {
+	if doc, ok := d.readNotice(); ok && !doc.ProviderOnly {
 		chain, head := applicableChain(doc, d.env("POLYTOKEN_FACET_NAME"))
 		inChain := chainContains(chain, current)
 		// Drift warnings fire at most once per published notice revision (the
@@ -269,11 +270,16 @@ func (d HookDeps) reloadIfStale() {
 	if state.ConsumedRevision >= revision {
 		return
 	}
-	port, ok := readPort(sessDir)
+	runtimeDir := filepath.Join(filepath.Dir(d.sessionsRoot()), "sessions-v1", sessionID)
+	port, ok := readPort(runtimeDir)
 	if !ok {
-		return
+		port, ok = readPort(sessDir) // compatibility with session layouts that keep artifacts together
+		if !ok {
+			return
+		}
+		runtimeDir = sessDir
 	}
-	token, ok := readToken(sessDir)
+	token, ok := readToken(runtimeDir)
 	if !ok {
 		return
 	}
@@ -315,15 +321,18 @@ func (d HookDeps) sessionDir() (dir, sessionID string) {
 	if sessionID == "" {
 		return "", ""
 	}
-	root := d.SessionsDir
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", ""
-		}
-		root = filepath.Join(home, ".local", "share", "polytoken", "sessions")
+	return filepath.Join(d.sessionsRoot(), sessionID), sessionID
+}
+
+func (d HookDeps) sessionsRoot() string {
+	if d.SessionsDir != "" {
+		return d.SessionsDir
 	}
-	return filepath.Join(root, sessionID), sessionID
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "polytoken", "sessions")
 }
 
 func (d HookDeps) statePath(sessDir string) string {

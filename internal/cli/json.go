@@ -73,6 +73,9 @@ type statusRouteJSON struct {
 //	 "pending_targets":[],"problem":false,"errors":[],"error":"optional"}
 type statusJSON struct {
 	RoutingEnabled bool                 `json:"routing_enabled"`
+	// ProviderOnly marks the opt-in provider-only policy mode: routes are
+	// empty by design, never because data was silently dropped.
+	ProviderOnly   bool                 `json:"provider_only"`
 	LastChecked    string               `json:"last_checked,omitempty"`
 	Providers      []statusProviderJSON `json:"providers"`
 	Routes         []statusRouteJSON    `json:"routes"`
@@ -84,7 +87,7 @@ type statusJSON struct {
 
 func statusEnvelope(r service.MergedStatusReport) statusJSON {
 	out := statusJSON{
-		RoutingEnabled: r.RoutingEnabled, Problem: r.Problem,
+		RoutingEnabled: r.RoutingEnabled, ProviderOnly: r.ProviderOnly, Problem: r.Problem,
 		PendingTargets: append([]string{}, r.PendingTargets...), Error: r.Error,
 	}
 	if !r.LastChecked.IsZero() {
@@ -296,10 +299,10 @@ type selectOutcomeJSON struct {
 // exists the invocation is known-safe.
 func selectEnvelope(o selection.SelectOutcome) selectOutcomeJSON {
 	out := selectOutcomeJSON{
-		Version:  selectJSONVersion,
-		Status:   string(o.Status),
-		Reason:   o.Reason,
-		Phase:    validate.DefaultSanitize([]byte(o.Phase)),
+		Version:   selectJSONVersion,
+		Status:    string(o.Status),
+		Reason:    o.Reason,
+		Phase:     validate.DefaultSanitize([]byte(o.Phase)),
 		Abstained: o.Abstained,
 		// Tier is populated only for an operator-supplied explicit tier or
 		// a successful assessment; AssessedTier marks the assessment-derived

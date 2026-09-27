@@ -28,7 +28,9 @@ func (r FilesystemSourceReader) Global(ctx context.Context) (SourceSet, error) {
 
 func (r FilesystemSourceReader) Projects(ctx context.Context) ([]SourceSet, error) {
 	if r.DesiredPath == "" {
-		return nil, errors.New("policy: source reader requires desired policy for registered projects")
+		// Without a policy path there are no registered projects to read;
+		// registration comes only from the policy, never from a scan.
+		return nil, nil
 	}
 	d, err := Load(r.DesiredPath)
 	if err != nil {
@@ -269,6 +271,20 @@ type sourceDefinitionWire struct {
 		Model          string   `yaml:"model"`
 		FallbackModels []string `yaml:"fallback_models"`
 	} `yaml:"polytoken"`
+}
+
+// DiscoverManagedFiles returns the sorted, slash-relative paths of the managed
+// definition files under root, using the staging read allowlist: exactly *.md
+// files under facets/ and subagents/. It never enumerates any other path.
+func DiscoverManagedFiles(root string) ([]string, error) {
+	return discoverManagedFiles(root)
+}
+
+// ReadManagedDefinition parses one definition file's frontmatter and reports
+// whether it carries managed model references (polytoken.model or
+// polytoken.fallback_models).
+func ReadManagedDefinition(data []byte) (SourceDefinition, bool, error) {
+	return readManagedDefinition(data)
 }
 
 func readManagedDefinition(data []byte) (SourceDefinition, bool, error) {

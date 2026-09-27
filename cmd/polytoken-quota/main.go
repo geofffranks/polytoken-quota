@@ -288,6 +288,7 @@ func newCoordinator(cfg config) *service.Coordinator {
 		Sources:      policy.FilesystemSourceReader{GlobalDir: cfg.GlobalDir, DesiredPath: cfg.DesiredPath},
 		QuotaPoller:  service.NewQuotaPoller(),
 		JournalPath:  cfg.JournalPath,
+		BackupsPath:  cfg.BackupsRoot,
 	}
 }
 
@@ -387,6 +388,7 @@ func main() {
 		SnapshotBuilder: coord,
 		HistoryQuerier:  historyReader,
 		Policy:          coord.Policy,
+		Previewer:       coord,
 		Select:          selectRunner,
 		SelectEval:      evalRunner,
 	})

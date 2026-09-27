@@ -60,7 +60,11 @@ type SkippedModel struct {
 // MergedStatusReport is the result of the merged status command. LastChecked
 // is the max snapshot CheckedAt across providers (zero when never observed).
 type MergedStatusReport struct {
-	RoutingEnabled bool                   `json:"routing_enabled"`
+	RoutingEnabled bool `json:"routing_enabled"`
+	// ProviderOnly is true when the loaded policy is the opt-in provider-only
+	// mode: chain/route projections are not applicable and the routes section
+	// is empty by design, never because data was silently dropped.
+	ProviderOnly   bool                   `json:"provider_only"`
 	LastChecked    time.Time              `json:"last_checked,omitempty"`
 	Providers      []MergedStatusProvider `json:"providers,omitempty"`
 	Routes         []MergedStatusRoute    `json:"routes,omitempty"`
@@ -79,6 +83,7 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		return report
 	}
 	report.RoutingEnabled = s.routingEnabled
+	report.ProviderOnly = s.providerOnly
 	report.Problem = s.problem
 	report.PendingTargets = append([]string(nil), s.pendingTargets...)
 	report.Errors = cloneDiagnosticErrors(s.providerErrors)

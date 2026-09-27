@@ -51,6 +51,10 @@ func (c *Coordinator) SetRoutingEnabled(ctx context.Context, enabled bool) error
 	if c.Policy == nil {
 		return errors.New("routing: policy loader unavailable")
 	}
+	if loaded, err := c.Policy.LoadPolicy(); err == nil && loaded.ProviderOnly() {
+		return providerOnlyUnsupported("routing toggle",
+			"a provider-only policy rejects the routing section; chain-based routing is a legacy-policy behavior")
+	}
 	desiredPath, ok := policyDesiredPath(c.Policy)
 	if !ok || desiredPath == "" {
 		return errors.New("routing: desired.yaml path unavailable")

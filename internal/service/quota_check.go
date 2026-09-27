@@ -39,6 +39,11 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	// Provider-only policy: polling quota is a maintained provider-only
+	// function, and with --reconcile the provider gate (not chain
+	// processTargets) performs the automatic reserve/disabled → off and
+	// normal → baseline transitions against the freshly observed state.
+
 	c.step("load-state")
 	observed := recovered
 
@@ -61,23 +66,58 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	var outcomes []TargetOutcome
 	var targets []RegisteredTarget
 	var terr error
+	var gateRefusal *providerGateRefusal
 	if in.Reconcile {
-		c.step("load-sources")
-		targets, terr = c.Targets.ResolveTargets(desired)
-		if terr != nil {
-			// Target resolution failed, but the observations are still accepted:
-			// record the resolution as a pending target outcome and persist the
-			// observations (mirrors the transactManual resolution-failure path).
-			next = c.retireSyntheticPendings(next)
-			pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
-			outcomes = []TargetOutcome{pending}
+		if desired.ProviderOnly() {
+			// The provider gate replaces chain processTargets: it stages and
+			// validates the composed candidate on every registered root and
+			// commits at most one global journal transaction carrying the next
+			// ownership state. Observations stay independent of a refusal.
+			c.step("load-sources")
+			targets, terr = c.Targets.ResolveTargets(desired)
+			if terr != nil {
+				next = c.retireSyntheticPendings(next)
+				pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
+				outcomes = []TargetOutcome{pending}
+			} else {
+				c.step("provider-gate")
+				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false)
+				outcomes = res.Outcomes
+				gateRefusal = res.Refusal
+				if res.Refusal == nil {
+					next.ProviderOwnership = res.Plan.PublishedOwnership
+					next = c.retireSyntheticPendings(next)
+				} else {
+					next.ProviderOwnership = res.Plan.RefusalOwnership
+				}
+				// Debt follows committed enabled values rather than ownership
+				// metadata, which can move on conflict-marker and release passes.
+				freshEdits := providerEdits(outcomes)
+				if res.Refusal != nil {
+					freshEdits = nil
+				}
+				next.PendingProviderNotice = reconcileProviderNoticeDebt(observed.PendingProviderNotice, res.Plan.Enabled, next.Revision, freshEdits)
+				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			}
+			next = c.recordTargetOutcomes(next, outcomes)
 		} else {
-			outcomes = c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
-			next = c.retireSyntheticPendings(next)
-			appendRoutingChangeEvents(&next, desired, outcomes, c.now())
-			c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			c.step("load-sources")
+			targets, terr = c.Targets.ResolveTargets(desired)
+			if terr != nil {
+				// Target resolution failed, but the observations are still accepted:
+				// record the resolution as a pending target outcome and persist the
+				// observations (mirrors the transactManual resolution-failure path).
+				next = c.retireSyntheticPendings(next)
+				pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
+				outcomes = []TargetOutcome{pending}
+			} else {
+				outcomes = c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
+				next = c.retireSyntheticPendings(next)
+				appendRoutingChangeEvents(&next, desired, outcomes, c.now())
+				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			}
+			next = c.recordTargetOutcomes(next, outcomes)
 		}
-		next = c.recordTargetOutcomes(next, outcomes)
 	}
 
 	c.step("save-state")
@@ -85,7 +125,14 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports, Error: fmt.Errorf("service: persist quota observations: %w", serr)}
 	}
 	if in.Reconcile {
-		if c.notifyTargets(desired, &next, targets, outcomes) {
+		// The provider-only gate publishes the provider status notice, never
+		// the legacy chain document: a legacy-shaped notice would trigger false
+		// chain-drift warnings in hooked sessions and drop the provider states.
+		if desired.ProviderOnly() {
+			if gateRefusal == nil && c.notifyProviderGate(desired, &next, providerEdits(outcomes)) {
+				_ = c.State.Save(next) // best-effort persist of notice bookkeeping
+			}
+		} else if c.notifyTargets(desired, &next, targets, outcomes) {
 			_ = c.State.Save(next) // best-effort persist of a notice-failure event
 		}
 	}

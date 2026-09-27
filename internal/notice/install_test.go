@@ -10,7 +10,7 @@ import (
 )
 
 type installResult struct {
-	code  int
+	code   int
 	stdout bytes.Buffer
 	stderr bytes.Buffer
 }
@@ -162,9 +162,9 @@ func TestInstallHookPreservesUnrelatedEntries(t *testing.T) {
 // refused with exit 1 and left byte-identical.
 func TestInstallHookMalformedRefused(t *testing.T) {
 	for name, content := range map[string]string{
-		"not json":       "{bad",
-		"not an array":   `{"name": "x"}`,
-		"missing event":  `[{"name": "x", "handler": {"bash": "true"}}]`,
+		"not json":        "{bad",
+		"not an array":    `{"name": "x"}`,
+		"missing event":   `[{"name": "x", "handler": {"bash": "true"}}]`,
 		"missing handler": `[{"name": "x", "event": "stop"}]`,
 	} {
 		t.Run(name, func(t *testing.T) {

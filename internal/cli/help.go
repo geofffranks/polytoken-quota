@@ -47,10 +47,12 @@ var commandOrder = []string{
 var helpDocs = map[string]helpDoc{
 	"init": {
 		short: "Initialize quota state from current configuration",
-		long:  "Initialize quota state from the current Polytoken configuration.",
-		usage: []string{"polytoken-quota init [--force]"},
+		long:  "Initialize quota state from the current Polytoken configuration. With --provider-only, create the strictly opt-in provider-only policy instead: it enrolls Polytoken provider IDs (optionally with explicit quota adapter configuration) and a global target, and never adopts model groups, model enumeration, chains, or definitions. Replacing a legacy policy with --provider-only --force is a migration: it preserves your operational settings and the replaced policy file, and reports which legacy quota-authored edits persist as operator-owned.",
+		usage: []string{"polytoken-quota init [--force] [--provider-only] [--preview]"},
 		flags: []flagDoc{
 			{"--force", "Overwrite existing state without confirmation; operator selection consent (selection.jev) is preserved, not reset"},
+			{"--provider-only", "Create or replace the policy in the opt-in provider-only mode (enrolled provider IDs only; legacy target/model fields are rejected in that mode)"},
+			{"--preview", "Show the provider-only migration preview (enrollment, operator-owned legacy edits, backup/journal references, rollback guidance) without writing anything"},
 		},
 	},
 	"status": {

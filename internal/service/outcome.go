@@ -4,6 +4,7 @@
 package service
 
 import (
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -32,6 +33,11 @@ type TargetOutcome struct {
 	// It is the change-qualification data used by history recording. It is nil
 	// when staging was not reached or the candidate was cleaned up.
 	Prepare *PrepareResult
+	// Skipped carries sanitized diagnostics for managed tier-default fields the
+	// plan deliberately left operator-owned (the composed config surface uses
+	// modelgroups). It is populated whenever a plan rendered; rendering is
+	// decided by the CLI.
+	Skipped []reconcile.SkippedEdit
 }
 
 // Outcome is the result of a mutation operation. Accepted is false when the
@@ -57,6 +63,11 @@ type Outcome struct {
 	Problem bool
 	// ProviderAttempts carries sanitized quota polling diagnostics for CLI reports.
 	ProviderAttempts []QuotaAttemptDiagnostic
+	// Migration is the provider-only migration preview, set by a provider-only
+	// init that replaced an existing policy. It documents the legacy
+	// quota-authored edits that persist as operator-owned plus backup/journal
+	// references and rollback guidance. Nil for every other transaction.
+	Migration *MigrationPreview
 }
 
 // PendingCount returns the number of targets that remain pending (not fully

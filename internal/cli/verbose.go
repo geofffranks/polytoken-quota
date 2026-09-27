@@ -35,6 +35,15 @@ func writeVerboseTrace(w io.Writer, o service.Outcome) {
 		} else {
 			fmt.Fprintln(w, "outcome: applied")
 		}
+		// Skipped tier-default diagnostics are deliberate, operator-actionable
+		// information: they explain why the legacy tier selections were left
+		// unwritten (the composed config uses modelgroups). They render for
+		// applied and pending targets alike.
+		for _, sk := range tgt.Skipped {
+			fmt.Fprintf(w, "skipped: %s (%s)\n",
+				validate.DefaultSanitize([]byte(sk.Field)),
+				validate.DefaultSanitize([]byte(sk.Reason)))
+		}
 		writeVerboseDiagnostic(w, tgt.Diagnostic)
 		if tgt.Pending != nil && (tgt.Diagnostic == nil || tgt.Diagnostic.FullOutput == "") {
 			// Defensive fallback mirroring summarize: a pending without a full

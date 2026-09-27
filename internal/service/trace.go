@@ -43,6 +43,9 @@ type ReconcileTrace struct {
 	Ranking       []RankEntryReport     `json:"ranking,omitempty"`
 	Chains        []ChainSurvivorReport `json:"chains,omitempty"`
 	Edits         []EditReport          `json:"edits,omitempty"`
+	// Skipped carries the sanitized tier-default skip diagnostics (the
+	// composed config surface uses modelgroups); nil when nothing was skipped.
+	Skipped []reconcile.SkippedEdit `json:"skipped,omitempty"`
 }
 
 // buildTrace assembles a ReconcileTrace from the computed ranking, plan, and
@@ -61,6 +64,7 @@ func buildTrace(
 		Ranking:       ranking,
 		Chains:        chainDetailsToReports(ProjectChains(desired, observed, target, ranks)),
 		Edits:         editDetailsToReports(ProjectEdits(plan.Edits, nil)),
+		Skipped:       plan.Skipped,
 	}
 }
 

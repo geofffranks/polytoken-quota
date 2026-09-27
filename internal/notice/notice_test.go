@@ -104,8 +104,8 @@ func TestRenderUnresolvableModelEmitsNull(t *testing.T) {
 		RoutingEnabled: false,
 		Targets: []Target{
 			{
-				ID:    "global",
-				Kind:  "global",
+				ID:     "global",
+				Kind:   "global",
 				Chains: []Chain{{Name: "full", Models: []string{"unknown/model-x", "codex/ok"}}},
 			},
 		},
@@ -154,8 +154,8 @@ func TestRenderOrderingAndOmission(t *testing.T) {
 			{ID: "zeta-def", Kind: "definition", File: "facets/zeta-def.md", Chain: []string{"codex/ok"}},
 			{ID: "alpha-def", Kind: "definition", File: "subagents/alpha-def.md", Chain: []string{"codex/ok"}},
 			{
-				ID:    "global",
-				Kind:  "global",
+				ID:   "global",
+				Kind: "global",
 				Chains: []Chain{
 					{Name: "full", Models: []string{"codex/ok"}},
 					{Name: "mini", Models: nil},

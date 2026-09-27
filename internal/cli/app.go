@@ -58,6 +58,13 @@ const (
 	DoctorCommand
 )
 
+// MigrationPreviewer produces the read-only provider-only migration preview.
+// The production implementation is *service.Coordinator. Optional dependency:
+// init --preview reports its absence instead of failing.
+type MigrationPreviewer interface {
+	PreviewProviderOnlyMigration(context.Context) (service.MigrationPreview, error)
+}
+
 // Dependencies are the injected collaborators Run dispatches to.
 type Dependencies struct {
 	Mutator         Mutator
@@ -67,6 +74,9 @@ type Dependencies struct {
 	// Policy resolves the desired policy for install-hook's notice-path
 	// default. Nil-safe: install-hook falls back to the default location.
 	Policy service.PolicyLoader
+	// Previewer produces the provider-only migration preview for
+	// `init --preview`. Nil-safe: the preview reports its absence.
+	Previewer MigrationPreviewer
 	// Select runs model-selection invocations (the select command).
 	Select SelectRunner
 	// SelectEval runs operator evaluation invocations (select-eval).
@@ -243,42 +253,107 @@ func runInstallHook(args []string, deps Dependencies, stdout, stderr io.Writer) 
 
 // --- init (AC.2) ---
 
-// runInit handles init [--force].
+// runInit handles init [--force] [--provider-only] [--preview]. The preview
+// form is read-only: it renders the provider-only migration preview without
+// writing anything.
 func runInit(ctx context.Context, args []string, deps Dependencies, stdout, stderr io.Writer) int {
 	if hasHelpFlag(args) {
 		writeCommandHelp(stdout, "init")
 		return ExitOK
 	}
-	force, ok := parseInitFlags(args)
+	force, providerOnly, preview, ok := parseInitFlags(args)
 	if !ok {
 		fmt.Fprintln(stderr, "init: invalid arguments")
 		return ExitRejected
+	}
+	if preview {
+		return runInitPreview(ctx, deps, stdout, stderr)
 	}
 	if deps.Mutator == nil {
 		fmt.Fprintln(stderr, "init: mutator unavailable")
 		return ExitRejected
 	}
-	out := deps.Mutator.InitWithOptions(ctx, service.InitOptions{Force: force})
+	out := deps.Mutator.InitWithOptions(ctx, service.InitOptions{Force: force, ProviderOnly: providerOnly})
 	if out.Error != nil {
 		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
 	}
 	code := MutationExitCode(out)
 	if code == ExitOK {
-		writeInitText(stdout, force)
+		writeMigrationPreviewText(stdout, out.Migration)
+		writeInitText(stdout, force, providerOnly)
 	}
 	return code
 }
 
-func parseInitFlags(args []string) (force, ok bool) {
+// runInitPreview renders the read-only provider-only migration preview.
+func runInitPreview(ctx context.Context, deps Dependencies, stdout, stderr io.Writer) int {
+	if deps.Previewer == nil {
+		fmt.Fprintln(stderr, "init: migration preview unavailable")
+		return ExitRejected
+	}
+	p, err := deps.Previewer.PreviewProviderOnlyMigration(ctx)
+	if err != nil {
+		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(err.Error())))
+		return ExitRejected
+	}
+	writeMigrationPreviewText(stdout, &p)
+	return ExitOK
+}
+
+// writeMigrationPreviewText renders the provider-only migration preview when
+// one is attached to the outcome; a nil preview prints nothing.
+func writeMigrationPreviewText(w io.Writer, m *service.MigrationPreview) {
+	if m == nil {
+		return
+	}
+	fmt.Fprintln(w, "provider-only migration preview:")
+	fmt.Fprintf(w, "  enrolled providers: %s\n", strings.Join(m.EnrolledProviders, ", "))
+	fmt.Fprintf(w, "  global root: %s\n", m.GlobalRoot)
+	if len(m.LegacyOwnedEdits) > 0 {
+		fmt.Fprintln(w, "  legacy quota-authored edits that persist as operator-owned:")
+		for _, e := range m.LegacyOwnedEdits {
+			fmt.Fprintf(w, "    - %s %s: %s (%s)\n", e.TargetID, e.File, e.Field, e.Detail)
+		}
+	} else {
+		fmt.Fprintln(w, "  legacy quota-authored edits: none recorded (first init)")
+	}
+	if m.BackupsPath != "" {
+		fmt.Fprintf(w, "  managed-file backups: %s (%s)\n", m.BackupsPath, presenceText(m.BackupsPresent))
+	}
+	if m.JournalPath != "" {
+		fmt.Fprintf(w, "  apply journal: %s (%s)\n", m.JournalPath, presenceText(m.JournalPresent))
+	}
+	if m.PolicyBackupPath != "" {
+		fmt.Fprintf(w, "  replaced policy preserved at: %s (%s)\n", m.PolicyBackupPath, presenceText(m.PolicyBackupPresent))
+	}
+	fmt.Fprintln(w, "  rollback guidance:")
+	for _, line := range m.Rollback {
+		fmt.Fprintf(w, "    - %s\n", line)
+	}
+	fmt.Fprintln(w)
+}
+
+func presenceText(present bool) string {
+	if present {
+		return "present"
+	}
+	return "none yet"
+}
+
+func parseInitFlags(args []string) (force, providerOnly, preview, ok bool) {
 	for _, a := range args {
 		switch a {
 		case "--force":
 			force = true
+		case "--provider-only":
+			providerOnly = true
+		case "--preview":
+			preview = true
 		default:
-			return false, false
+			return false, false, false, false
 		}
 	}
-	return force, true
+	return force, providerOnly, preview, true
 }
 
 // --- status (AC.5) ---
@@ -429,6 +504,12 @@ func runReconcile(ctx context.Context, args []string, deps Dependencies, stdout,
 	out := deps.Mutator.Reconcile(ctx, dryRun, keepStaging, verbose)
 	if verbose {
 		writeVerboseTrace(stdout, out)
+	}
+	if !out.Accepted && errors.Is(out.Error, service.ErrProviderOnlyUnsupported) {
+		// A quiet reconcile prints nothing by contract (exit code only), but an
+		// unsupported result must be clear, not a silent failure: surface the
+		// provider-only rejection without changing legacy error rendering.
+		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
 	}
 	if dryRun {
 		return dryRunExitCode(out)
