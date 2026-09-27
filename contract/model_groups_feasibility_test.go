@@ -70,6 +70,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/geofffranks/polytoken-quota/internal/groupsafety"
 )
 
 // --- in-process loopback stub provider --------------------------------------
@@ -1265,6 +1267,228 @@ func TestReloadContinuityDisablingSelectedProviderMatrix(t *testing.T) {
 				t.Fatalf("history after reload lost the first turn's reply, got %.1200s", hb)
 			}
 		})
+	}
+}
+
+// TestProviderGateRecoveryPreservesSessionHistory proves the recovery leg of
+// AC.5 against the real binary (COMP-2): after a provider-disable, idle
+// reload, and turn cycle, quota's normal-mode restore end state (the provider
+// re-enabled) reloads idle and the session AUTOMATICALLY CONTINUES — the next
+// turn runs with no manual reselect and the full session history survives —
+// for the ordinary default route, a group-pinned facet, a concrete facet pin,
+// and a manual selection. The observed binary contract is pinned: the reload
+// adopts the restored catalog (failover candidates return to
+// [stub/m1, alt/a1]) while the active selection stays on the substitute it
+// degraded to; the restored provider is not re-adopted automatically. The
+// stub request and reply — never /state alone — prove which model served.
+func TestProviderGateRecoveryPreservesSessionHistory(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("POLYTOKEN_CONTRACT_BIN / POLYTOKEN_BIN not set; opt-in suite")
+	}
+	requireDaemonCapabilities(t, bin)
+
+	cases := []struct {
+		name             string
+		facetModel       string // non-empty: spawn with a facet pinning this reference
+		manualSelection  string // non-empty: POST /model this reference before the disable
+		wantInitialModel string
+		wantInitialServe string // wire name the first turn's request must carry
+	}{
+		{
+			name:             "default-route-no-explicit-selection",
+			wantInitialModel: "stub/m1",
+			wantInitialServe: "m1",
+		},
+		{
+			name:             "group-pinned-facet",
+			facetModel:       "mg:failover",
+			wantInitialModel: "stub/m1",
+			wantInitialServe: "m1",
+		},
+		{
+			name:             "concrete-facet-pin",
+			facetModel:       "stub/m2",
+			wantInitialModel: "stub/m2",
+			wantInitialServe: "m2",
+		},
+		{
+			name:             "manual-concrete-selection",
+			manualSelection:  "stub/m2",
+			wantInitialModel: "stub/m2",
+			wantInitialServe: "m2",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStubProvider(t)
+			work := t.TempDir()
+			var args []string
+			if tc.facetModel != "" {
+				facets := writeMatrixFacet(t, work, "pinned", tc.facetModel)
+				args = append(args, "--facets-dir", facets, "--facet", "pinned")
+			}
+			allEnabled := feasMatrixConfig(stub.URL, map[string]bool{"stub": true, "alt": true})
+			d := spawnFeasibilityDaemon(t, work, allEnabled, args...)
+			if tc.manualSelection != "" {
+				d.selectModel(t, tc.manualSelection)
+			}
+			if s := d.feasState(t); s["active_model"] != tc.wantInitialModel {
+				t.Fatalf("initial active = %v, want %s", s["active_model"], tc.wantInitialModel)
+			}
+			firstReply := "stub-reply-model=" + tc.wantInitialServe
+			d.driveTurn(t, stub, "recovery first turn "+tc.name, firstReply)
+			if req := stub.lastRequest(t); req.Model != tc.wantInitialServe {
+				t.Fatalf("initial turn served %q, want %q", req.Model, tc.wantInitialServe)
+			}
+
+			// Gate the provider off; the degraded turn serves the surviving
+			// provider (pinned by the disable matrix).
+			if err := os.WriteFile(filepath.Join(work, "isohome", ".config", "polytoken", "config.yaml"),
+				[]byte(feasMatrixConfig(stub.URL, map[string]bool{"stub": false, "alt": true})), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.reloadIdle(t)
+			secondReply := "stub-reply-model=a1"
+			d.driveTurn(t, stub, "recovery second turn "+tc.name, secondReply)
+
+			// Recovery: quota's normal-mode restore end state writes the
+			// provider back enabled and the idle reload succeeds (200, empty
+			// failed list). OBSERVED BINARY CONTRACT: the reload ADOPTS the
+			// re-enabled catalog but does NOT re-adopt the restored provider
+			// as the active selection — the session automatically continues
+			// on the substitute it degraded to, with history intact. Any
+			// product requirement to switch back automatically is a separate
+			// decision; what is pinned here is that continuation never fails
+			// and the operator sees the restored catalog.
+			if err := os.WriteFile(filepath.Join(work, "isohome", ".config", "polytoken", "config.yaml"), []byte(allEnabled), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.reloadIdle(t)
+			if got := groupCandidates(t, d.feasState(t), "failover"); !equalStrings(got, []string{"stub/m1", "alt/a1"}) {
+				t.Fatalf("post-restore failover catalog = %v, want the restored [stub/m1, alt/a1]", got)
+			}
+			thirdReply := "stub-reply-model=a1"
+			d.driveTurn(t, stub, "recovery third turn "+tc.name, thirdReply)
+			if req := stub.lastRequest(t); req.Model != "a1" {
+				t.Fatalf("post-restore turn served %q, want the observed continued substitute a1", req.Model)
+			}
+			if req := stub.lastRequest(t); req.AuthHeader != "" {
+				t.Fatalf("no_auth provider request carried Authorization: %q", req.AuthHeader)
+			}
+
+			// All three turns survive in session history.
+			_, hb := d.do(t, http.MethodGet, "/history", "")
+			for _, want := range []string{firstReply, secondReply, thirdReply} {
+				if !strings.Contains(string(hb), want) {
+					t.Fatalf("history lost %q; got %.1600s", want, hb)
+				}
+			}
+		})
+	}
+}
+
+// feasGrouplessConfig renders the COMP-1 probe fixture: a version-4 global
+// layer with two providers and two class-full models and NO modelgroups — the
+// shipped-default/dynamic-catalog shape whose composition no offline observer
+// has pinned.
+func feasGrouplessConfig(stubURL string, providers map[string]bool) string {
+	return fmt.Sprintf(`version: 4
+providers:
+  stub:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+  alt:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+models:
+%s%s`, stubURL, providers["stub"], stubURL, providers["alt"],
+		feasModelYAML("stub/m1", "stub", "m1", "full", true),
+		feasModelYAML("alt/a1", "alt", "a1", "full", true))
+}
+
+// TestAnalyzerGrouplessShapeMatchesBinary observes the real binary on the
+// exact shape the offline analyzer classifies pending-unknown (COMP-1): a
+// version-4 global config with providers and models but no modelgroups at
+// all. Pinned observations: (a) the analyzer refuses to call a disable of
+// this shape Safe — shipped default-route composition was never authorized
+// offline; (b) the binary REJECTS the ambiguous two-provider groupless shape
+// outright ("unable to infer Full default from 2 enabled models"); (c) the
+// unambiguous single-provider groupless shape boots and serves its only
+// model, and gating that provider off is REJECTED wholesale by the reload —
+// the stale active selection is retained, never a silent re-composition. A
+// reload that accepted a config with no usable default, or a turn served by
+// the gated provider afterwards, would strand the session and fail the test.
+func TestAnalyzerGrouplessShapeMatchesBinary(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("POLYTOKEN_CONTRACT_BIN / POLYTOKEN_BIN not set; opt-in suite")
+	}
+	requireDaemonCapabilities(t, bin)
+
+	stub := newStubProvider(t)
+	work := t.TempDir()
+	twoModel := feasGrouplessConfig(stub.URL, map[string]bool{"stub": true, "alt": true})
+
+	// (a) The offline analyzer fails closed on this shape.
+	report := groupsafety.Analyze(groupsafety.Input{
+		Enrolled: []string{"stub", "alt"},
+		Global:   groupsafety.Layer{ID: "global", Global: true, Config: []byte(twoModel)},
+	}, "stub")
+	if report.Verdict != groupsafety.PendingUnknown {
+		t.Fatalf("groupless disable verdict = %q (reasons %v), want pending-unknown", report.Verdict, report.Reasons)
+	}
+
+	// (b) The binary rejects the ambiguous groupless shape outright instead of
+	// composing shipped defaults from two candidates.
+	if ok, out := feasValidate(t, work, twoModel); ok {
+		t.Fatalf("two-provider groupless v4 config unexpectedly validates; the binary composes shipped defaults after all: %s", out)
+	}
+
+	// (c) The unambiguous single-provider groupless shape loads, serves its
+	// only model, and refuses the gate's disable wholesale.
+	solo := feasGrouplessConfig(stub.URL, map[string]bool{"stub": true, "alt": false})
+	if ok, out := feasValidate(t, work, solo); !ok {
+		t.Fatalf("single-provider groupless v4 config failed validation: %s", out)
+	}
+	d := spawnFeasibilityDaemon(t, work, solo)
+	d.driveTurn(t, stub, "groupless first turn", "stub-reply-model=m1")
+	if req := stub.lastRequest(t); req.Model != "m1" {
+		t.Fatalf("single-provider groupless turn served %q, want m1", req.Model)
+	}
+
+	gated := feasGrouplessConfig(stub.URL, map[string]bool{"stub": false, "alt": false})
+	if ok, out := feasValidate(t, work, gated); ok {
+		t.Fatalf("gating the only enabled model off unexpectedly validates: %s", out)
+	}
+	if err := os.WriteFile(filepath.Join(work, "isohome", ".config", "polytoken", "config.yaml"), []byte(gated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, body := d.do(t, http.MethodPost, "/reload", "")
+	if code != http.StatusOK {
+		t.Fatalf("POST /reload = %d: %s", code, body)
+	}
+	var r struct {
+		Queued bool     `json:"queued"`
+		Failed []string `json:"failed"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		t.Fatalf("decode /reload: %v (%s)", err, body)
+	}
+	if !r.Queued && len(r.Failed) == 0 {
+		t.Fatalf("reload ACCEPTED a config with no usable full default; the session would strand silently: %s", body)
+	}
+	if s := d.feasState(t); s["active_model"] != "stub/m1" {
+		t.Fatalf("rejected reload did not retain the stale active model: %v", s["active_model"])
 	}
 }
 
