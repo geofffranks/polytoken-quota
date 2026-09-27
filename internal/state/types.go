@@ -216,6 +216,30 @@ type State struct {
 	// config. Legacy policies never populate it, so legacy behavior is
 	// unchanged.
 	ProviderOwnership map[string]ProviderOwnership
+
+	// PendingProviderNotice is the additive republication debt for the
+	// provider-only notice: the provider states committed by the last
+	// provider-changing revision whose notice publication has not been
+	// confirmed. A publish failure or a crash between the state commit and
+	// the publication leaves it set, so a later steady-state provider-only
+	// pass republishes the lost notice at its own revision. Nil once the
+	// notice for the latest provider-changing revision is confirmed. It
+	// carries only sanitized provider IDs and enabled booleans.
+	PendingProviderNotice *PendingProviderNotice
+}
+
+// ProviderNoticeState is one provider's committed enabled state as carried by
+// the provider-only notice and the republication debt.
+type ProviderNoticeState struct {
+	ID      string
+	Enabled bool
+}
+
+// PendingProviderNotice records the provider states awaiting confirmed
+// notice publication for the revision that committed them.
+type PendingProviderNotice struct {
+	Revision  uint64
+	Providers []ProviderNoticeState
 }
 
 // RoutingHistory records the last good global provider ranking computed by the

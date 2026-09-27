@@ -66,6 +66,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	var outcomes []TargetOutcome
 	var targets []RegisteredTarget
 	var terr error
+	var gateRefusal *providerGateRefusal
 	if in.Reconcile {
 		if desired.ProviderOnly() {
 			// The provider gate replaces chain processTargets: it stages and
@@ -82,11 +83,24 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 				c.step("provider-gate")
 				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false)
 				outcomes = res.Outcomes
+				gateRefusal = res.Refusal
 				if res.Refusal == nil {
 					next.ProviderOwnership = res.Plan.PublishedOwnership
 					next = c.retireSyntheticPendings(next)
 				} else {
 					next.ProviderOwnership = res.Plan.RefusalOwnership
+				}
+				// Republication-debt bookkeeping mirrors the reconcile
+				// command: ownership movement invalidates an older debt, and
+				// a publishing pass records its own debt before the state
+				// save so a crash before notice publication still converges.
+				if !ownershipMapsEqual(next.ProviderOwnership, observed.ProviderOwnership) {
+					next.PendingProviderNotice = nil
+				}
+				if res.Refusal == nil {
+					if edits := providerEdits(outcomes); len(edits) > 0 {
+						next.PendingProviderNotice = pendingNoticeDebt(next.Revision, edits)
+					}
 				}
 				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
 			}
@@ -116,7 +130,14 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Problem: problem, Targets: outcomes, ProviderAttempts: attemptReports, Error: fmt.Errorf("service: persist quota observations: %w", serr)}
 	}
 	if in.Reconcile {
-		if c.notifyTargets(desired, &next, targets, outcomes) {
+		// The provider-only gate publishes the provider status notice, never
+		// the legacy chain document: a legacy-shaped notice would trigger false
+		// chain-drift warnings in hooked sessions and drop the provider states.
+		if desired.ProviderOnly() {
+			if gateRefusal == nil && c.notifyProviderGate(desired, &next, providerEdits(outcomes)) {
+				_ = c.State.Save(next) // best-effort persist of notice bookkeeping
+			}
+		} else if c.notifyTargets(desired, &next, targets, outcomes) {
 			_ = c.State.Save(next) // best-effort persist of a notice-failure event
 		}
 	}

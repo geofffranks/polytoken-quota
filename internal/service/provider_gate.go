@@ -137,6 +137,19 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 	} else {
 		next.ProviderOwnership = res.Plan.RefusalOwnership
 	}
+	// The republication debt describes the provider states of an earlier
+	// commit; any ownership movement this pass (release, claim, conflict
+	// marker) invalidates it. A publishing pass re-records the debt with its
+	// own committed states BEFORE the state save, so a crash between the save
+	// and the notice publication still converges on a later pass.
+	if !ownershipMapsEqual(next.ProviderOwnership, observed.ProviderOwnership) {
+		next.PendingProviderNotice = nil
+	}
+	if res.Refusal == nil {
+		if edits := providerEdits(res.Outcomes); len(edits) > 0 {
+			next.PendingProviderNotice = pendingNoticeDebt(revision, edits)
+		}
+	}
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, res.Outcomes)
 	c.recordHistoryIfQualified(&next, txReconcile, in, res.Outcomes, targets, desired)
@@ -145,7 +158,7 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: res.Outcomes, Error: err}
 	}
 	if res.Refusal == nil && c.notifyProviderGate(desired, &next, providerEdits(res.Outcomes)) {
-		_ = c.State.Save(next) // best-effort persist of a notice-failure event
+		_ = c.State.Save(next) // best-effort persist of notice bookkeeping
 	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: res.Outcomes}
 }
@@ -556,23 +569,90 @@ func providerDocumentEdits(edits []reconcile.FieldEdit) []document.Edit {
 // global config bytes. present/value describe the key; known is false only
 // when the provider's own block is missing entirely (an enrolled ID the
 // registered global config does not describe — refused, never invented).
+//
+// The read is strict about duplicate keys inside the providers section: the
+// lenient decoder resolves duplicates last-wins, and ownership bookkeeping
+// (claim releases, conflict markers) must never be derived from ambiguous
+// bytes, so any duplicated key under `providers` is a refusal.
 func providerEnabledField(config []byte, id string) (present, value, known bool, err error) {
-	var doc struct {
-		Providers map[string]struct {
-			Enabled *bool `yaml:"enabled"`
-		} `yaml:"providers"`
-	}
-	if err := yaml.Unmarshal(config, &doc); err != nil {
+	var root yaml.Node
+	if err := yaml.Unmarshal(config, &root); err != nil {
 		return false, false, false, fmt.Errorf("service: read registered global providers section: %w", err)
 	}
-	p, ok := doc.Providers[id]
-	if !ok {
+	providers := documentNodeChild(&root, "providers")
+	if providers == nil {
 		return false, false, false, nil
 	}
-	if p.Enabled == nil {
+	if dup := firstDuplicateKey(providers); dup != "" {
+		return false, false, false, fmt.Errorf("service: registered global providers section has duplicate key %q; the field is ambiguous", sanitizeFailure(dup))
+	}
+	var block struct {
+		Enabled *bool `yaml:"enabled"`
+	}
+	entry := documentNodeChild(providers, id)
+	if entry == nil {
+		return false, false, false, nil
+	}
+	if err := entry.Decode(&block); err != nil {
+		return false, false, false, fmt.Errorf("service: read registered global providers section: %w", err)
+	}
+	if block.Enabled == nil {
 		return false, false, true, nil
 	}
-	return true, *p.Enabled, true, nil
+	return true, *block.Enabled, true, nil
+}
+
+// documentNodeChild returns the value node of key in a mapping node, or nil
+// when the document is not a mapping carrying that key. A decoded document
+// node descends into its single content node first.
+func documentNodeChild(n *yaml.Node, key string) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	if n.Kind == yaml.DocumentNode {
+		if len(n.Content) == 0 {
+			return nil
+		}
+		return documentNodeChild(n.Content[0], key)
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		if k != nil && k.Kind == yaml.ScalarNode && k.Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// firstDuplicateKey walks a mapping subtree and returns the first repeated
+// mapping key it finds (yaml.v3 keeps duplicate keys as successive Content
+// pairs), or "" when every mapping in the subtree has unique keys.
+func firstDuplicateKey(n *yaml.Node) string {
+	if n == nil {
+		return ""
+	}
+	if n.Kind == yaml.MappingNode {
+		seen := make(map[string]bool, len(n.Content)/2)
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k := n.Content[i]
+			if k == nil || k.Kind != yaml.ScalarNode {
+				continue
+			}
+			if seen[k.Value] {
+				return k.Value
+			}
+			seen[k.Value] = true
+		}
+	}
+	for _, c := range n.Content {
+		if dup := firstDuplicateKey(c); dup != "" {
+			return dup
+		}
+	}
+	return ""
 }
 
 // providerGateRefusalOutcomes projects a refused evaluation onto every
