@@ -39,7 +39,18 @@ providers:
   team-llm: {}
 global:
   root: /home/user/.config/polytoken
+operational:
+  notice_path: /shared/polytoken-quota/notice.json
 ```
+
+In this mode, provider IDs are the unit of quota gating. During reserve or
+exhausted/disabled quota, reconciliation disables the enrolled provider; when
+quota returns to normal it restores only the exact baseline it previously
+recorded and owned. It does not edit `modelgroups`, tier defaults, model enable
+flags, or facet/subagent assignments, and it cannot promise which remaining
+model Polytoken will serve. Group composition follows Polytoken's observed
+behavior: same-name global leaves precede project leaves, with duplicate leaves
+retained in their authored positions.
 
 ### Provider-only grammar
 
@@ -69,8 +80,8 @@ global:
 | `init --provider-only --preview` | Read-only migration preview (see below). |
 | `status` | Provider-level status with `provider_only: true`; route/chain sections are empty by design and the text view says so. |
 | `check` | Polls enrolled, adapter-configured providers as usual. |
-| `check --reconcile` | Unsupported: provider gating is not implemented and there are no chains to reconcile. Rejected with guidance; run `check` without `--reconcile`. |
-| `reconcile` | Unsupported (same reason). Rejected, never a silent no-op. |
+| `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the safety analyzer and staged validation pass. |
+| `reconcile` | Apply provider-only gating without polling; provider state comes from the latest saved evidence. Supports `--dry-run`, `--keep-staging` (dry-run only), and `--verbose`. |
 | `routing enable/disable/reset` | Unsupported: chain-based routing is legacy behavior and a provider-only policy rejects the `routing` section. |
 | `doctor` | Maintained: policy schema, state, publication/journal, and quota findings work; no chain findings exist. |
 | `history` | Maintained: state history is independent of the policy mode. |
@@ -295,6 +306,23 @@ nothing executes.
 The same JSON document is used for the notice file and as the `stdin` payload
 for every `on_change` action. There is no additional envelope. A representative
 payload is:
+
+Provider-only policies publish a provider status document instead of model or
+route projections:
+
+```json
+{
+  "schema": 1,
+  "revision": 43,
+  "provider_only": true,
+  "providers": [{"id": "codex", "enabled": false}]
+}
+```
+
+It is published only after a committed provider-field change; conflict, failed
+validation, recovery without a new edit, and no-edit reconciliation do not
+produce a change notice. The existing schema-v1 route payload below is retained
+for legacy policies.
 
 ```json
 {

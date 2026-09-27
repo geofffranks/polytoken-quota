@@ -4,7 +4,7 @@
 
 Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires either a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription-window polling. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
-The tool never contacts a running Polytoken daemon from the host; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). It stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
+The tool never contacts a running Polytoken daemon from host commands; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). Provider-only policies are an explicit opt-in: they gate enrolled Polytoken providers without managing groups, defaults, model flags, or facet/subagent assignments, and do not guarantee a particular fallback. The tool stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
 
 ## Minimum versions
 
@@ -104,7 +104,27 @@ Unknown/manual mappings without a supported quota adapter remain managed routing
 
 The `models` list is the ownership boundary: only listed concrete models and the listed target chains/definition fields are managed. Preserve unmanaged Polytoken settings outside those fields. Model entries may be bare names, as shown above, or explicit mappings such as `codex/gpt-5: {enabled: true}`.
 
-See **[docs/configuration.md](docs/configuration.md)** for the complete reference: every quota field (`monthly_budget_usd`, `freshness_ttl`, `balance_group`, `weight`, `schedule`), routing opt-out, and the `operational` knobs, with their defaults.
+See **[docs/configuration.md](docs/configuration.md)** for the complete reference: every quota field (`monthly_budget_usd`, `freshness_ttl`, `balance_group`, `weight`, `schedule`), routing opt-out, provider-only mode, and the `operational` knobs, with their defaults.
+
+#### Provider-only mode for Polytoken model groups
+
+For version-4 configurations built around Polytoken-owned model groups, provider-only mode is an explicit opt-in. It tracks provider IDs and changes only enrolled global `providers.<id>.enabled` fields:
+
+```yaml
+version: 1
+mode: provider-only
+providers:
+  codex:
+    quota:
+      adapter: codex
+  team-llm: {}
+global:
+  root: /home/user/.config/polytoken
+operational:
+  notice_path: /shared/polytoken-quota/notice.json
+```
+
+Reserve and exhausted/disabled quota gate a provider off; recovery restores only the baseline the quota process recorded and still owns. Groups, tier defaults, model enabled flags, and facet/subagent assignments remain operator-owned. Same-name global and project groups have been observed to concatenate global leaves before project leaves while retaining duplicates; this mode does not select or promise a specific remaining model. When migrating from legacy policy, old quota-authored chains and model flags remain in Polytoken as operator-owned edits; review `init --provider-only --preview` and its rollback information before applying. See the [configuration reference](docs/configuration.md#policy-modes-legacy-and-provider-only).
 
 ### Neuralwatt adapter
 
@@ -352,8 +372,8 @@ Offline repository tests verify protocol handling, selection, persistence bounda
 | `select --policy PATH --phase NAME [--difficulty TIER | --min-difficulty TIER] [--exclude-family NAME] [--refresh] [--json]` | Recommend a candidate; automatic mode reads stdin, explicit tier stays local. |
 | `select-eval --policy PATH --fixtures PATH --live [--json]` | Operator-authorized rubric evaluation; never invoked by normal selection or tests. |
 | `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's status/reason, raw per-window quota numbers, next resets, compact target/source route rows with first desired/effective models, and a pending-config warning pointing at `doctor`. `--json` additionally retains ranking fields, route provenance, and complete desired/effective chains. |
-| `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving, emit JSON, or suppress all output (for cron/launchd/systemd). |
-| `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed Polytoken fields toward desired state. Quiet by default: without `--verbose` output is the exit code only (0 success, 1 rejected, 2 pending when applying — a dry-run pending exits 0; usage/flag errors still print to stderr). On a silent non-zero exit, re-run with `--verbose`: applied targets print only their outcome; pending targets print the full sanitized failure — external validation output capped at 256 KiB and always redacted, or the quota-own error chain — plus any retained staging path. Transact-level failures (policy load, target resolution) are persisted nowhere, so `--verbose` is their only diagnostic surface. `--keep-staging` (dry-run only) retains a failed validation candidate for inspection: the candidate moves to a deterministic per-target name (`quota-retain-<target-id>`, replacing any prior retained root) and the path prints only under `--verbose`; the caller owns deleting it (it may contain merged configuration). |
+| `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving (including provider-only gating), emit JSON, or suppress all output (for cron/launchd/systemd). |
+| `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed fields; in provider-only mode gates enrolled providers after safety analysis and staged validation. Quiet by default. `--keep-staging` is dry-run only; retained candidates may contain merged configuration. |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
@@ -476,12 +496,12 @@ Example cron entry (run `crontab -e`):
 
 ## Change propagation to running sessions
 
-Host commands never contact Polytoken daemons. Instead, every reconcile that
-changes managed fields publishes a small tool-neutral notice document (schema
-version, revision, effective chains, changed fields, disabled models) at
-`operational.notice_path` (default `~/.local/polytoken-quota/notice.json`,
-atomically written, never containing credentials). Two delivery mechanisms
-consume it:
+Host commands never contact Polytoken daemons. A committed managed-field change
+publishes a small tool-neutral notice at `operational.notice_path` (default
+`~/.local/polytoken-quota/notice.json`, atomically written and never containing
+credentials). Legacy notices carry route facts; provider-only notices carry
+only provider IDs and enabled status. Two opt-in delivery mechanisms can
+consume the notice:
 
 **In-session convergence (opt-in).** `polytoken-quota install-hook` installs
 two entries into Polytoken's `hooks.json` (backup kept, unrelated entries
@@ -489,18 +509,17 @@ untouched, `--remove` to uninstall, `--dry-run` to preview). The handler is
 the `notice-hook` subcommand, which acts only on its **own** session's daemon
 via the documented loopback API with that session's own credential:
 
-- After each model turn, a session whose notice revision is newer than its
-  consumed marker reloads its daemon's configuration. Reloads are
-  turn-safe (a busy turn defers to the next one), preserve history, and
-  never restart or compact the session. A model whose provider was disabled
-  falls back to the configured chain head; routine quota rebalancing only
-  reorders chains and never forces a switch.
-- When you submit a prompt, a session running a model that dropped out of
-  its configured chain receives one non-blocking reminder per revision —
-  actionable if the model is disabled, informational if you deliberately
-  picked a model outside the chain. A reload-forced model change is reported
-  once (context on the new provider starts uncached). Switching models
-  always remains your choice; nothing compacts or swaps a session.
+- After a model turn, a session with a newer shared notice reloads only its
+  own daemon. A busy-turn `409` leaves the consumed marker unchanged, so a later
+  hook event can retry; the marker advances only after a successful `200`.
+  Reloading does not restart or compact the session. Prompt hooks accept without
+  blocking and provider-only notices do not claim a particular model change or
+  fallback.
+- Provider-only notices report the provider IDs and enabled status involved in
+  the committed change. They do not identify a serving model, assert a forced
+  switch, or guarantee which group leaf Polytoken will choose. The pinned
+  synthetic contract suite proves successful next-turn continuation for its
+  covered routes; this is not a promise for every configuration or provider.
 
 Because agent containers each run their own loopback-only daemon, the notice
 path must be visible inside them: bind-mount `~/.local/polytoken-quota` at
@@ -515,7 +534,7 @@ absolute executables on the host after a committed change, with the notice
 JSON on stdin — the generic hook for reconfiguring other CLIs or notifying
 yourself. Failures are recorded as events and never affect reconciliation.
 
-Changing quota policy or enabling routing may change the choices seen by
-existing Polytoken sessions; with the hook installed those sessions converge
-on their own, and the drift reminders keep you informed without forcing
-costly model swaps.
+Changing provider availability may affect which configured group leaves are
+usable. An installed hook asks each session's own daemon to reload after a turn;
+it does not issue a model-selection request or block a prompt. Provider-only
+mode does not promise a particular fallback or surface a drift reminder.

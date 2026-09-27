@@ -146,10 +146,11 @@ func newGateFixture(t *testing.T, enrolled, projects []string) *gateFixture {
 	f.store = state.Store{Path: f.statePath, Now: f.clock.Now, RecoveredRetention: 24 * time.Hour}
 
 	f.desired = policy.Desired{
-		Version:   1,
-		Mode:      policy.ModeProviderOnly,
-		Providers: map[policy.MappingID]policy.Mapping{},
-		Global:    policy.Target{ID: "global", Root: f.globalRoot, Global: true},
+		Version:     1,
+		Mode:        policy.ModeProviderOnly,
+		Providers:   map[policy.MappingID]policy.Mapping{},
+		Global:      policy.Target{ID: "global", Root: f.globalRoot, Global: true},
+		Operational: policy.Operational{NoticePath: filepath.Join(f.base, "notice", "notice.json")},
 	}
 	for _, id := range enrolled {
 		f.desired.Providers[policy.MappingID(id)] = policy.Mapping{}
@@ -452,6 +453,18 @@ func TestProviderGateReserveDisabledAndNormalBaseline(t *testing.T) {
 			if f.journalExists() {
 				t.Fatal("journal left behind after a committed publish")
 			}
+			noticePath := f.desired.Operational.NoticePath
+			_, noticeErr := os.Stat(noticePath)
+			wantNotice := len(providerEdits(out.Targets)) > 0
+			if wantNotice != (noticeErr == nil) {
+				t.Fatalf("provider notice exists=%v want=%v (err=%v)", noticeErr == nil, wantNotice, noticeErr)
+			}
+			if wantNotice {
+				body, err := os.ReadFile(noticePath)
+				if err != nil || !strings.Contains(string(body), `"provider_only":true`) || strings.Contains(string(body), `"targets"`) {
+					t.Fatalf("provider notice has incorrect shape: %s (err=%v)", body, err)
+				}
+			}
 		})
 	}
 }
@@ -609,6 +622,9 @@ func TestProviderGateNoEditOnUnsafeCandidate(t *testing.T) {
 	}
 	if f.journalExists() {
 		t.Fatal("journal written for a refused publication")
+	}
+	if _, err := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(err) {
+		t.Fatalf("unsafe candidate emitted a provider notice: %v", err)
 	}
 	f.requireNoPendingEdit(t, f.loadState())
 }

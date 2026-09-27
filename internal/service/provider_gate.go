@@ -144,8 +144,9 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 	if err := c.State.Save(next); err != nil {
 		return Outcome{Accepted: false, DurabilityFailure: true, Revision: next.Revision, Targets: res.Outcomes, Error: err}
 	}
-	// Notice publication and post-commit on_change execution are the provider
-	// notice slice's surface; gating records proven state and stops there.
+	if res.Refusal == nil && c.notifyProviderGate(desired, &next, providerEdits(res.Outcomes)) {
+		_ = c.State.Save(next) // best-effort persist of a notice-failure event
+	}
 	return Outcome{Accepted: true, Revision: next.Revision, Targets: res.Outcomes}
 }
 
