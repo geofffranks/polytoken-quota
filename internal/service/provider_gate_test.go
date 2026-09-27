@@ -1217,6 +1217,44 @@ func TestProviderGateDropsDebtForDeEnrolledProvider(t *testing.T) {
 	}
 }
 
+func TestProviderNoticeDebtSurvivesUnrelatedPlanningError(t *testing.T) {
+	for _, checkReconcile := range []bool{false, true} {
+		name := "reconcile"
+		if checkReconcile {
+			name = "check --reconcile"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newGateFixture(t, []string{"gp", "pp"}, nil)
+			config := globalConfigWith(map[string]string{"gp": "false"}) + "\n"
+			// A duplicate key in pp makes planning fail after gp was read.
+			config = strings.Replace(config, "    enabled: true\n  zz:\n", "    enabled: true\n    enabled: false\n  zz:\n", 1)
+			f.writeGlobalConfig(config)
+			f.seedState(7, map[string]state.ProviderState{}, nil)
+			st := f.loadState()
+			want := &state.PendingProviderNotice{Revision: 6, Providers: []state.ProviderNoticeState{{ID: "gp", Enabled: false}}}
+			st.PendingProviderNotice = want
+			if err := f.store.Save(st); err != nil {
+				t.Fatal(err)
+			}
+
+			var out Outcome
+			if checkReconcile {
+				coord := f.coordinator()
+				coord.QuotaPoller = &fakePoller{results: map[string]quota.QuotaSnapshot{}}
+				out = coord.QuotaCheck(context.Background(), "", true)
+			} else {
+				out = f.coordinator().Reconcile(context.Background(), false, false, false)
+			}
+			if out.PendingCount() == 0 {
+				t.Fatalf("out=%+v want refusal with pending target", out)
+			}
+			if got := f.loadState().PendingProviderNotice; !reflect.DeepEqual(got, want) {
+				t.Fatalf("planning refusal changed debt: got %+v want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestProviderEnabledFieldStrictDuplicateKeys(t *testing.T) {
 	cases := []struct {
 		name        string

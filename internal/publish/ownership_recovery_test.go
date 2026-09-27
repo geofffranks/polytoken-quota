@@ -144,6 +144,81 @@ func TestProviderOwnershipLegacyJournalKeepsPriorMetadata(t *testing.T) {
 	}
 }
 
+func TestProviderNoticeJournalRecoverySemantics(t *testing.T) {
+	prior := &state.PendingProviderNotice{Revision: 4, Providers: []state.ProviderNoticeState{{ID: "prior", Enabled: true}}}
+	intended := &state.PendingProviderNotice{Revision: 5, Providers: []state.ProviderNoticeState{{ID: "next", Enabled: false}}}
+	for _, tc := range []struct {
+		name          string
+		set           bool
+		intended      *state.PendingProviderNotice
+		legacy        bool
+		fault         string
+		want          *state.PendingProviderNotice
+	}{
+		{name: "roll-forward adopts debt", set: true, intended: intended, fault: "state-fsync", want: intended},
+		{name: "explicit set nil clears debt", set: true, fault: "state-fsync"},
+		{name: "restore keeps prior debt", set: true, intended: intended, fault: "rename", want: prior},
+		{name: "legacy journal keeps prior debt", legacy: true, want: prior},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := faultEnv(t, tc.fault)
+			env.Prior.PendingProviderNotice = prior
+			env.Tx.Prior = env.Prior
+			env.Tx.Next.PendingProviderNotice = tc.intended
+			env.Tx.ProviderNoticeSet = tc.set
+			env.Tx.ProviderNotice = tc.intended
+			if tc.legacy {
+				j := Journal{
+					Schema: JournalSchema, PriorRevision: env.Prior.Revision,
+					NextRevision: env.Tx.Next.Revision, TargetID: env.Tx.TargetID,
+					Intended: intendedOutcome(env.Tx), Replacements: cloneReplacements(env.Tx.Replacements),
+				}
+				if err := writeJournal(env.Publisher.fs(), env.Publisher.JournalPath, j, nil); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(env.LivePath, []byte(constCandidate), env.Tx.Replacements[0].Mode.Perm()); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := env.Publisher.Apply(context.Background(), env.Tx); err == nil {
+				t.Fatal("expected injected publication failure")
+			}
+			env.rewiredForRecover()
+			final, report, err := env.Publisher.Recover(context.Background(), env.Prior)
+			if err != nil {
+				t.Fatalf("recover: %v", err)
+			}
+			wantAction := ActionRollForward
+			if tc.fault == "rename" {
+				wantAction = ActionRestore
+			}
+			if report.Action != wantAction {
+				t.Fatalf("action=%s want %s", report.Action, wantAction)
+			}
+			if !equalProviderNotice(final.PendingProviderNotice, tc.want) {
+				t.Fatalf("recovered debt=%+v want %+v", final.PendingProviderNotice, tc.want)
+			}
+			if got := env.committedState(t).PendingProviderNotice; !equalProviderNotice(got, tc.want) {
+				t.Fatalf("committed debt=%+v want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func equalProviderNotice(a, b *state.PendingProviderNotice) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Revision != b.Revision || len(a.Providers) != len(b.Providers) {
+		return false
+	}
+	for i := range a.Providers {
+		if a.Providers[i] != b.Providers[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestProviderOwnershipRecoveryRefusesExternalLiveBytes is the non-clobber
 // safeguard: after an interrupted apply, live bytes matching neither the
 // journal's old nor new hash must never be overwritten. Recovery refuses,

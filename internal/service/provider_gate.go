@@ -454,9 +454,11 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 	for _, id := range ids {
 		present, value, known, err := providerEnabledField(globalConfig, id)
 		if err != nil {
+			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
 			return plan, err
 		}
 		if !known {
+			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
 			return plan, fmt.Errorf("service: enrolled provider %q is absent from the registered global configuration", sanitizeFailure(id))
 		}
 		plan.Enabled[id] = !present || value
