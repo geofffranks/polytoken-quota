@@ -32,6 +32,22 @@ package contract
 //     invalid (no full-class default) is rejected wholesale and the session
 //     keeps the stale active model — validation passing is NOT the proof;
 //     the proof is the observed route change and the post-reload turn.
+//   - same-name layering at the routing/turn level with a provider-level
+//     disable: with every provider enabled the concatenated catalog keeps the
+//     duplicate leaf at both positions and the group-pinned turn executes on
+//     the global head; disabling the provider that owns BOTH global leaves
+//     (`providers.<id>.enabled: false`) keeps the required full-tier default
+//     valid, the successful idle reload drops every disabled-provider leaf —
+//     including the duplicate project-position copy — and the next turn
+//     executes on the project-only provider's leaf with history preserved;
+//   - a table-driven matrix proves the same reload continuity for the four
+//     remaining selection channels — ordinary default route (no explicit
+//     selection), a group-pinned facet, a concrete facet pin, and a manual
+//     selection: in each case disabling the provider that owns the selected
+//     model reloads successfully (failed list empty) and the next turn runs
+//     with no manual reselect. The serving model is proven from the recorded
+//     provider request and the session history, never from /state alone, and
+//     the pre-reload reply survives in history alongside the new one.
 //
 // Isolation: every case runs with HOME/XDG pointed at a fresh temp root, a
 // neutral working directory containing no `.polytoken`, and the only HTTP
@@ -865,6 +881,390 @@ func TestFacetPinConcreteModel(t *testing.T) {
 	d.driveTurn(t, stub, "hi", "stub-reply-model=m2")
 	if req := stub.lastRequest(t); req.Model != "m2" {
 		t.Fatalf("facet-pinned turn executed on model %q, want m2", req.Model)
+	}
+}
+
+// --- same-name layers with a provider-level disable ----------------------------
+
+// feasLayeredGlobalConfig renders the global layer for the same-name layering
+// probe. Provider gp owns both global failover leaves; provider pp owns the
+// tier-default models, so disabling gp via providers.gp.enabled keeps the
+// required full-tier default valid.
+func feasLayeredGlobalConfig(stubURL string, providers map[string]bool) string {
+	return fmt.Sprintf(`version: 4
+providers:
+  gp:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+  pp:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+models:
+%s%s%s%smodelgroups:
+  failover:
+    - gp/g1
+    - gp/g3
+  polytoken:default_model_full: pp/p2
+  polytoken:default_model_mini: pp/p4
+`, stubURL, providers["gp"], stubURL, providers["pp"],
+		feasModelYAML("gp/g1", "gp", "g1", "full", true),
+		feasModelYAML("gp/g3", "gp", "g3", "full", true),
+		feasModelYAML("pp/p2", "pp", "p2", "full", true),
+		feasModelYAML("pp/p4", "pp", "p4", "mini", true))
+}
+
+// feasLayeredProjectConfig renders the same-name project-layer failover group:
+// its first leaf duplicates the global head leaf and its second leaf is the
+// project-only provider's model.
+func feasLayeredProjectConfig() string {
+	return `version: 4
+modelgroups:
+  failover:
+    - gp/g1
+    - pp/p2
+`
+}
+
+// TestModelGroupsProviderDisableAcrossSameNameLayers pins the same-name
+// global-first concatenation at the routing/turn level when the provider
+// owning BOTH global leaves is disabled via providers.<id>.enabled: false.
+// With every provider enabled the duplicate gp/g1 leaf is preserved at both
+// concatenated positions and the pinned group's turn executes on the global
+// head; after the successful idle reload the only servable leaf is the
+// project-only provider's model, the required full-tier default (pp/p2) keeps
+// the config valid throughout, and the pre-reload history survives.
+func TestModelGroupsProviderDisableAcrossSameNameLayers(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("POLYTOKEN_CONTRACT_BIN / POLYTOKEN_BIN not set; opt-in suite")
+	}
+	requireDaemonCapabilities(t, bin)
+
+	stub := newStubProvider(t)
+	work := t.TempDir()
+	proj := filepath.Join(work, "proj", ".polytoken")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "config.yaml"), []byte(feasLayeredProjectConfig()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := spawnFeasibilityDaemon(t, work, feasLayeredGlobalConfig(stub.URL, map[string]bool{"gp": true, "pp": true}))
+
+	// All-enabled catalog: global leaves first, project leaves appended, and
+	// the shared gp/g1 duplicate preserved at both concatenated positions.
+	s := d.feasState(t)
+	if got := groupCandidates(t, s, "failover"); !equalStrings(got, []string{"gp/g1", "gp/g3", "gp/g1", "pp/p2"}) {
+		t.Fatalf("all-enabled same-name catalog = %v, want duplicate positions preserved [gp/g1 gp/g3 gp/g1 pp/p2]", got)
+	}
+	if got := groupCandidates(t, s, "polytoken:general-purpose"); !equalStrings(got, []string{"pp/p2"}) {
+		t.Fatalf("full-tier reserved group = %v, want the required default pp/p2", got)
+	}
+
+	// Routing/turn level, part 1: with everything enabled the pinned group's
+	// first available leaf is the global head — the provider request carries
+	// the global provider's wire name.
+	d.selectModel(t, "mg:failover")
+	if s = d.feasState(t); s["active_model"] != "gp/g1" {
+		t.Fatalf("after group pin active = %v, want global head gp/g1", s["active_model"])
+	}
+	d.driveTurn(t, stub, "layered first turn", "stub-reply-model=g1")
+	if req := stub.lastRequest(t); req.Model != "g1" {
+		t.Fatalf("all-enabled turn executed on %q, want global head leaf g1", req.Model)
+	}
+
+	// Disable the provider owning both global leaves. The required full-tier
+	// default pp/p2 stays valid, so the idle reload must succeed outright.
+	if err := os.WriteFile(filepath.Join(work, "isohome", ".config", "polytoken", "config.yaml"),
+		[]byte(feasLayeredGlobalConfig(stub.URL, map[string]bool{"gp": false, "pp": true})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.reloadIdle(t)
+
+	// Catalog after the reload: every gp leaf drops — including the duplicate
+	// project-position gp/g1 copy — leaving exactly the project-only leaf.
+	s = d.feasState(t)
+	if got := groupCandidates(t, s, "failover"); !equalStrings(got, []string{"pp/p2"}) {
+		t.Fatalf("post-disable same-name catalog = %v, want [pp/p2]", got)
+	}
+	if got := groupCandidates(t, s, "polytoken:general-purpose"); !equalStrings(got, []string{"pp/p2"}) {
+		t.Fatalf("post-disable full-tier reserved group = %v, want the still-valid default pp/p2", got)
+	}
+	if s["active_model"] != "pp/p2" {
+		t.Fatalf("post-reload active = %v, want the only available leaf pp/p2", s["active_model"])
+	}
+	snap := d.routingSnapshot(t)
+	route, _ := snap["route"].(map[string]any)
+	target, _ := route["target"].(map[string]any)
+	if target["kind"] != "group" || target["group"] != "failover" {
+		t.Fatalf("post-reload routing target = %v, want kind=group group=failover", target)
+	}
+	if reason, _ := snap["transition_reason"].(string); reason != "reload_reconciliation" {
+		t.Fatalf("post-reload transition_reason = %v, want reload_reconciliation", snap["transition_reason"])
+	}
+
+	// Routing/turn level, part 2: the next turn (no manual reselect) executes
+	// on the project-only provider's leaf, and the pre-reload history is
+	// preserved alongside the new reply.
+	d.driveTurn(t, stub, "layered second turn", "stub-reply-model=p2")
+	if req := stub.lastRequest(t); req.Model != "p2" {
+		t.Fatalf("post-disable turn executed on %q, want project-only provider leaf p2", req.Model)
+	}
+	if req := stub.lastRequest(t); req.AuthHeader != "" {
+		t.Fatalf("no_auth provider request carried Authorization: %q", req.AuthHeader)
+	}
+	_, hb := d.do(t, http.MethodGet, "/history", "")
+	if !strings.Contains(string(hb), "stub-reply-model=g1") || !strings.Contains(string(hb), "stub-reply-model=p2") {
+		t.Fatalf("history after reload+turn lost a reply; want both g1 and p2 replies, got %.1200s", hb)
+	}
+}
+
+// --- reload-continuity matrix across selection channels -------------------------
+
+// feasMatrixConfig renders the two-provider fixture for the reload-continuity
+// matrix. The selected model always lives on provider stub; provider alt owns
+// the surviving leaves, and the full-tier default references the failover
+// group, so disabling stub keeps every tier default valid.
+func feasMatrixConfig(stubURL string, providers map[string]bool) string {
+	return fmt.Sprintf(`version: 4
+providers:
+  stub:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+  alt:
+    kind:
+      type: custom_open_ai_compatible
+    url: %s
+    auth:
+      type: no_auth
+    enabled: %t
+models:
+%s%s%s%smodelgroups:
+  failover:
+    - stub/m1
+    - alt/a1
+  polytoken:default_model_full: mg:failover
+  polytoken:default_model_mini: alt/a2
+`, stubURL, providers["stub"], stubURL, providers["alt"],
+		feasModelYAML("stub/m1", "stub", "m1", "full", true),
+		feasModelYAML("stub/m2", "stub", "m2", "mini", true),
+		feasModelYAML("alt/a1", "alt", "a1", "full", true),
+		feasModelYAML("alt/a2", "alt", "a2", "mini", true))
+}
+
+// writeMatrixFacet writes one synthetic facet whose polytoken.model pin is ref
+// and returns the facets directory for --facets-dir.
+func writeMatrixFacet(t *testing.T, work, name, ref string) string {
+	t.Helper()
+	facets := filepath.Join(work, "facets")
+	if err := os.MkdirAll(facets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	facetYAML := fmt.Sprintf("---\nname: %s\ndescription: synthetic %s facet\npolytoken:\n  model: %s\n---\n\n%s body.\n", name, name, ref, name)
+	if err := os.WriteFile(filepath.Join(facets, name+".md"), []byte(facetYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return facets
+}
+
+// assertDegradedReminder requires the post-reload model-group degradation
+// reminder in session history — the concrete-pin channels' observed history
+// evidence of the reload, since they record neither a routing snapshot nor a
+// selection switch when the daemon re-resolves the lost model.
+func assertDegradedReminder(t *testing.T, d *feasDaemon) {
+	t.Helper()
+	_, body := d.do(t, http.MethodGet, "/history", "")
+	var h struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(body, &h); err != nil {
+		t.Fatalf("decode /history: %v", err)
+	}
+	for _, it := range h.Items {
+		if it["type"] == "system_reminder" {
+			if reason, _ := it["reason"].(map[string]any); reason["type"] == "model_group_degraded" {
+				return
+			}
+		}
+	}
+	t.Fatalf("no model_group_degraded system reminder in history after reload; %.1200s", body)
+}
+
+// TestReloadContinuityDisablingSelectedProviderMatrix proves, for each
+// remaining selection channel, that a successful idle reload after disabling
+// the provider owning the selected model (providers.stub.enabled: false)
+// continues the session automatically on the next turn: ordinary default route
+// with no explicit selection, a group-pinned facet, a concrete facet pin, and
+// a manual selection. (The manually selected group case is already pinned by
+// TestDisposableDaemonActiveModelTurnsAndReloadContinuity.) Every case drives
+// the daemon against the in-process no-auth SSE stub and proves the serving
+// model from the recorded provider request and the session history — never
+// from /state alone — and requires the pre-reload reply to survive in history.
+// Observed history evidence differs by channel: group-shaped routes record a
+// model_routing_v1 snapshot with transition reason reload_reconciliation,
+// while concrete-pin channels re-resolve silently and surface a
+// model_group_degraded reminder instead.
+func TestReloadContinuityDisablingSelectedProviderMatrix(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("POLYTOKEN_CONTRACT_BIN / POLYTOKEN_BIN not set; opt-in suite")
+	}
+	requireDaemonCapabilities(t, bin)
+
+	cases := []struct {
+		name                string
+		facetModel          string   // non-empty: spawn with a facet pinning this reference
+		manualSelection     string   // non-empty: POST /model this reference before the disable
+		wantInitialModel    string   // active model the setup must produce
+		wantInitialServe    string   // provider wire name the first turn's request must carry
+		wantRoutingSnapshot bool     // group-shaped routes record a model_routing_v1 snapshot
+		wantAfterOneOf      []string // wire names the post-reload turn may serve
+	}{
+		{
+			name:                "default-route-no-explicit-selection",
+			wantInitialModel:    "stub/m1",
+			wantInitialServe:    "m1",
+			wantRoutingSnapshot: true,
+			wantAfterOneOf:      []string{"a1"},
+		},
+		{
+			name:                "group-pinned-facet",
+			facetModel:          "mg:failover",
+			wantInitialModel:    "stub/m1",
+			wantInitialServe:    "m1",
+			wantRoutingSnapshot: true,
+			wantAfterOneOf:      []string{"a1"},
+		},
+		{
+			name:             "concrete-facet-pin",
+			facetModel:       "stub/m2",
+			wantInitialModel: "stub/m2",
+			wantInitialServe: "m2",
+			// Observed re-resolution lands on the full-tier default group's
+			// remaining leaf (the lost pin's mini class does not steer the
+			// re-route to the mini default).
+			wantAfterOneOf: []string{"a1"},
+		},
+		{
+			name:             "manual-concrete-selection",
+			manualSelection:  "stub/m2",
+			wantInitialModel: "stub/m2",
+			wantInitialServe: "m2",
+			wantAfterOneOf:   []string{"a1"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStubProvider(t)
+			work := t.TempDir()
+			var args []string
+			if tc.facetModel != "" {
+				facets := writeMatrixFacet(t, work, "pinned", tc.facetModel)
+				args = append(args, "--facets-dir", facets, "--facet", "pinned")
+			}
+			d := spawnFeasibilityDaemon(t, work, feasMatrixConfig(stub.URL, map[string]bool{"stub": true, "alt": true}), args...)
+			if tc.manualSelection != "" {
+				d.selectModel(t, tc.manualSelection)
+			}
+
+			// Setup sanity on /state, then prove the selected model actually
+			// serves: the provider request carries its wire name and the reply
+			// lands in history.
+			if s := d.feasState(t); s["active_model"] != tc.wantInitialModel {
+				t.Fatalf("initial active = %v, want %s", s["active_model"], tc.wantInitialModel)
+			}
+			d.driveTurn(t, stub, "matrix first turn "+tc.name, "stub-reply-model="+tc.wantInitialServe)
+			if req := stub.lastRequest(t); req.Model != tc.wantInitialServe {
+				t.Fatalf("initial turn served %q, want %q", req.Model, tc.wantInitialServe)
+			}
+
+			// Disable the provider owning the selected model; alt stays up and
+			// the tier defaults keep the config valid, so the idle reload must
+			// succeed outright (reloadIdle requires HTTP 200, not queued, and
+			// an empty failed list).
+			if err := os.WriteFile(filepath.Join(work, "isohome", ".config", "polytoken", "config.yaml"),
+				[]byte(feasMatrixConfig(stub.URL, map[string]bool{"stub": false, "alt": true})), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.reloadIdle(t)
+
+			s := d.feasState(t)
+			if s["active_model"] == tc.wantInitialModel {
+				t.Fatalf("successful reload left the selected model active: %v", s["active_model"])
+			}
+			if got := groupCandidates(t, s, "failover"); !equalStrings(got, []string{"alt/a1"}) {
+				t.Fatalf("post-disable failover catalog = %v, want [alt/a1]", got)
+			}
+			// Group-shaped routes record a model_routing_v1 snapshot with the
+			// reload transition. Concrete-pin channels record neither a
+			// snapshot nor a switch on re-resolution; their observed reload
+			// evidence in history is the model-group degradation reminder.
+			if tc.wantRoutingSnapshot {
+				snap := d.routingSnapshot(t)
+				if reason, _ := snap["transition_reason"].(string); reason != "reload_reconciliation" {
+					t.Fatalf("post-reload transition_reason = %v, want reload_reconciliation", snap["transition_reason"])
+				}
+			} else {
+				assertDegradedReminder(t, d)
+			}
+
+			// Continuity: the next turn runs with no manual reselect. The stub
+			// request — not /state — proves which model served, the disabled
+			// provider's models never serve, and the reply lands in history.
+			before := stub.requestCount()
+			if code, body := d.do(t, http.MethodPost, "/prompt", fmt.Sprintf(`{"content":"matrix second turn %s"}`, tc.name)); code != http.StatusAccepted {
+				t.Fatalf("POST /prompt = %d: %s", code, body)
+			}
+			var req stubProviderReq
+			deadline := time.Now().Add(30 * time.Second)
+			for {
+				if now := stub.requestCount(); now > before {
+					req = stub.lastRequest(t)
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("no provider request within 30s after reload (initial active was %q)", tc.wantInitialModel)
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if req.Model == "m1" || req.Model == "m2" {
+				t.Fatalf("disabled provider stub served the post-reload turn: %q", req.Model)
+			}
+			allowed := false
+			for _, a := range tc.wantAfterOneOf {
+				if req.Model == a {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				t.Fatalf("post-reload turn served %q, want one of %v", req.Model, tc.wantAfterOneOf)
+			}
+			if req.AuthHeader != "" {
+				t.Fatalf("no_auth provider request carried Authorization: %q", req.AuthHeader)
+			}
+			driveWaitHistory(t, d, "stub-reply-model="+req.Model)
+
+			// History preservation: the first turn's reply survives alongside
+			// the post-reload reply.
+			_, hb := d.do(t, http.MethodGet, "/history", "")
+			if !strings.Contains(string(hb), "stub-reply-model="+tc.wantInitialServe) {
+				t.Fatalf("history after reload lost the first turn's reply, got %.1200s", hb)
+			}
+		})
 	}
 }
 
