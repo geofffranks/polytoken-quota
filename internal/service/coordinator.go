@@ -435,11 +435,12 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 		return Outcome{Accepted: false, Error: err}
 	}
 	if desired.ProviderOnly() {
-		// Provider gating is not part of this slice and a provider-only policy
-		// carries no chains to project: an explicit rejection, never a silent
-		// no-op.
-		return Outcome{Accepted: false, Error: providerOnlyUnsupported("reconcile",
-			"provider gating is not implemented and a provider-only policy has no managed chains to reconcile; no changes were made")}
+		// Provider gating is the maintained provider-only reconcile: the
+		// dedicated gate path derives per-provider actions from the observed
+		// quota state, evaluates the combined changes safely, and publishes at
+		// most one global journal transaction. Legacy chain projection stays
+		// on the processTargets path below.
+		return c.transactProviderGateReconcile(ctx, recovered, in, desired)
 	}
 	c.step("load-state")
 	observed := recovered

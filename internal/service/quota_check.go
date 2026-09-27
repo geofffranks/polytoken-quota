@@ -39,14 +39,11 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
-	if in.Reconcile && desired.ProviderOnly() {
-		// Polling quota is a maintained provider-only function; the reconcile
-		// half is chain projection plus (not-yet-implemented) provider gating.
-		// Reject the combined invocation explicitly rather than polling and
-		// silently skipping the reconciliation the operator asked for.
-		return Outcome{Accepted: false, Error: providerOnlyUnsupported("check --reconcile",
-			"provider gating is not implemented; run check without --reconcile to poll quota only")}
-	}
+	// Provider-only policy: polling quota is a maintained provider-only
+	// function, and with --reconcile the provider gate (not chain
+	// processTargets) performs the automatic reserve/disabled → off and
+	// normal → baseline transitions against the freshly observed state.
+
 	c.step("load-state")
 	observed := recovered
 
@@ -70,22 +67,48 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 	var targets []RegisteredTarget
 	var terr error
 	if in.Reconcile {
-		c.step("load-sources")
-		targets, terr = c.Targets.ResolveTargets(desired)
-		if terr != nil {
-			// Target resolution failed, but the observations are still accepted:
-			// record the resolution as a pending target outcome and persist the
-			// observations (mirrors the transactManual resolution-failure path).
-			next = c.retireSyntheticPendings(next)
-			pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
-			outcomes = []TargetOutcome{pending}
+		if desired.ProviderOnly() {
+			// The provider gate replaces chain processTargets: it stages and
+			// validates the composed candidate on every registered root and
+			// commits at most one global journal transaction carrying the next
+			// ownership state. Observations stay independent of a refusal.
+			c.step("load-sources")
+			targets, terr = c.Targets.ResolveTargets(desired)
+			if terr != nil {
+				next = c.retireSyntheticPendings(next)
+				pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
+				outcomes = []TargetOutcome{pending}
+			} else {
+				c.step("provider-gate")
+				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false)
+				outcomes = res.Outcomes
+				if res.Refusal == nil {
+					next.ProviderOwnership = res.Plan.PublishedOwnership
+					next = c.retireSyntheticPendings(next)
+				} else {
+					next.ProviderOwnership = res.Plan.RefusalOwnership
+				}
+				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			}
+			next = c.recordTargetOutcomes(next, outcomes)
 		} else {
-			outcomes = c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
-			next = c.retireSyntheticPendings(next)
-			appendRoutingChangeEvents(&next, desired, outcomes, c.now())
-			c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			c.step("load-sources")
+			targets, terr = c.Targets.ResolveTargets(desired)
+			if terr != nil {
+				// Target resolution failed, but the observations are still accepted:
+				// record the resolution as a pending target outcome and persist the
+				// observations (mirrors the transactManual resolution-failure path).
+				next = c.retireSyntheticPendings(next)
+				pending := pendingOutcome(pendingTargetQuotaCheck, next.Revision, "resolve_targets", terr)
+				outcomes = []TargetOutcome{pending}
+			} else {
+				outcomes = c.processTargets(ctx, desired, observed, next, targets, true, in.Verbose)
+				next = c.retireSyntheticPendings(next)
+				appendRoutingChangeEvents(&next, desired, outcomes, c.now())
+				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
+			}
+			next = c.recordTargetOutcomes(next, outcomes)
 		}
-		next = c.recordTargetOutcomes(next, outcomes)
 	}
 
 	c.step("save-state")

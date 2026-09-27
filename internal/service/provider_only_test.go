@@ -39,39 +39,48 @@ func withProviderOnlyPolicy(spy *coordinatorSpy) *coordinatorSpy {
 // TestProviderOnlyCommandCompatibilityMatrix pins the per-command
 // provider-only contract: chain-dependent selection/projection returns a clear
 // unsupported result wrapping ErrProviderOnlyUnsupported (never a silent
-// no-op), while provider-level functions keep working.
+// no-op), while provider-level functions — including the reconcile gate and
+// check --reconcile — keep working.
 func TestProviderOnlyCommandCompatibilityMatrix(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("reconcile apply rejected", func(t *testing.T) {
+	t.Run("reconcile apply runs the provider gate", func(t *testing.T) {
 		out := withProviderOnlyPolicy(newCoordinatorSpy()).Coordinator.Reconcile(ctx, false, false, false)
-		if out.Accepted {
-			t.Fatal("reconcile accepted under a provider-only policy")
+		if !out.Accepted {
+			t.Fatalf("reconcile rejected under a provider-only policy: %v", out.Error)
 		}
-		if !errors.Is(out.Error, ErrProviderOnlyUnsupported) {
-			t.Fatalf("err=%v want ErrProviderOnlyUnsupported", out.Error)
+		if errors.Is(out.Error, ErrProviderOnlyUnsupported) {
+			t.Fatalf("reconcile is unsupported: %v", out.Error)
+		}
+		// The spy registers no global target, so the gate records a clear
+		// pending reason instead of a silent no-op.
+		if out.PendingCount() != 1 || out.Targets[0].Pending == nil ||
+			!strings.Contains(out.Targets[0].Pending.Summary, "registered global target") {
+			t.Fatalf("out=%+v want one pending naming the missing registered global target", out)
 		}
 	})
 
-	t.Run("reconcile dry-run rejected", func(t *testing.T) {
+	t.Run("reconcile dry-run runs the provider gate", func(t *testing.T) {
 		out := withProviderOnlyPolicy(newCoordinatorSpy()).Coordinator.Reconcile(ctx, true, false, false)
-		if out.Accepted {
-			t.Fatal("reconcile dry-run accepted under a provider-only policy")
+		if !out.Accepted || errors.Is(out.Error, ErrProviderOnlyUnsupported) {
+			t.Fatalf("out=%+v err=%v want accepted gate evaluation", out, out.Error)
 		}
-		if !errors.Is(out.Error, ErrProviderOnlyUnsupported) {
-			t.Fatalf("err=%v want ErrProviderOnlyUnsupported", out.Error)
+		if out.PendingCount() != 1 {
+			t.Fatalf("out=%+v want the gate refusal surfaced as pending", out)
 		}
 	})
 
-	t.Run("check with reconcile rejected", func(t *testing.T) {
+	t.Run("check with reconcile runs the provider gate", func(t *testing.T) {
 		spy := withProviderOnlyPolicy(newCoordinatorSpy())
-		spy.Coordinator.QuotaPoller = &fakePoller{results: map[string]quota.QuotaSnapshot{}}
+		spy.Coordinator.QuotaPoller = &fakePoller{results: map[string]quota.QuotaSnapshot{
+			"codex": {MappingID: "codex", Status: quota.SourceFresh, CheckedAt: spy.Coordinator.now()},
+		}}
 		out := spy.Coordinator.QuotaCheck(ctx, "", true)
-		if out.Accepted {
-			t.Fatal("check --reconcile accepted under a provider-only policy")
+		if !out.Accepted || errors.Is(out.Error, ErrProviderOnlyUnsupported) {
+			t.Fatalf("out=%+v err=%v want accepted poll+gate check", out, out.Error)
 		}
-		if !errors.Is(out.Error, ErrProviderOnlyUnsupported) {
-			t.Fatalf("err=%v want ErrProviderOnlyUnsupported", out.Error)
+		if out.PendingCount() != 1 {
+			t.Fatalf("out=%+v want the gate refusal surfaced as pending", out)
 		}
 	})
 
