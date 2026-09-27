@@ -15,8 +15,8 @@ package contract
 //   - mixed defaults: explicit `polytoken:default_model_full` /
 //     `polytoken:default_model_mini` tier pins load, and the unset nano tier
 //     resolves through the mini tier (published in the daemon group catalog);
-//   - global/project shadowing for groups is reversed: the user/global
-//     definition replaces the project definition wholesale;
+//   - same-name global/project groups are concatenated, global leaves first,
+//     rather than replacing the project definition as documented;
 //   - a disposable daemon (`new --no-attach` under an isolated HOME) exposes
 //     an active-model observation API (GET /state) and accepts selections
 //     (POST /model) for concrete models and prefixed group references;
