@@ -50,7 +50,15 @@ func loadBytes(data []byte) (Desired, error) {
 		return Desired{}, fmt.Errorf("policy: unsupported or missing version %d (want %d)", w.Version, supportedVersion)
 	}
 
-	d := Desired{Version: w.Version, Providers: map[MappingID]Mapping{}}
+	mode, err := modeFromWire(w.Mode)
+	if err != nil {
+		return Desired{}, err
+	}
+	if mode == ModeProviderOnly {
+		return loadProviderOnly(w)
+	}
+
+	d := Desired{Version: w.Version, Mode: ModeLegacy, Providers: map[MappingID]Mapping{}}
 
 	// Build provider mappings. modelOwner maps a base model to the single mapping
 	// that owns it. Iterating sorted keys keeps error ordering deterministic.
@@ -97,14 +105,14 @@ func loadBytes(data []byte) (Desired, error) {
 			} else if id == "anthropic" && mw.Quota != nil && !mw.Quota.hasAnyField() {
 				// An explicit empty quota block has the same safe meaning.
 			} else {
-				qc, err := quotaFromWire(string(id), mw.Quota)
+				qc, err := quotaFromWire(string(id), "", mw.Quota)
 				if err != nil {
 					return Desired{}, err
 				}
 				m.Quota = qc
 			}
 		} else if mw.Quota != nil {
-			qc, err := quotaFromWire(string(id), mw.Quota)
+			qc, err := quotaFromWire(string(id), "", mw.Quota)
 			if err != nil {
 				return Desired{}, err
 			}
@@ -341,12 +349,129 @@ func parseDur(field, s string, def time.Duration) (time.Duration, error) {
 // Desired only where custom parsing is needed (model enumeration and durations).
 type docWire struct {
 	Version     int                    `yaml:"version"`
+	Mode        string                 `yaml:"mode"`
 	Providers   map[string]mappingWire `yaml:"providers"`
 	Global      *targetWire            `yaml:"global"`
 	Projects    []targetWire           `yaml:"projects"`
 	Operational *operationalWire       `yaml:"operational"`
 	Routing     *routingWire           `yaml:"routing"`
 	Selection   *selectionWire         `yaml:"selection"`
+}
+
+// adapterNames lists the known quota adapter names for rejection diagnostics.
+func adapterNames() []string {
+	names := make([]string, 0, 4)
+	for _, def := range quota.AdapterDefinitions() {
+		names = append(names, def.Name)
+	}
+	return names
+}
+
+// modeFromWire resolves the optional mode key. An omitted key and the explicit
+// "legacy" spelling both load as ModeLegacy; "provider-only" is the strictly
+// opt-in provider-only mode. Every other value is rejected so a typo can never
+// silently select a mode the operator did not intend.
+func modeFromWire(s string) (PolicyMode, error) {
+	switch PolicyMode(s) {
+	case "", ModeLegacy:
+		return ModeLegacy, nil
+	case ModeProviderOnly:
+		return ModeProviderOnly, nil
+	default:
+		return "", fmt.Errorf("policy: unknown mode %q (want legacy or provider-only)", s)
+	}
+}
+
+// loadProviderOnly parses the strictly opt-in provider-only policy: enrolled
+// Polytoken provider IDs with optional quota adapter configuration and a global
+// target. Legacy target/model fields — model enumeration, chain definitions,
+// registered projects, and the routing/selection sections — conflict with the
+// mode and are rejected without mutating anything, so a mixed file can never
+// half-convert an installation.
+func loadProviderOnly(w docWire) (Desired, error) {
+	if len(w.Providers) == 0 {
+		return Desired{}, errors.New("policy: provider-only policy must enroll at least one provider")
+	}
+	d := Desired{
+		Version:     w.Version,
+		Mode:        ModeProviderOnly,
+		Providers:   map[MappingID]Mapping{},
+		Operational: defaultOperational,
+	}
+	ids := make([]string, 0, len(w.Providers))
+	for id := range w.Providers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, idStr := range ids {
+		mw := w.Providers[idStr]
+		if len(mw.Models) > 0 {
+			return Desired{}, fmt.Errorf("policy: provider-only mapping %q must not enumerate models (remove the legacy models field)", idStr)
+		}
+		m := Mapping{}
+		if mw.Quota != nil {
+			if !mw.Quota.adapterSet || strings.TrimSpace(mw.Quota.Adapter) == "" {
+				names := adapterNames()
+				return Desired{}, fmt.Errorf("policy: provider %q: provider-only quota requires an explicit adapter (one of: %s)", idStr, strings.Join(names, ", "))
+			}
+			qc, err := quotaFromWire(idStr, mw.Quota.Adapter, mw.Quota)
+			if err != nil {
+				return Desired{}, err
+			}
+			m.Quota = qc
+		}
+		d.Providers[MappingID(idStr)] = m
+	}
+	if w.Routing != nil {
+		return Desired{}, errors.New("policy: provider-only policy must not set routing (chain reordering is a legacy behavior)")
+	}
+	if w.Selection != nil {
+		return Desired{}, errors.New("policy: provider-only policy must not set selection (model selection is a legacy behavior)")
+	}
+	if len(w.Projects) > 0 {
+		return Desired{}, errors.New("policy: provider-only policy must not register projects (provider-only manages the global target only)")
+	}
+	if w.Global == nil {
+		return Desired{}, errors.New("policy: provider-only policy requires a global target with a root")
+	}
+	if err := providerOnlyTargetFromWire(w.Global); err != nil {
+		return Desired{}, fmt.Errorf("policy: global target: %w", err)
+	}
+	if w.Global.Root == "" {
+		return Desired{}, errors.New("policy: provider-only policy requires a global target root")
+	}
+	d.Global = Target{ID: w.Global.ID, Root: w.Global.Root, Global: true}
+
+	op, err := operationalFromWire(w.Operational)
+	if err != nil {
+		return Desired{}, err
+	}
+	d.Operational = op
+	// Resolve the selection defaults exactly like legacy Load does for an
+	// omitted section. The selection section itself is rejected above; the
+	// resolved default matters only so the in-memory policy is fully resolved
+	// and serialization matches an omitted section.
+	d.Selection = defaultSelection()
+	return d, nil
+}
+
+// providerOnlyTargetFromWire rejects the legacy chain-bearing target fields in
+// a provider-only global target. Full/mini/nano defaults, the classifier, and
+// definition chains are exactly the fields quota authored in legacy mode, so
+// their presence marks a mixed legacy/provider-only document.
+func providerOnlyTargetFromWire(w *targetWire) error {
+	for _, c := range []struct {
+		name  string
+		chain Chain
+	}{{"full", w.Full}, {"mini", w.Mini}, {"nano", w.Nano}, {"classifier", w.Classifier}} {
+		if len(c.chain) > 0 {
+			return fmt.Errorf("chain %q is a legacy field and conflicts with provider-only mode (remove it)", c.name)
+		}
+	}
+	if len(w.Definitions) > 0 {
+		return errors.New("definitions are legacy fields and conflict with provider-only mode (remove them)")
+	}
+	return nil
 }
 
 type mappingWire struct {
@@ -437,10 +562,14 @@ type routingWire struct {
 	Enabled bool `yaml:"enabled"`
 }
 
-// quotaWire is the on-disk shape of a mapping's `quota` section. The mapping
-// key itself selects the quota adapter, so there is no adapter field; a quota
-// block under a key that is not a known adapter name rejects policy load.
+// quotaWire is the on-disk shape of a mapping's `quota` section. In legacy mode
+// the mapping key itself selects the quota adapter, so there is no adapter
+// field; a quota block under a key that is not a known adapter name rejects
+// policy load, and an explicit quota.adapter key is rejected as conflicting.
+// In provider-only mode the provider key is a Polytoken provider ID, so the
+// quota section must name its adapter explicitly via quota.adapter.
 type quotaWire struct {
+	Adapter          string        `yaml:"adapter"`
 	FreshnessTTL     string        `yaml:"freshness_ttl"`
 	BalanceGroup     string        `yaml:"balance_group"`
 	Weight           int           `yaml:"weight"`
@@ -449,6 +578,7 @@ type quotaWire struct {
 	Schedule         *scheduleWire `yaml:"schedule"`
 	hasFields        bool
 	monthlyBudgetSet bool
+	adapterSet       bool
 }
 
 func (q *quotaWire) UnmarshalYAML(value *yaml.Node) error {
@@ -460,8 +590,11 @@ func (q *quotaWire) UnmarshalYAML(value *yaml.Node) error {
 	*q = quotaWire(decoded)
 	q.hasFields = len(value.Content) > 0
 	for i := 0; i+1 < len(value.Content); i += 2 {
-		if value.Content[i].Value == "monthly_budget_usd" {
+		switch value.Content[i].Value {
+		case "monthly_budget_usd":
 			q.monthlyBudgetSet = true
+		case "adapter":
+			q.adapterSet = true
 		}
 	}
 	return nil
@@ -684,32 +817,48 @@ func selectionFromWire(w *selectionWire) (SelectionConfig, error) {
 	return sel, nil
 }
 
-// quotaFromWire translates a mapping's quota section into a QuotaConfig. The
-// mapping key is the adapter name and must be a known adapter, validated here
-// so an unknown key rejects policy load. The schedule, when present, is
-// validated via routing.ParseSchedule so an invalid timezone/day/time rejects
-// policy loading. FreshnessTTL defaults to 30m when omitted (matching the
-// routing package's default), like the operational durations.
-func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
-	if !quota.KnownAdapter(mappingID) {
-		names := make([]string, 0, 4)
-		for _, def := range quota.AdapterDefinitions() {
-			names = append(names, def.Name)
+// quotaFromWire translates a mapping's quota section into a QuotaConfig. In
+// legacy mode explicitAdapter is empty and the mapping key is the adapter name,
+// validated here so an unknown key rejects policy load; an explicit
+// quota.adapter key conflicts with the key-selected adapter and is rejected.
+// In provider-only mode the provider key is a Polytoken provider ID, so
+// explicitAdapter is the required quota.adapter value and must be a known
+// adapter. The schedule, when present, is validated via routing.ParseSchedule
+// so an invalid timezone/day/time rejects policy loading. FreshnessTTL
+// defaults to 30m when omitted (matching the routing package's default), like
+// the operational durations.
+func quotaFromWire(mappingID, explicitAdapter string, w *quotaWire) (*QuotaConfig, error) {
+	adapter := explicitAdapter
+	if explicitAdapter == "" {
+		// Legacy tolerance: a leftover quota.adapter key is ignored — it can
+		// neither select nor override the adapter derived from the mapping key
+		// (existing files never tighten). In provider-only mode the adapter is
+		// required and validated below.
+		adapter = mappingID
+		if !quota.KnownAdapter(adapter) {
+			return nil, fmt.Errorf("policy: mapping %q: the provider key selects the quota adapter and must be one of: %s", mappingID, strings.Join(adapterNames(), ", "))
 		}
-		return nil, fmt.Errorf("policy: mapping %q: the provider key selects the quota adapter and must be one of: %s", mappingID, strings.Join(names, ", "))
+	} else if !quota.KnownAdapter(explicitAdapter) {
+		return nil, fmt.Errorf("policy: provider %q: unknown quota adapter %q (want one of: %s)", mappingID, explicitAdapter, strings.Join(adapterNames(), ", "))
 	}
 	if w == nil {
 		w = &quotaWire{}
 	}
 	// quota.mode selects the Anthropic source: "api" (default, the Admin
 	// cost-report adapter) or "subscription" (the experimental OAuth usage
-	// adapter). It is only meaningful for anthropic.
+	// adapter). It is only meaningful for the anthropic adapters.
 	mode := strings.TrimSpace(w.Mode)
-	if mappingID != "anthropic" && mode != "" {
+	if adapter != "anthropic" && adapter != "anthropic-subscription" && mode != "" {
 		return nil, fmt.Errorf("policy: mapping %q: quota mode is only valid for the anthropic provider", mappingID)
+	}
+	if adapter == "anthropic-subscription" && mode != "" {
+		return nil, fmt.Errorf("policy: mapping %q: adapter anthropic-subscription is always subscription; remove quota.mode", mappingID)
 	}
 	if mode == "" {
 		mode = "api"
+	}
+	if adapter == "anthropic-subscription" {
+		mode = "subscription"
 	}
 	if mode != "api" && mode != "subscription" {
 		return nil, fmt.Errorf("policy: mapping %q: unknown quota mode %q (want api or subscription)", mappingID, mode)
@@ -718,26 +867,26 @@ func quotaFromWire(mappingID string, w *quotaWire) (*QuotaConfig, error) {
 		if w.monthlyBudgetSet {
 			return nil, fmt.Errorf("policy: mapping %q: quota mode subscription does not use monthly_budget_usd (the subscription's own session/weekly caps are the quota); remove it", mappingID)
 		}
-	} else if mappingID == "anthropic" && w.hasAnyField() && !w.monthlyBudgetSet {
+	} else if adapter == "anthropic" && w.hasAnyField() && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
-	adapter := mappingID
+	resolved := adapter
 	if mode == "subscription" {
-		adapter = "anthropic-subscription"
+		resolved = "anthropic-subscription"
 	}
 	qc := &QuotaConfig{
-		Adapter:          adapter,
+		Adapter:          resolved,
 		FreshnessTTL:     DefaultQuotaFreshness,
 		BalanceGroup:     w.BalanceGroup,
 		Weight:           w.Weight,
 		MonthlyBudgetUSD: w.MonthlyBudgetUSD,
 	}
-	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 || (mappingID == "anthropic" && mode == "api" && w.MonthlyBudgetUSD == 0) {
+	if math.IsNaN(w.MonthlyBudgetUSD) || math.IsInf(w.MonthlyBudgetUSD, 0) || w.MonthlyBudgetUSD < 0 || (adapter == "anthropic" && mode == "api" && w.MonthlyBudgetUSD == 0) {
 		return nil, fmt.Errorf("policy: mapping %q: monthly_budget_usd must be finite and positive", mappingID)
 	}
 	// The anthropic api-mode adapter measures month-to-date spend against a
 	// user-defined budget; without one there is nothing to measure against.
-	if mappingID == "anthropic" && mode == "api" && !w.monthlyBudgetSet {
+	if adapter == "anthropic" && mode == "api" && !w.monthlyBudgetSet {
 		return nil, fmt.Errorf("policy: mapping %q: the anthropic adapter requires monthly_budget_usd (the spend ceiling to treat as this provider's quota)", mappingID)
 	}
 	ttl, err := parseDur("freshness_ttl", w.FreshnessTTL, DefaultQuotaFreshness)

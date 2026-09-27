@@ -150,6 +150,46 @@ func Init(ctx context.Context, r SourceReader) (Desired, ImportReport, error) {
 	return d, report, nil
 }
 
+// InitProviderOnly proposes the opt-in provider-only starter policy from live
+// Polytoken sources without writing anything. It enrolls the global
+// configuration's provider IDs verbatim — never model groups, model
+// enumeration, chains, or definitions — and records the global root as the
+// single reconciliation target. Enrolled providers start without quota
+// configuration (visible but unpollable, like an unconfigured legacy mapping);
+// operators author quota adapter configuration explicitly. Persistence is the
+// caller's job.
+func InitProviderOnly(ctx context.Context, r SourceReader) (Desired, error) {
+	global, err := r.Global(ctx)
+	if err != nil {
+		return Desired{}, fmt.Errorf("policy: read global source: %w", err)
+	}
+	if len(global.Config.Providers) == 0 {
+		return Desired{}, errors.New("policy: provider-only init found no providers to enroll in the global configuration")
+	}
+	d := Desired{
+		Version:     supportedVersion,
+		Mode:        ModeProviderOnly,
+		Providers:   map[MappingID]Mapping{},
+		Operational: defaultOperational,
+	}
+	ids := make([]string, 0, len(global.Config.Providers))
+	for _, sm := range global.Config.Providers {
+		if sm.ID == "" {
+			return Desired{}, errors.New("policy: provider-only init found an empty provider ID in the global configuration")
+		}
+		ids = append(ids, sm.ID)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if _, dup := d.Providers[MappingID(id)]; dup {
+			return Desired{}, fmt.Errorf("policy: duplicate provider mapping %q", id)
+		}
+		d.Providers[MappingID(id)] = Mapping{}
+	}
+	d.Global = Target{ID: "global", Root: global.Root, Global: true}
+	return d, nil
+}
+
 // Import adopts current managed fields as desired intent, subject to guards. It
 // refuses while any provider is degraded (effective mode other than normal) or
 // when managed drift is ambiguous (a managed definition references a model
@@ -200,6 +240,7 @@ func propose(ctx context.Context, r SourceReader) (Desired, []offGraphRef, error
 
 	d := Desired{
 		Version:     supportedVersion,
+		Mode:        ModeLegacy,
 		Providers:   map[MappingID]Mapping{},
 		Operational: defaultOperational,
 		// Match Load's default for an omitted routing section (marshalDesired
@@ -505,7 +546,11 @@ func syncDir(dir string) error {
 // models are emitted verbatim: a bare name for the default enabled baseline, or
 // `name: {enabled: bool}` when an explicit enabled key was captured.
 func marshalDesired(d Desired) ([]byte, error) {
-	doc := outDoc{Version: d.Version, Providers: map[string]outMapping{}}
+	mode := ""
+	if d.Mode == ModeProviderOnly {
+		mode = string(d.Mode)
+	}
+	doc := outDoc{Version: d.Version, Mode: mode, Providers: map[string]outMapping{}}
 	for id, m := range d.Providers {
 		om := outMapping{}
 		bases := make([]string, 0, len(m.Models))
@@ -515,6 +560,9 @@ func marshalDesired(d Desired) ([]byte, error) {
 		sort.Strings(bases)
 		for _, base := range bases {
 			om.Models = append(om.Models, modelOut{Name: base, MB: m.Models[base]})
+		}
+		if q := quotaOut(m.Quota); q != nil {
+			om.Quota = q
 		}
 		doc.Providers[string(id)] = om
 	}
@@ -588,6 +636,7 @@ func (m modelOut) MarshalYAML() (interface{}, error) {
 
 type outDoc struct {
 	Version     int                   `yaml:"version"`
+	Mode        string                `yaml:"mode,omitempty"`
 	Providers   map[string]outMapping `yaml:"providers,omitempty"`
 	Global      *outTarget            `yaml:"global,omitempty"`
 	Projects    []outTarget           `yaml:"projects,omitempty"`
@@ -595,8 +644,45 @@ type outDoc struct {
 	Selection   *outSelection         `yaml:"selection,omitempty"`
 }
 
+// outMapping renders one provider entry. Models carries the legacy managed
+// model enumeration; provider-only policies enumerate no models, so the key is
+// omitted and the entry serializes as an empty mapping.
 type outMapping struct {
-	Models []modelOut `yaml:"models"`
+	Models []modelOut `yaml:"models,omitempty"`
+	Quota  *outQuota  `yaml:"quota,omitempty"`
+}
+
+// outQuota renders a provider-only quota adapter configuration. Legacy
+// proposals carry no quota (the operator hand-authors that section and no
+// production path rewrites it), so this only ever serializes the explicit
+// provider-only adapter configuration. quota.schedule is deliberately not
+// round-tripped: the wire form (peak windows) and the resolved form (off-peak
+// complements) are not invertible without re-deriving the operator's original
+// spelling, so a schedule-bearing quota is hand-authored and never rewritten.
+type outQuota struct {
+	Adapter          string  `yaml:"adapter,omitempty"`
+	FreshnessTTL     string  `yaml:"freshness_ttl,omitempty"`
+	BalanceGroup     string  `yaml:"balance_group,omitempty"`
+	Weight           int     `yaml:"weight,omitempty"`
+	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd,omitempty"`
+	Mode             string  `yaml:"mode,omitempty"`
+}
+
+// quotaOut renders the resolved quota adapter configuration. quota.mode is
+// never emitted: the resolved adapter name ("anthropic" or
+// "anthropic-subscription") already determines the mode, and both spellings
+// load with identical resolved configuration.
+func quotaOut(q *QuotaConfig) *outQuota {
+	if q == nil {
+		return nil
+	}
+	return &outQuota{
+		Adapter:          q.Adapter,
+		FreshnessTTL:     q.FreshnessTTL.String(),
+		BalanceGroup:     q.BalanceGroup,
+		Weight:           q.Weight,
+		MonthlyBudgetUSD: q.MonthlyBudgetUSD,
+	}
 }
 
 type outTarget struct {

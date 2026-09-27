@@ -191,6 +191,32 @@ type JevSelectionConfig struct {
 	Timeout time.Duration
 }
 
+// PolicyMode names the desired.yaml policy mode. The zero value (and the
+// explicit "legacy" spelling) is the original chain-managing policy: provider
+// mappings enumerate concrete models and targets carry desired chains and
+// definitions. ModeProviderOnly is the strictly opt-in provider-only policy: it
+// enrolls Polytoken provider IDs with optional quota adapter configuration and
+// a global target, and rejects every legacy target/model field.
+type PolicyMode string
+
+const (
+	// ModeLegacy is the original policy mode. desired.yaml files without a
+	// mode key load as ModeLegacy; the explicit spelling is accepted so a
+	// legacy policy can document its mode.
+	ModeLegacy PolicyMode = "legacy"
+	// ModeProviderOnly selects the provider-only policy: enrolled Polytoken
+	// provider IDs, optional per-provider quota adapter configuration, and a
+	// global target. Model enumeration, chain definitions, projects, and the
+	// routing/selection sections are rejected in this mode.
+	ModeProviderOnly PolicyMode = "provider-only"
+)
+
+// ProviderOnly reports whether the policy is the opt-in provider-only mode.
+// Callers branch explicitly on this — a provider-only Desired carries no model
+// enumeration or chains, so any legacy chain projection over it would be a
+// silent no-op by accident.
+func (d Desired) ProviderOnly() bool { return d.Mode == ModeProviderOnly }
+
 // Desired is the fully validated in-memory desired policy produced by Load.
 type Desired struct {
 	Version     int
@@ -198,6 +224,12 @@ type Desired struct {
 	Global      Target
 	Projects    []Target
 	Operational Operational
+
+	// Mode records the policy mode. In ModeProviderOnly the Providers map
+	// carries the enrolled Polytoken provider IDs (Models is nil, Quota holds
+	// the explicit quota adapter configuration when enrolled with one), Global
+	// carries only the target identity and root, and Projects is empty.
+	Mode PolicyMode
 
 	// Routing holds the top-level routing enablement. Load defaults it to
 	// enabled when the routing section is omitted; explicit
