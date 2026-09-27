@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
 // journalFile is the on-disk representation of Journal. It is a separate type so
@@ -18,6 +20,11 @@ type journalFile struct {
 	ManagedRoot   string               `json:"managed_root,omitempty"`
 	Replacements  []journalReplacement `json:"replacements"`
 	Intended      intendedTarget       `json:"intended"`
+	// OwnershipSet marks Ownership as the authoritative intended
+	// provider-ownership snapshot (absent for legacy journals). Ownership
+	// carries sanitized boolean facts only.
+	OwnershipSet bool                        `json:"ownership_set,omitempty"`
+	Ownership    map[string]journalOwnership `json:"ownership,omitempty"`
 }
 
 type journalReplacement struct {
@@ -42,6 +49,17 @@ type intendedTarget struct {
 	Stage             string `json:"stage,omitempty"`
 	Summary           string `json:"summary,omitempty"`
 	LiveStatus        string `json:"live_status,omitempty"`
+}
+
+// journalOwnership is the durable projection of state.ProviderOwnership for one
+// enrolled provider ID. It carries sanitized boolean facts only — the recorded
+// operator baseline (present/value), whether quota owns an expected-off write,
+// and any conflict marker.
+type journalOwnership struct {
+	BaselinePresent bool `json:"baseline_present"`
+	BaselineValue   bool `json:"baseline_value"`
+	Owned           bool `json:"owned"`
+	Conflict        bool `json:"conflict,omitempty"`
 }
 
 // writeJournal durably persists j to path via the durable FS. The bytes are
@@ -142,6 +160,8 @@ func toJournalFile(j Journal) journalFile {
 		TargetID:      j.TargetID,
 		ManagedRoot:   j.ManagedRoot,
 		Intended:      toIntended(j.Intended),
+		OwnershipSet:  j.OwnershipSet,
+		Ownership:     toJournalOwnership(j.Ownership),
 	}
 	for _, r := range j.Replacements {
 		jf.Replacements = append(jf.Replacements, journalReplacement{
@@ -165,6 +185,8 @@ func fromJournalFile(jf journalFile) Journal {
 		TargetID:      jf.TargetID,
 		ManagedRoot:   jf.ManagedRoot,
 		Intended:      fromIntended(jf.Intended),
+		OwnershipSet:  jf.OwnershipSet,
+		Ownership:     fromJournalOwnership(jf.Ownership),
 	}
 	for _, r := range jf.Replacements {
 		rep := Replacement{
@@ -186,4 +208,40 @@ func ifZero(v, fallback int) int {
 		return fallback
 	}
 	return v
+}
+
+// toJournalOwnership projects the intended provider-ownership snapshot onto the
+// durable journal form. Nil stays nil (legacy journals omit the field).
+func toJournalOwnership(m map[string]state.ProviderOwnership) map[string]journalOwnership {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]journalOwnership, len(m))
+	for k, v := range m {
+		out[k] = journalOwnership{
+			BaselinePresent: v.BaselinePresent,
+			BaselineValue:   v.BaselineValue,
+			Owned:           v.Owned,
+			Conflict:        v.Conflict,
+		}
+	}
+	return out
+}
+
+// fromJournalOwnership reconstructs the in-memory provider-ownership snapshot
+// from the durable journal form.
+func fromJournalOwnership(m map[string]journalOwnership) map[string]state.ProviderOwnership {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]state.ProviderOwnership, len(m))
+	for k, v := range m {
+		out[k] = state.ProviderOwnership{
+			BaselinePresent: v.BaselinePresent,
+			BaselineValue:   v.BaselineValue,
+			Owned:           v.Owned,
+			Conflict:        v.Conflict,
+		}
+	}
+	return out
 }

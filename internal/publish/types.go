@@ -54,6 +54,16 @@ type Journal struct {
 	ManagedRoot  string
 	Replacements []Replacement
 	Intended     state.TargetState
+
+	// OwnershipSet records that Ownership is the authoritative intended
+	// post-transaction provider-ownership snapshot: roll-forward adopts it
+	// wholesale (even when empty) so the committed state's ownership metadata
+	// always pairs with the live bytes it describes. Ownership itself carries
+	// only sanitized boolean facts keyed by enrolled provider ID — never
+	// credentials or raw config. OwnershipSet is false for legacy journals,
+	// which keep the prior state's metadata on every recovery path.
+	OwnershipSet bool
+	Ownership    map[string]state.ProviderOwnership
 }
 
 // Transaction is the input to Publisher.Apply. Prior is the committed observed
@@ -90,6 +100,13 @@ const (
 	// left in place for an operator to inspect; the accepted event is preserved
 	// at the prior committed revision.
 	ActionCorrupt = "corrupt"
+	// ActionRefuseExternal marks a recovery that refused to overwrite live
+	// bytes matching neither the journal's old nor new hash: an external
+	// writer changed a managed file while a transaction was interrupted. No
+	// live file is touched, the journal is retained, and the committed state
+	// records a pending recover-stage failure for the target so the conflict
+	// stays visible until an operator resolves it.
+	ActionRefuseExternal = "refuse-external"
 )
 
 // DurableFS abstracts the fsync + atomic-rename primitives used by publication.

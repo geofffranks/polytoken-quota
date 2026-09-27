@@ -147,7 +147,9 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 	}
 
 	// 2. Write the durable journal BEFORE any live-file rename. The journal
-	// stores only hashes and paths.
+	// stores only hashes and paths. The intended provider-ownership snapshot
+	// is derived from tx.Next so an interrupted transaction can reconstruct
+	// the committed state's ownership metadata atomically on roll-forward.
 	j := Journal{
 		Schema:        JournalSchema,
 		PriorRevision: tx.Prior.Revision,
@@ -156,6 +158,10 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 		ManagedRoot:   p.managedRootFor(tx),
 		Replacements:  cloneReplacements(tx.Replacements),
 		Intended:      intendedOutcome(tx),
+	}
+	if tx.Next.ProviderOwnership != nil {
+		j.OwnershipSet = true
+		j.Ownership = state.CloneProviderOwnership(tx.Next.ProviderOwnership)
 	}
 	if err := writeJournal(p.fs(), p.JournalPath, j, p.Fault); err != nil {
 		return state.State{}, err
@@ -473,7 +479,18 @@ func (p Publisher) rollForward(prior state.State, j Journal) (state.State, Recov
 // restoreFromBackup restores every file in the target transaction from its
 // pre-apply backup, then publishes the accepted state with the target marked
 // pending (last-known-good files). The accepted event is never lost.
+//
+// Before any restore, every live file's current bytes are checked against the
+// journal's old and new hashes. A file matching neither was changed by an
+// external writer while the transaction was interrupted; recovery refuses the
+// whole transaction rather than clobbering those bytes (refuseExternal), so
+// the journal and a pending recover-stage failure are retained instead.
 func (p Publisher) restoreFromBackup(prior state.State, j Journal) (state.State, RecoveryReport, error) {
+	for _, r := range j.Replacements {
+		if !liveBytesKnown(r, p.fs()) {
+			return p.refuseExternal(prior, j, r)
+		}
+	}
 	for _, r := range j.Replacements {
 		if r.BackupPath == "" {
 			return prior, RecoveryReport{Action: ActionRestore, TargetID: j.TargetID},
@@ -494,6 +511,53 @@ func (p Publisher) restoreFromBackup(prior state.State, j Journal) (state.State,
 	return next, report, nil
 }
 
+// liveBytesKnown reports whether the live file's current bytes are accounted
+// for by the journal: they match the pre-apply old hash (untouched) or the
+// intended new hash (quota's own applied bytes). A file that cannot be read —
+// typically because it is absent, as after an interrupted rename — has no live
+// bytes to clobber, so recovery proceeds and any real read problem surfaces
+// from the restore itself. Anything else is an external modification that
+// recovery must never overwrite.
+func liveBytesKnown(r Replacement, fs DurableFS) bool {
+	got, err := sha256OfFile(fs, r.LivePath)
+	if err != nil {
+		return true
+	}
+	return got == r.OldHash || got == r.NewHash
+}
+
+// refuseExternal withholds recovery when a live file changed externally during
+// an interrupted transaction: no live file is touched, the journal is retained
+// for retry/operator inspection, and the committed state records a pending
+// recover-stage failure for the target so the conflict is visible. The returned
+// error aborts the caller's flow (Apply refuses to start a new transaction on
+// top of an unresolved recovery).
+func (p Publisher) refuseExternal(prior state.State, j Journal, offender Replacement) (state.State, RecoveryReport, error) {
+	now := p.now()
+	next := cloneState(prior)
+	if next.Targets == nil {
+		next.Targets = map[string]state.TargetState{}
+	}
+	t := next.Targets[j.TargetID]
+	t.AttemptedRevision = j.NextRevision
+	t.AttemptedAt = now
+	t.Pending = &state.ApplyFailure{
+		TargetID:          j.TargetID,
+		Stage:             "recover",
+		Summary:           "recovery withheld: managed file changed externally during interrupted publish; journal retained",
+		AttemptedRevision: j.NextRevision,
+		AttemptedAt:       now,
+		LiveStatus:        "journal-retained",
+	}
+	next.Targets[j.TargetID] = t
+	if err := p.State.Save(next); err != nil {
+		return prior, RecoveryReport{Action: ActionRefuseExternal, TargetID: j.TargetID},
+			fmt.Errorf("publish: record recovery conflict: %w", err)
+	}
+	return prior, RecoveryReport{Action: ActionRefuseExternal, TargetID: j.TargetID},
+		fmt.Errorf("publish: recover: live file %s changed externally during interrupted publish; journal retained", offender.LivePath)
+}
+
 // advanceState rebuilds the recovered next state from prior and the journal:
 // advance the revision and providers to the journal's next revision, then record
 // the final per-target outcome (applied when ok, pending/last-known-good
@@ -504,6 +568,15 @@ func advanceState(prior state.State, j Journal, applied bool, now time.Time) sta
 	next.Revision = j.NextRevision
 	if next.Schema == 0 {
 		next.Schema = 1
+	}
+	// Roll-forward adopts the journal's intended provider-ownership snapshot
+	// wholesale so the committed ownership metadata always pairs atomically
+	// with the live bytes it describes. Restore (applied=false) keeps the
+	// prior state's metadata, which pairs with the restored pre-transaction
+	// bytes. Legacy journals (OwnershipSet false) leave the prior metadata
+	// untouched on every path.
+	if applied && j.OwnershipSet {
+		next.ProviderOwnership = state.CloneProviderOwnership(j.Ownership)
 	}
 	if next.Targets == nil {
 		next.Targets = map[string]state.TargetState{}
@@ -541,6 +614,7 @@ func cloneState(s state.State) state.State {
 			out.Providers[k] = v
 		}
 	}
+	out.ProviderOwnership = state.CloneProviderOwnership(s.ProviderOwnership)
 	if s.Targets != nil {
 		out.Targets = make(map[string]state.TargetState, len(s.Targets))
 		for k, v := range s.Targets {

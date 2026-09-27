@@ -207,6 +207,15 @@ type State struct {
 	// durable at-most-once marker — overlapping invocations skip revisions
 	// already reserved.
 	OnChangeExecutedRevision uint64
+
+	// ProviderOwnership is the additive per-provider ownership metadata for
+	// provider-only gating, keyed by enrolled provider ID. Nil until first
+	// written; absent entries mean no ownership claim is held for that
+	// provider. It records only the sanitized baseline (present/value),
+	// owned-expected-off, and conflict facts — never credentials or raw
+	// config. Legacy policies never populate it, so legacy behavior is
+	// unchanged.
+	ProviderOwnership map[string]ProviderOwnership
 }
 
 // RoutingHistory records the last good global provider ranking computed by the

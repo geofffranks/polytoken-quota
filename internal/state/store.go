@@ -293,6 +293,7 @@ func (st Store) Save(s State) error {
 	s = PruneUsageHistory(s, st.now())
 	s = sanitizeSnapshots(s)
 	s = sanitizeDiagnostics(s)
+	s = sanitizeProviderOwnership(s)
 	var err error
 	s.EventHistory, err = BoundEventHistory(SanitizeEventHistory(s.EventHistory))
 	if err != nil {
