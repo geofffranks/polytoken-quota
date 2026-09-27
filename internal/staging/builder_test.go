@@ -256,6 +256,60 @@ func TestBuildClearsStaleStagingRoot(t *testing.T) {
 	}
 }
 
+func TestBuildConcatenatesLayeredModelgroupsWithoutPublishingMerge(t *testing.T) {
+	root := t.TempDir()
+	globalDir := filepath.Join(root, "global")
+	projectDir := filepath.Join(root, "project", ".polytoken")
+	testutil.WriteFile(t, filepath.Join(globalDir, "config.yaml"), `version: 4
+providers:
+  stub:
+    url: http://127.0.0.1:9
+    auth:
+      type: no_auth
+    enabled: true
+models:
+  stub/m1:
+    provider: stub
+    enabled: true
+  stub/m2:
+    provider: stub
+    enabled: true
+modelgroups:
+  failover:
+    - stub/m1
+    - stub/m2
+`)
+	testutil.WriteFile(t, filepath.Join(projectDir, "config.yaml"), `version: 4
+modelgroups:
+  failover:
+    - stub/m1
+    - stub/m2
+`)
+	res := target.Resolved{ID: "layered", CanonicalRoot: projectDir}
+	b := Builder{TempRoot: t.TempDir(), AuthMode: AuthInert, Sources: FSMaterializer{GlobalDir: globalDir}}
+	c, err := b.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Cleanup() })
+	cfg := readStagedConfig(t, c.ConfigDir)
+	if got := configGet(t, cfg, "modelgroups.failover"); !reflect.DeepEqual(got, []any{"stub/m1", "stub/m2", "stub/m1", "stub/m2"}) {
+		t.Fatalf("staged failover = %#v, want global-first duplicate-preserving composition", got)
+	}
+	if _, err := os.Stat(filepath.Join(c.PublishDir, "config.yaml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("no-op project plan unexpectedly published config: %v", err)
+	}
+	plan := reconcile.Plan{TargetID: res.ID, Edits: []reconcile.FieldEdit{{File: "config.yaml", Path: []string{"modelgroups", "failover"}, Sequence: []string{"stub/m2"}}}}
+	publishDir := t.TempDir()
+	if err := buildPublishDir(publishDir, Layer{Config: []byte("version: 4\nmodelgroups:\n  failover:\n    - stub/m1\n")}, Layer{Config: []byte("version: 4\nmodelgroups:\n  failover:\n    - stub/m2\n")}, true, plan); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(publishDir, "config.yaml"))
+	if err != nil || bytes.Contains(data, []byte("stub/m1")) {
+		t.Fatalf("project publication synthesized global content: err=%v config=%s", err, data)
+	}
+}
+
 // TestBuildCompleteRootAndNeutralWorkdir folds global + project into one
 // effective config (project wins), copies every effective definition, applies
 // edits only in staging, and records a separate neutral ConfigDir/WorkingDir.

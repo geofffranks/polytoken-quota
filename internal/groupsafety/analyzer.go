@@ -129,11 +129,46 @@ const (
 	reservedGroupMini = "polytoken:general-purpose-mini"
 )
 
-// Analyze classifies disabling disableProvider against the registered layers
-// in in. It never touches the filesystem and never returns an error: every
-// input problem — including a proposal outside Enrolled — is reported as a
-// pending-unknown verdict with a reason, because the analyzer fails closed.
+// Analyze classifies disabling disableProvider independently for the global
+// root and for each registered project's effective global-plus-project root.
+// A verdict is safe only when every root is safe; an unsafe result in any root
+// wins over pending-unknown, which wins over safe. It never touches the
+// filesystem and fails closed.
 func Analyze(in Input, disableProvider string) Report {
+	projects := in.Projects
+	if len(projects) == 0 {
+		projects = []Layer{{ID: "(global)"}}
+	}
+	combined := Report{Verdict: Safe, Reasons: []string{}, GroupsBefore: map[string][]string{}, GroupsAfter: map[string][]string{}}
+	reasonSet := map[string]bool{}
+	for _, project := range projects {
+		rootInput := in
+		rootInput.Projects = nil
+		if project.ID != "(global)" {
+			rootInput.Projects = []Layer{project}
+		}
+		root := analyzeRoot(rootInput, disableProvider)
+		if root.Verdict == Unsafe || (root.Verdict == PendingUnknown && combined.Verdict == Safe) {
+			combined.Verdict = root.Verdict
+		}
+		for _, reason := range root.Reasons {
+			reasonSet[reason] = true
+		}
+		for name, leaves := range root.GroupsBefore {
+			combined.GroupsBefore[name] = append([]string(nil), leaves...)
+		}
+		for name, leaves := range root.GroupsAfter {
+			combined.GroupsAfter[name] = append([]string(nil), leaves...)
+		}
+	}
+	for reason := range reasonSet {
+		combined.Reasons = append(combined.Reasons, reason)
+	}
+	sort.Strings(combined.Reasons)
+	return combined
+}
+
+func analyzeRoot(in Input, disableProvider string) Report {
 	r := &resolver{
 		reasons:      map[string]bool{},
 		before:       map[string][]string{},

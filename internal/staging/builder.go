@@ -490,7 +490,10 @@ func buildEffectiveConfig(global, project []byte, mode AuthMode) ([]byte, []stri
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse project: %w", err)
 	}
-	merged := deepMerge(g, p)
+	merged, err := mergeEffectiveConfig(g, p)
+	if err != nil {
+		return nil, nil, err
+	}
 	var authEnvRefs []string
 	if mode == AuthInert {
 		redactSecrets(merged)
@@ -517,6 +520,74 @@ func decodeConfig(b []byte) (map[string]any, error) {
 		m = map[string]any{}
 	}
 	return m, nil
+}
+
+// mergeEffectiveConfig overlays the project layer onto global config while
+// preserving the supported binary's global-first concatenation for modelgroups.
+// The modelgroups section accepts only a map of scalar or flat sequence leaves;
+// unsupported shapes fail closed rather than being flattened or misrepresented.
+func mergeEffectiveConfig(global, project map[string]any) (map[string]any, error) {
+	merged := deepMerge(global, project)
+	globalGroups, hasGlobal := global["modelgroups"]
+	projectGroups, hasProject := project["modelgroups"]
+	if !hasGlobal && !hasProject {
+		return merged, nil
+	}
+	groups := map[string]any{}
+	if hasGlobal {
+		parsed, err := groupMap(globalGroups)
+		if err != nil {
+			return nil, fmt.Errorf("global modelgroups: %w", err)
+		}
+		for name, leaves := range parsed {
+			groups[name] = leaves
+		}
+	}
+	if hasProject {
+		parsed, err := groupMap(projectGroups)
+		if err != nil {
+			return nil, fmt.Errorf("project modelgroups: %w", err)
+		}
+		for name, leaves := range parsed {
+			if prior, ok := groups[name]; ok {
+				groups[name] = append(prior.([]any), leaves...)
+			} else {
+				groups[name] = leaves
+			}
+		}
+	}
+	merged["modelgroups"] = groups
+	return merged, nil
+}
+
+func groupMap(value any) (map[string][]any, error) {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return nil, errors.New("must be a mapping")
+	}
+	out := make(map[string][]any, len(mapping))
+	for name, raw := range mapping {
+		if name == "" {
+			return nil, errors.New("group name must not be empty")
+		}
+		switch leaves := raw.(type) {
+		case string:
+			if leaves == "" {
+				return nil, fmt.Errorf("group %q has an empty leaf", name)
+			}
+			out[name] = []any{leaves}
+		case []any:
+			for _, leaf := range leaves {
+				if value, ok := leaf.(string); !ok || value == "" {
+					return nil, fmt.Errorf("group %q must contain only non-empty string leaves", name)
+				}
+			}
+			out[name] = append([]any(nil), leaves...)
+		default:
+			return nil, fmt.Errorf("group %q must be a string or flat sequence", name)
+		}
+	}
+	return out, nil
 }
 
 // deepMerge returns a new map that overlays src onto dst, recursing into nested

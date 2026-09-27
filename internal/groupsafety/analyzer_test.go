@@ -128,6 +128,26 @@ func wantReason(t *testing.T, r Report, substring string) {
 // is safe and the effective post-disable group is exactly the project-only
 // leaf — matching the pinned routing snapshot and local-stub turn (the binary
 // comparison itself is the opt-in contract test).
+func TestProjectGroupCannotMaskAnotherProjectsEmptyGroup(t *testing.T) {
+	global := layeredGlobal()
+	empty := Layer{ID: "empty", Config: []byte("version: 4\nmodelgroups:\n  failover: []\n")}
+	live := Layer{ID: "live", Config: []byte("version: 4\nmodelgroups:\n  failover:\n    - pp/p2\n")}
+	in := Input{Enrolled: enrolled, Global: global, Projects: []Layer{empty, live}}
+	r := Analyze(in, "gp")
+	wantVerdict(t, r, Unsafe)
+	wantReason(t, r, "group \"failover\"")
+
+	// A project facet pin to a group is resolved only against that project's
+	// effective root; it cannot borrow a same-name group from another project.
+	in.Projects[0].Config = []byte("version: 4\nmodelgroups:\n  outer: []\n")
+	in.Projects[0].Definitions = []Definition{{Path: "facets/pinned.md", Model: "mg:outer"}}
+	in.Projects[1].Config = []byte("version: 4\nmodelgroups:\n  outer:\n    - pp/p2\n")
+	in.Projects[1].Definitions = nil
+	r = Analyze(in, "gp")
+	wantVerdict(t, r, Unsafe)
+	wantReason(t, r, "already unavailable")
+}
+
 func TestGroupEligibilityGlobalProjectConcatenates(t *testing.T) {
 	r := analyze("gp", layeredGlobal(), layeredProject())
 	wantVerdict(t, r, Safe)
@@ -568,13 +588,6 @@ modelgroups:
 			global: valid,
 			proj:   "version: 4\ndefaults:\n  full: gp/g1\n",
 			reason: "sets defaults",
-		},
-		{
-			name:   "two project layers define the same group",
-			global: valid,
-			proj:   "version: 4\nmodelgroups:\n  g:\n    - gp/g1\n",
-			twoPro: true,
-			reason: "defined by 2 project layers",
 		},
 		{name: "model without provider", global: strings.Replace(valid, "provider: gp\n    enabled: true", "enabled: true", 1), reason: "no provider field"},
 		{name: "group leaf not a string", global: strings.Replace(valid, "    - gp/g1\n", "    - 7\n", 1), reason: "non-empty strings"},

@@ -12,6 +12,7 @@ package contract
 // 127.0.0.1, and no live configuration, credentials, or external requests.
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,9 @@ import (
 	"testing"
 
 	"github.com/geofffranks/polytoken-quota/internal/groupsafety"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/staging"
+	"github.com/geofffranks/polytoken-quota/internal/target"
 )
 
 // analyzeLayers runs the analyzer over the same layer bytes the binary loads.
@@ -142,6 +146,79 @@ func TestAnalyzerMatchesBinaryProviderDisableRouting(t *testing.T) {
 // that owns a required tier default's only model must be classified unsafe,
 // must fail the `config validate` backstop outright, and must be rejected
 // wholesale by the daemon reload, which retains the stale active selection.
+func TestStagedLayeredGroupValidationUsesComposedRoute(t *testing.T) {
+	bin := polytokenBin(t)
+	if bin == "" {
+		t.Skip("POLYTOKEN_CONTRACT_BIN / POLYTOKEN_BIN not set; opt-in suite")
+	}
+	global := `version: 4
+providers:
+  stub:
+    kind:
+      type: custom_open_ai_compatible
+    url: http://127.0.0.1:9
+    auth:
+      type: no_auth
+    enabled: true
+models:
+  stub/m1:
+    provider: stub
+    provider_name: m1
+    enabled: true
+  stub/m2:
+    provider: stub
+    provider_name: m2
+    enabled: true
+modelgroups:
+  failover:
+    - stub/m1
+    - stub/m2
+  polytoken:default_model_full: stub/m1
+`
+	project := `version: 4
+modelgroups:
+  failover:
+    - stub/m1
+    - stub/m2
+`
+	if ok, out := feasValidate(t, t.TempDir(), project); ok {
+		t.Fatalf("project-only candidate unexpectedly validates without global models: %s", out)
+	}
+	work := t.TempDir()
+	globalDir := filepath.Join(work, "global")
+	projectDir := filepath.Join(work, "project", ".polytoken")
+	if err := os.MkdirAll(globalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "config.yaml"), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "config.yaml"), []byte(project), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := target.Resolved{ID: "layered", CanonicalRoot: projectDir}
+	b := staging.Builder{TempRoot: t.TempDir(), AuthMode: staging.AuthInert, Sources: staging.FSMaterializer{GlobalDir: globalDir}}
+	candidate, err := b.Build(context.Background(), res, reconcile.Plan{TargetID: res.ID}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = candidate.Cleanup() })
+	env := isolateEnv(t, work)
+	if code := runCommand(t, bin, env, candidate, work, "config", "validate"); code != 0 {
+		t.Fatalf("composed staged candidate failed validation (exit %d)", code)
+	}
+	data, err := os.ReadFile(filepath.Join(candidate.ConfigDir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "stub/m1") || !strings.Contains(string(data), "stub/m2") {
+		t.Fatalf("composed candidate omitted route leaves: %s", data)
+	}
+}
+
 func TestAnalyzerRefusesTierBreakingDisable(t *testing.T) {
 	bin := polytokenBin(t)
 	if bin == "" {
