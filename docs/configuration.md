@@ -65,10 +65,18 @@ retained in their authored positions.
   subscription mode (no budget, no `mode` key).
 - `global.root` is required: it is the single configuration root the
   provider-only policy targets.
+- `projects` entries register additional roots with exactly `id` and `root` —
+  the same registration grammar as legacy mode, and a first-class part of the
+  provider-only safety model: the gate's analyzer evaluates every registered
+  global+project root, and a project-layer modelgroup leaf can keep a group
+  usable when all global leaves for it are gated off. Legacy project FIELDS are
+  rejected in provider-only mode: a project entry carrying anything beyond
+  `id` and `root` (for example `full`/`mini`/`nano`/`classifier` chains or
+  `definitions`) fails to load.
 - Legacy fields are **rejected** in provider-only mode, and the file fails to
   load: `models` under a provider, `full`/`mini`/`nano`/`classifier` chains and
-  `definitions` on a target, `projects`, and the top-level `routing` and
-  `selection` sections. A mixed legacy/provider-only file never half-converts
+  `definitions` on a target, and the top-level `routing` and `selection`
+  sections. A mixed legacy/provider-only file never half-converts
   an installation.
 - `operational` behaves exactly as in legacy mode.
 
@@ -222,6 +230,27 @@ Only the runtime process environment's `TYPESAFE_API_KEY` supplies the credentia
 `global` describes the global Polytoken configuration root; each entry in
 `projects` registers an additional target. A project root is never
 discovered or adopted unless it is listed.
+
+In provider-only mode `projects` entries carry exactly `id` and `root`:
+
+```yaml
+version: 1
+mode: provider-only
+providers:
+  codex: {}
+global:
+  root: /home/user/.config/polytoken
+projects:
+  - id: web-app
+    root: /home/user/src/web-app
+  - id: cli-tool
+    root: /home/user/src/cli-tool/.polytoken
+```
+
+Each registered root gives the provider-only gate's safety analyzer the
+project-layer modelgroup leaves and facet/subagent references it needs to
+prove a disable safe; register every root whose project layers carry
+modelgroup or definition content.
 
 | Field | Set it | Meaning |
 |-------|-------|---------|
