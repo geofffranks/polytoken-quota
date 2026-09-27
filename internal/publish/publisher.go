@@ -513,15 +513,16 @@ func (p Publisher) restoreFromBackup(prior state.State, j Journal) (state.State,
 
 // liveBytesKnown reports whether the live file's current bytes are accounted
 // for by the journal: they match the pre-apply old hash (untouched) or the
-// intended new hash (quota's own applied bytes). A file that cannot be read —
-// typically because it is absent, as after an interrupted rename — has no live
-// bytes to clobber, so recovery proceeds and any real read problem surfaces
-// from the restore itself. Anything else is an external modification that
-// recovery must never overwrite.
+// intended new hash (quota's own applied bytes). Only a genuinely absent file
+// — as after an interrupted rename — has no live bytes to clobber, so recovery
+// proceeds for it and any real read problem surfaces from the restore itself.
+// Any other read error (permissions, ACLs, I/O) leaves the live bytes
+// unaccounted for: recovery refuses rather than restore over bytes it could
+// not read, matching prepareOne's not-exist discrimination.
 func liveBytesKnown(r Replacement, fs DurableFS) bool {
 	got, err := sha256OfFile(fs, r.LivePath)
 	if err != nil {
-		return true
+		return os.IsNotExist(err)
 	}
 	return got == r.OldHash || got == r.NewHash
 }

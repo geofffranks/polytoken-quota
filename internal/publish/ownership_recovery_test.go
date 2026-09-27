@@ -213,3 +213,58 @@ func TestProviderOwnershipRecoveryRefusesExternalLiveBytes(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderOwnershipRecoveryRefusesUnreadableLiveBytes proves recovery
+// never restores over live bytes it cannot read (ADV-2): only a genuinely
+// ABSENT live file has no bytes to clobber, so a permission error on a present
+// file refuses the whole transaction and retains the journal instead of
+// restoring over unaccounted bytes.
+func TestProviderOwnershipRecoveryRefusesUnreadableLiveBytes(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads files regardless of mode; the permission refusal is untestable")
+	}
+	env := recoveryEnv(t, false)
+	// recoveryEnv's restore direction leaves the live file absent; the
+	// unreadable case needs the file PRESENT but unreadable — the exact shape
+	// the old any-error-is-restorable behavior silently clobbered.
+	if err := os.WriteFile(env.LivePath, []byte(constLive), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(env.LivePath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, report, err := env.Publisher.Recover(context.Background(), env.Prior)
+	if err == nil {
+		t.Fatalf("recovery must refuse unreadable live bytes; report=%+v", report)
+	}
+	if report.Action != ActionRefuseExternal {
+		t.Fatalf("action=%s want refuse-external", report.Action)
+	}
+	if _, err := os.Stat(env.Publisher.JournalPath); err != nil {
+		t.Fatalf("journal not retained after refusal: %v", err)
+	}
+	committed := env.committedState(t)
+	ts := committed.Targets["global"]
+	if ts.Pending == nil || ts.Pending.Stage != "recover" || ts.Pending.LiveStatus != "journal-retained" {
+		t.Fatalf("pending conflict not retained: %+v", ts)
+	}
+
+	// Restoring readability lets recovery converge on the restore path, and
+	// the restored bytes are the pre-transaction content.
+	if err := os.Chmod(env.LivePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, report, err = env.Publisher.Recover(context.Background(), env.Prior); err != nil {
+		t.Fatalf("recover after readability restored: %v", err)
+	}
+	if report.Action != ActionRestore {
+		t.Fatalf("action=%s want restore after readability restored", report.Action)
+	}
+	got, err := os.ReadFile(env.LivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != constLive {
+		t.Fatalf("restored bytes = %q want the pre-transaction content", got)
+	}
+}
