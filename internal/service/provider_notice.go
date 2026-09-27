@@ -5,6 +5,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/notice"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -66,7 +67,15 @@ func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled 
 	states := make(map[string]bool)
 	if previous != nil {
 		for _, p := range previous.Providers {
-			if current, ok := enabled[p.ID]; !ok || current == p.Enabled {
+			// A nil map means evaluation could not establish the enrolled
+			// providers (for example, an early refusal); retain debt in that
+			// case. A non-nil map is authoritative, so de-enrolled IDs are
+			// unverifiable and must not survive a successful evaluation.
+			if enabled == nil {
+				states[p.ID] = p.Enabled
+				continue
+			}
+			if current, ok := enabled[p.ID]; ok && current == p.Enabled {
 				states[p.ID] = p.Enabled
 			}
 		}
@@ -121,6 +130,23 @@ func providerNoticeStates(debt *state.PendingProviderNotice, edits []policyProvi
 		providers = append(providers, notice.ProviderState{ID: id, Enabled: states[id]})
 	}
 	return providers
+}
+
+// providerPlanNoticeEdits extracts only provider enabled-field edits from a
+// gate plan, in the same sanitized provider-state shape used for notices.
+func providerPlanNoticeEdits(edits []reconcile.FieldEdit) []policyProviderEdit {
+	out := make([]policyProviderEdit, 0, len(edits))
+	for _, edit := range edits {
+		if edit.File != "config.yaml" || len(edit.Path) != 3 || edit.Path[0] != "providers" || edit.Path[2] != "enabled" {
+			continue
+		}
+		enabled := edit.Remove
+		if edit.Enabled != nil {
+			enabled = *edit.Enabled
+		}
+		out = append(out, policyProviderEdit{id: edit.Path[1], enabled: enabled})
+	}
+	return out
 }
 
 // pendingNoticeDebt builds the republication debt for one committed pass.

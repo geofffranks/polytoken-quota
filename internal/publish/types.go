@@ -64,6 +64,12 @@ type Journal struct {
 	// which keep the prior state's metadata on every recovery path.
 	OwnershipSet bool
 	Ownership    map[string]state.ProviderOwnership
+
+	// ProviderNoticeSet marks ProviderNotice as the authoritative intended
+	// notice debt for roll-forward. It is false for older/non-provider
+	// transactions, which preserve the prior debt.
+	ProviderNoticeSet bool
+	ProviderNotice    *state.PendingProviderNotice
 }
 
 // Transaction is the input to Publisher.Apply. Prior is the committed observed
@@ -78,6 +84,10 @@ type Transaction struct {
 	TargetID     string
 	ManagedRoot  string
 	Replacements []Replacement
+	// ProviderNoticeSet makes Next.PendingProviderNotice authoritative when
+	// a journal rolls forward; false preserves prior debt for other callers.
+	ProviderNoticeSet bool
+	ProviderNotice    *state.PendingProviderNotice
 }
 
 // RecoveryReport summarizes a single recovery invocation. CleanupError is a

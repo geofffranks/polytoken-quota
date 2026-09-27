@@ -395,7 +395,15 @@ func (c *Coordinator) publishProviderGate(ctx context.Context, desired policy.De
 	next := observed
 	next.Revision = revision
 	next.ProviderOwnership = plan.PublishedOwnership
+	// The provider edit and its unpublished notice debt are one journaled
+	// outcome. Recovery must not roll forward bytes without also preserving
+	// the notice state when the caller's subsequent state save fails.
+	next.PendingProviderNotice = reconcileProviderNoticeDebt(
+		observed.PendingProviderNotice, plan.Enabled, revision, providerPlanNoticeEdits(plan.Edits),
+	)
 	tx, err := c.buildTransaction(observed, next, global, txPlan, candidate, prep)
+	tx.ProviderNoticeSet = true
+	tx.ProviderNotice = next.PendingProviderNotice
 	if err != nil {
 		return fmt.Errorf("service: prepare provider gate publication: %w", err)
 	}

@@ -25,6 +25,20 @@ type journalFile struct {
 	// carries sanitized boolean facts only.
 	OwnershipSet bool                        `json:"ownership_set,omitempty"`
 	Ownership    map[string]journalOwnership `json:"ownership,omitempty"`
+	// ProviderNoticeSet makes the sanitized pending notice authoritative on
+	// roll-forward; omitted by journals written before this field existed.
+	ProviderNoticeSet bool                   `json:"provider_notice_set,omitempty"`
+	ProviderNotice    *journalProviderNotice `json:"provider_notice,omitempty"`
+}
+
+type journalProviderNotice struct {
+	Revision  uint64                       `json:"revision"`
+	Providers []journalProviderNoticeState `json:"providers"`
+}
+
+type journalProviderNoticeState struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
 }
 
 type journalReplacement struct {
@@ -154,14 +168,16 @@ func removeJournal(fs DurableFS, path string) error {
 
 func toJournalFile(j Journal) journalFile {
 	jf := journalFile{
-		Schema:        ifZero(j.Schema, JournalSchema),
-		PriorRevision: j.PriorRevision,
-		NextRevision:  j.NextRevision,
-		TargetID:      j.TargetID,
-		ManagedRoot:   j.ManagedRoot,
-		Intended:      toIntended(j.Intended),
-		OwnershipSet:  j.OwnershipSet,
-		Ownership:     toJournalOwnership(j.Ownership),
+		Schema:            ifZero(j.Schema, JournalSchema),
+		PriorRevision:     j.PriorRevision,
+		NextRevision:      j.NextRevision,
+		TargetID:          j.TargetID,
+		ManagedRoot:       j.ManagedRoot,
+		Intended:          toIntended(j.Intended),
+		OwnershipSet:      j.OwnershipSet,
+		Ownership:         toJournalOwnership(j.Ownership),
+		ProviderNoticeSet: j.ProviderNoticeSet,
+		ProviderNotice:    toJournalProviderNotice(j.ProviderNotice),
 	}
 	for _, r := range j.Replacements {
 		jf.Replacements = append(jf.Replacements, journalReplacement{
@@ -179,14 +195,16 @@ func toJournalFile(j Journal) journalFile {
 
 func fromJournalFile(jf journalFile) Journal {
 	j := Journal{
-		Schema:        jf.Schema,
-		PriorRevision: jf.PriorRevision,
-		NextRevision:  jf.NextRevision,
-		TargetID:      jf.TargetID,
-		ManagedRoot:   jf.ManagedRoot,
-		Intended:      fromIntended(jf.Intended),
-		OwnershipSet:  jf.OwnershipSet,
-		Ownership:     fromJournalOwnership(jf.Ownership),
+		Schema:            jf.Schema,
+		PriorRevision:     jf.PriorRevision,
+		NextRevision:      jf.NextRevision,
+		TargetID:          jf.TargetID,
+		ManagedRoot:       jf.ManagedRoot,
+		Intended:          fromIntended(jf.Intended),
+		OwnershipSet:      jf.OwnershipSet,
+		Ownership:         fromJournalOwnership(jf.Ownership),
+		ProviderNoticeSet: jf.ProviderNoticeSet,
+		ProviderNotice:    fromJournalProviderNotice(jf.ProviderNotice),
 	}
 	for _, r := range jf.Replacements {
 		rep := Replacement{
@@ -201,6 +219,28 @@ func fromJournalFile(jf journalFile) Journal {
 		j.Replacements = append(j.Replacements, rep)
 	}
 	return j
+}
+
+func toJournalProviderNotice(p *state.PendingProviderNotice) *journalProviderNotice {
+	if p == nil {
+		return nil
+	}
+	out := &journalProviderNotice{Revision: p.Revision, Providers: make([]journalProviderNoticeState, 0, len(p.Providers))}
+	for _, provider := range p.Providers {
+		out.Providers = append(out.Providers, journalProviderNoticeState{ID: provider.ID, Enabled: provider.Enabled})
+	}
+	return out
+}
+
+func fromJournalProviderNotice(p *journalProviderNotice) *state.PendingProviderNotice {
+	if p == nil {
+		return nil
+	}
+	out := &state.PendingProviderNotice{Revision: p.Revision, Providers: make([]state.ProviderNoticeState, 0, len(p.Providers))}
+	for _, provider := range p.Providers {
+		out.Providers = append(out.Providers, state.ProviderNoticeState{ID: provider.ID, Enabled: provider.Enabled})
+	}
+	return out
 }
 
 func ifZero(v, fallback int) int {

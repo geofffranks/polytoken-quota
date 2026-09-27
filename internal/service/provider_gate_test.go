@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1160,6 +1161,62 @@ func TestProviderGateRepublishesLostNotice(t *testing.T) {
 // TestProviderEnabledFieldStrictDuplicateKeys proves the ownership read never
 // derives bookkeeping from ambiguous bytes (ADV-3): duplicated keys under the
 // providers section are a refusal, not a last-key-wins fact.
+func TestProviderGateNoticeDebtSurvivesPostCommitStateFailure(t *testing.T) {
+	f := newGateFixture(t, []string{"gp"}, nil)
+	f.seedState(7, map[string]state.ProviderState{"gp": {Quota: state.QuotaLow, Availability: state.Available}}, nil)
+	f.store.Fault = func() error { return fmt.Errorf("injected post-gate state fsync failure") }
+	out := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if out.Accepted || !out.DurabilityFailure {
+		t.Fatalf("out=%+v want post-gate state durability failure", out)
+	}
+	if got := f.readGlobalConfig(); got == f.globalConfig {
+		t.Fatal("provider edit was not committed before the injected state failure")
+	}
+	if f.journalExists() {
+		t.Fatal("publisher journal should already be committed and removed")
+	}
+
+	f.store.Fault = nil
+	out = f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.Error != nil {
+		t.Fatalf("recovery reconcile out=%+v err=%v", out, out.Error)
+	}
+	if f.journalExists() {
+		t.Fatal("journal remains after successful roll-forward")
+	}
+	debt := f.loadState().PendingProviderNotice
+	if debt != nil {
+		t.Fatalf("notice debt remained after retry publication: %+v", debt)
+	}
+	doc := readGateNotice(t, f.desired.Operational.NoticePath)
+	if doc.Revision != 8 || !reflect.DeepEqual(doc.Providers, []notice.ProviderState{{ID: "gp", Enabled: false}}) {
+		t.Fatalf("recovered notice=%+v want revision 8 and provider gp disabled", doc)
+	}
+}
+
+func TestProviderGateDropsDebtForDeEnrolledProvider(t *testing.T) {
+	f := newGateFixture(t, []string{"gp"}, nil)
+	f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "true"}))
+	f.seedState(7, map[string]state.ProviderState{}, nil)
+	st := f.loadState()
+	st.PendingProviderNotice = &state.PendingProviderNotice{Revision: 6, Providers: []state.ProviderNoticeState{{ID: "gp", Enabled: false}}}
+	if err := f.store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.desired.Providers, policy.MappingID("gp"))
+
+	out := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.Error != nil || out.PendingCount() != 0 {
+		t.Fatalf("out=%+v err=%v", out, out.Error)
+	}
+	if got := f.loadState().PendingProviderNotice; got != nil {
+		t.Fatalf("de-enrolled provider notice debt not cleared: %+v", got)
+	}
+	if _, err := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(err) {
+		t.Fatalf("stale de-enrolled provider notice published (err=%v)", err)
+	}
+}
+
 func TestProviderEnabledFieldStrictDuplicateKeys(t *testing.T) {
 	cases := []struct {
 		name        string

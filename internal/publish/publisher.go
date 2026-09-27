@@ -163,6 +163,10 @@ func (p Publisher) ApplyUnderLock(ctx context.Context, tx Transaction) (state.St
 		j.OwnershipSet = true
 		j.Ownership = state.CloneProviderOwnership(tx.Next.ProviderOwnership)
 	}
+	j.ProviderNoticeSet = tx.ProviderNoticeSet
+	if tx.ProviderNoticeSet {
+		j.ProviderNotice = cloneProviderNotice(tx.ProviderNotice)
+	}
 	if err := writeJournal(p.fs(), p.JournalPath, j, p.Fault); err != nil {
 		return state.State{}, err
 	}
@@ -579,6 +583,9 @@ func advanceState(prior state.State, j Journal, applied bool, now time.Time) sta
 	if applied && j.OwnershipSet {
 		next.ProviderOwnership = state.CloneProviderOwnership(j.Ownership)
 	}
+	if applied && j.ProviderNoticeSet {
+		next.PendingProviderNotice = cloneProviderNotice(j.ProviderNotice)
+	}
 	if next.Targets == nil {
 		next.Targets = map[string]state.TargetState{}
 	}
@@ -603,6 +610,14 @@ func advanceState(prior state.State, j Journal, applied bool, now time.Time) sta
 	}
 	next.Targets[j.TargetID] = t
 	return next
+}
+
+func cloneProviderNotice(p *state.PendingProviderNotice) *state.PendingProviderNotice {
+	if p == nil {
+		return nil
+	}
+	out := &state.PendingProviderNotice{Revision: p.Revision, Providers: append([]state.ProviderNoticeState(nil), p.Providers...)}
+	return out
 }
 
 // cloneState returns a deep copy of s so recovered-state edits never mutate the
