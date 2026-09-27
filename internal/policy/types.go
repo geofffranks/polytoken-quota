@@ -70,6 +70,18 @@ type Target struct {
 	Mini        Chain
 	Nano        Chain
 	Classifier  Chain
+
+	// UsesModelGroups records that the target's composed config surface — the
+	// live global config.yaml or any registered project layer's config.yaml —
+	// defines a top-level modelgroups key. It is not authored in desired.yaml:
+	// the service coordinator detects it on the registered roots before every
+	// legacy transaction and stamps it here (see service detectModelGroups).
+	// Polytoken rejects a version-4 config that combines a legacy tier default
+	// with an explicit model-group definition, and the staged merge composes
+	// the layers, so a stamped target's tier-default fields stay
+	// operator-owned: the reconciler proposes no defaults edits for it and
+	// reports the skipped fields on the plan.
+	UsesModelGroups bool
 }
 
 // OnChange bounds for operator-configured host-side actions. The count and

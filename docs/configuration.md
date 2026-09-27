@@ -25,6 +25,16 @@ The `mode` key selects the policy grammar. It is optional:
   this page — provider mappings enumerate concrete `models`, targets carry
   desired chains (`full`/`mini`/`nano`/`classifier`) and `definitions`, and
   quota may reorder chains when `routing` is enabled.
+
+  One legacy exception: when the target's configuration uses `modelgroups` — a
+  top-level `modelgroups` key in the global `config.yaml` or any registered
+  project layer's `config.yaml` — Polytoken rejects any candidate that combines
+  a legacy tier default with an explicit model-group definition. Reconcile then
+  leaves the tier defaults (`defaults.full`/`mini`/`nano` and the classifier
+  pin, including routing-driven reorders of them) unwritten and operator-owned,
+  reporting each skipped field under `reconcile --verbose`;
+  `models.*.enabled` and facet/subagent fields are still managed. A
+  configuration without `modelgroups` anywhere is written exactly as before.
 - **`mode: provider-only`** (strictly opt-in): quota tracks enrolled Polytoken
   provider IDs and never edits models, chains, or definitions. Every other key
   on this page keeps its legacy meaning.

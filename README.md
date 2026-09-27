@@ -102,7 +102,7 @@ projects: []
 
 Unknown/manual mappings without a supported quota adapter remain managed routing participants: they keep their configured chain positions, are not quota-ranked or polled, and still honor explicit disable or unavailable state. Every configured mapping appears in diagnostics, including defaulted supported mappings and unpollable Anthropic/manual mappings.
 
-The `models` list is the ownership boundary: only listed concrete models and the listed target chains/definition fields are managed. Preserve unmanaged Polytoken settings outside those fields. Model entries may be bare names, as shown above, or explicit mappings such as `codex/gpt-5: {enabled: true}`.
+The `models` list is the ownership boundary: only listed concrete models and the listed target chains/definition fields are managed. Preserve unmanaged Polytoken settings outside those fields. Model entries may be bare names, as shown above, or explicit mappings such as `codex/gpt-5: {enabled: true}`. When your Polytoken config uses `modelgroups`, legacy reconcile leaves the tier defaults unwritten and operator-owned instead of producing a candidate Polytoken rejects (details in the configuration reference).
 
 See **[docs/configuration.md](docs/configuration.md)** for the complete reference: every quota field (`monthly_budget_usd`, `freshness_ttl`, `balance_group`, `weight`, `schedule`), routing opt-out, provider-only mode, and the `operational` knobs, with their defaults.
 

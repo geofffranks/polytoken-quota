@@ -449,6 +449,7 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	applyModelGroupsGuard(targets)
 	if in.KeepStaging && !in.DryRun {
 		return Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}
 	}
@@ -544,6 +545,7 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 		}
 		return Outcome{Accepted: true, Revision: next.Revision, Targets: outcomes, Error: err}
 	}
+	applyModelGroupsGuard(targets)
 	timeout := c.validationTimeout(desired)
 	c.step("publish-targets")
 	gp := c.globalPlan(desired, next, targets)
@@ -604,6 +606,7 @@ func (c *Coordinator) transactSetClear(ctx context.Context, recovered state.Stat
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
 	}
+	applyModelGroupsGuard(targets)
 	timeout := c.validationTimeout(desired)
 	// The coarse path reports a single reconcile and publish-targets step for
 	// the whole batch; processOneTarget emits no per-target steps (detailed=false).
@@ -637,6 +640,7 @@ func (c *Coordinator) reconcileAll(ctx context.Context, desired policy.Desired, 
 	if err != nil {
 		return next, nil
 	}
+	applyModelGroupsGuard(targets)
 	next = c.retireSyntheticPendings(next)
 	// Init has no verbose flag: the coarse path never requests traces.
 	return next, c.processTargets(ctx, desired, prior, next, targets, publish, false)
@@ -773,6 +777,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 	if err != nil {
 		step("record-pending")
 		out := pendingOutcome(id, next.Revision, "stage", err)
+		out.Skipped = plan.Skipped
 		if verbose {
 			out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 		}
@@ -825,6 +830,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 			outcome.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 		}
 		outcome.Prepare = prep
+		outcome.Skipped = plan.Skipped
 		return outcome
 	}
 	if publish {
@@ -833,6 +839,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		if err != nil {
 			step("record-pending")
 			out := pendingOutcome(id, next.Revision, "publish", err)
+			out.Skipped = plan.Skipped
 			if verbose {
 				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 			}
@@ -849,6 +856,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		if _, err := c.Publish.ApplyUnderLock(ctx, tx); err != nil {
 			step("record-pending")
 			out := pendingOutcome(id, next.Revision, "publish", err)
+			out.Skipped = plan.Skipped
 			if verbose {
 				out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 			}
@@ -857,6 +865,7 @@ func (c *Coordinator) processOneTarget(ctx context.Context, desired policy.Desir
 		}
 	}
 	out := appliedOutcome(id, next.Revision)
+	out.Skipped = plan.Skipped
 	if verbose {
 		out.Trace = c.buildTraceSafe(desired, next, rt, ranks, rankingResult, plan)
 	}
