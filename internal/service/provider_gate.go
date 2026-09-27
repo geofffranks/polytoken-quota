@@ -85,6 +85,9 @@ type providerGatePlan struct {
 	// Changed reports whether the plan would edit any managed byte or mutate
 	// any ownership record.
 	Changed bool
+	// Enabled records the effective committed enabled value for every enrolled
+	// provider observed in the registered global config.
+	Enabled map[string]bool
 }
 
 // providerGateRefusal is a refused gate evaluation. Stage names the refusal
@@ -137,19 +140,14 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 	} else {
 		next.ProviderOwnership = res.Plan.RefusalOwnership
 	}
-	// The republication debt describes the provider states of an earlier
-	// commit; any ownership movement this pass (release, claim, conflict
-	// marker) invalidates it. A publishing pass re-records the debt with its
-	// own committed states BEFORE the state save, so a crash between the save
-	// and the notice publication still converges on a later pass.
-	if !ownershipMapsEqual(next.ProviderOwnership, observed.ProviderOwnership) {
-		next.PendingProviderNotice = nil
+	// Keep unpublished notice debt while the enrolled providers still have
+	// the committed enabled values it describes. Ownership metadata can move
+	// independently (for example, a conflict marker refresh or release).
+	freshEdits := providerEdits(res.Outcomes)
+	if res.Refusal != nil {
+		freshEdits = nil // A refusal cannot have committed fresh provider edits.
 	}
-	if res.Refusal == nil {
-		if edits := providerEdits(res.Outcomes); len(edits) > 0 {
-			next.PendingProviderNotice = pendingNoticeDebt(revision, edits)
-		}
-	}
+	next.PendingProviderNotice = reconcileProviderNoticeDebt(observed.PendingProviderNotice, res.Plan.Enabled, revision, freshEdits)
 	next = c.retireSyntheticPendings(next)
 	next = c.recordTargetOutcomes(next, res.Outcomes)
 	c.recordHistoryIfQualified(&next, txReconcile, in, res.Outcomes, targets, desired)
@@ -441,6 +439,7 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		return plan.PublishedOwnership
 	}
 	ids := sortedProviderIDs(desired)
+	plan.Enabled = make(map[string]bool, len(ids))
 	if len(ids) == 0 {
 		return plan, nil
 	}
@@ -452,6 +451,7 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		if !known {
 			return plan, fmt.Errorf("service: enrolled provider %q is absent from the registered global configuration", sanitizeFailure(id))
 		}
+		plan.Enabled[id] = !present || value
 		record, hasRecord := observed.OwnershipOf(id)
 		owned := hasRecord && record.Owned
 		// The gate consumes the reconciler's single mode derivation: the

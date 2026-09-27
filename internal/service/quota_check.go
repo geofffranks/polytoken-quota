@@ -90,18 +90,13 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 				} else {
 					next.ProviderOwnership = res.Plan.RefusalOwnership
 				}
-				// Republication-debt bookkeeping mirrors the reconcile
-				// command: ownership movement invalidates an older debt, and
-				// a publishing pass records its own debt before the state
-				// save so a crash before notice publication still converges.
-				if !ownershipMapsEqual(next.ProviderOwnership, observed.ProviderOwnership) {
-					next.PendingProviderNotice = nil
+				// Debt follows committed enabled values rather than ownership
+				// metadata, which can move on conflict-marker and release passes.
+				freshEdits := providerEdits(outcomes)
+				if res.Refusal != nil {
+					freshEdits = nil
 				}
-				if res.Refusal == nil {
-					if edits := providerEdits(outcomes); len(edits) > 0 {
-						next.PendingProviderNotice = pendingNoticeDebt(next.Revision, edits)
-					}
-				}
+				next.PendingProviderNotice = reconcileProviderNoticeDebt(observed.PendingProviderNotice, res.Plan.Enabled, next.Revision, freshEdits)
 				c.recordHistoryIfQualified(&next, txQuotaCheck, in, outcomes, targets, desired)
 			}
 			next = c.recordTargetOutcomes(next, outcomes)

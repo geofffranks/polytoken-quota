@@ -1026,6 +1026,36 @@ func TestProviderGateRepublishesLostNotice(t *testing.T) {
 		}
 	})
 
+	t.Run("fresh provider publication runs on_change once, retry does not", func(t *testing.T) {
+		f := newGateFixture(t, []string{"gp"}, nil)
+		logPath := filepath.Join(f.base, "action.log")
+		action := filepath.Join(f.base, "action.sh")
+		if err := os.WriteFile(action, []byte("#!/bin/sh\nprintf 'run\\n' >> "+logPath+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		f.desired.Operational.OnChange = []policy.OnChangeAction{{Run: action, TimeoutSeconds: 5}}
+		f.seedState(7, map[string]state.ProviderState{"gp": {Quota: state.QuotaLow, Availability: state.Available}}, nil)
+		coord := f.coordinator()
+		out := coord.Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.Error != nil {
+			t.Fatalf("first reconcile out=%+v err=%v", out, out.Error)
+		}
+		if got := strings.Count(readTestFile(t, logPath), "run"); got != 1 {
+			t.Fatalf("on_change runs after fresh commit = %d, want 1", got)
+		}
+		st := f.loadState()
+		st.PendingProviderNotice = &state.PendingProviderNotice{Revision: out.Revision, Providers: []state.ProviderNoticeState{{ID: "gp", Enabled: false}}}
+		if err := f.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		if out = coord.Reconcile(context.Background(), false, false, false); !out.Accepted || out.Error != nil {
+			t.Fatalf("retry reconcile out=%+v err=%v", out, out.Error)
+		}
+		if got := strings.Count(readTestFile(t, logPath), "run"); got != 1 {
+			t.Fatalf("debt-only retry ran on_change again: %d", got)
+		}
+	})
+
 	t.Run("debt recorded before a crash republishes without edits", func(t *testing.T) {
 		f := newGateFixture(t, []string{"gp"}, nil)
 		// Live field already false; quota holds the intact claim. Simulate the
@@ -1056,7 +1086,52 @@ func TestProviderGateRepublishesLostNotice(t *testing.T) {
 		}
 	})
 
-	t.Run("ownership movement invalidates a stale debt", func(t *testing.T) {
+	t.Run("conflict marker movement preserves matching notice debt", func(t *testing.T) {
+		f := newGateFixture(t, []string{"gp"}, nil)
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "true"}))
+		f.seedState(7, map[string]state.ProviderState{"gp": {Quota: state.QuotaLow, Availability: state.Available}},
+			map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true}})
+		st := f.loadState()
+		st.PendingProviderNotice = &state.PendingProviderNotice{Revision: 6, Providers: []state.ProviderNoticeState{{ID: "gp", Enabled: true}}}
+		if err := f.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 1 {
+			t.Fatalf("out=%+v want conflict-only pass", out)
+		}
+		if got := f.loadState().PendingProviderNotice; !reflect.DeepEqual(got, st.PendingProviderNotice) {
+			t.Fatalf("conflict-only pass changed matching debt: %+v", got)
+		}
+	})
+
+	t.Run("fresh provider edit merges with unrelated unpublished debt", func(t *testing.T) {
+		f := newGateFixture(t, []string{"gp", "pp"}, nil)
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"pp": "false"}))
+		f.seedState(7, map[string]state.ProviderState{
+			"gp": {Quota: state.QuotaLow, Availability: state.Available},
+			"pp": {Quota: state.QuotaNormal, Availability: state.Available},
+		}, map[string]state.ProviderOwnership{"pp": {BaselinePresent: true, BaselineValue: true, Owned: true}})
+		st := f.loadState()
+		st.PendingProviderNotice = &state.PendingProviderNotice{Revision: 6, Providers: []state.ProviderNoticeState{{ID: "gp", Enabled: false}}}
+		if err := f.store.Save(st); err != nil {
+			t.Fatal(err)
+		}
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.Error != nil {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		doc := readGateNotice(t, f.desired.Operational.NoticePath)
+		want := []notice.ProviderState{{ID: "gp", Enabled: false}, {ID: "pp", Enabled: true}}
+		if !reflect.DeepEqual(doc.Providers, want) {
+			t.Fatalf("merged notice providers=%+v want %+v", doc.Providers, want)
+		}
+		if doc.Revision != out.Revision {
+			t.Fatalf("merged notice revision=%d want fresh revision %d", doc.Revision, out.Revision)
+		}
+	})
+
+	t.Run("ownership movement invalidates debt only when committed bytes differ", func(t *testing.T) {
 		f := newGateFixture(t, []string{"gp"}, nil)
 		// The operator restored the exact baseline themselves: the release
 		// moves ownership, so a debt describing older states must never be

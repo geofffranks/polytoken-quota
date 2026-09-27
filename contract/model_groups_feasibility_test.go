@@ -1307,6 +1307,12 @@ func TestProviderGateRecoveryPreservesSessionHistory(t *testing.T) {
 			wantInitialServe: "m1",
 		},
 		{
+			name:             "selected-failover-group",
+			manualSelection:  "mg:failover",
+			wantInitialModel: "stub/m1",
+			wantInitialServe: "m1",
+		},
+		{
 			name:             "concrete-facet-pin",
 			facetModel:       "stub/m2",
 			wantInitialModel: "stub/m2",
@@ -1331,6 +1337,9 @@ func TestProviderGateRecoveryPreservesSessionHistory(t *testing.T) {
 			}
 			allEnabled := feasMatrixConfig(stub.URL, map[string]bool{"stub": true, "alt": true})
 			d := spawnFeasibilityDaemon(t, work, allEnabled, args...)
+			if tc.name == "selected-failover-group" {
+				d.selectModel(t, "alt/a1")
+			}
 			if tc.manualSelection != "" {
 				d.selectModel(t, tc.manualSelection)
 			}

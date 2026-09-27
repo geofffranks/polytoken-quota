@@ -1,6 +1,8 @@
 package service
 
 import (
+	"sort"
+
 	"github.com/geofffranks/polytoken-quota/internal/notice"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/state"
@@ -14,28 +16,16 @@ import (
 // byte-changing edit. It returns true when the caller must persist s: a
 // notice-failure event was appended, or the republication debt changed.
 func (c *Coordinator) notifyProviderGate(desired policy.Desired, s *state.State, edits []policyProviderEdit) bool {
-	providers := make([]notice.ProviderState, 0, len(edits))
-	for _, edit := range edits {
-		providers = append(providers, notice.ProviderState{ID: edit.id, Enabled: edit.enabled})
+	fresh := len(edits) > 0
+	debt := s.PendingProviderNotice
+	if debt == nil && !fresh {
+		return false
 	}
 	revision := s.Revision
-	fresh := len(edits) > 0
-	if !fresh {
-		debt := s.PendingProviderNotice
-		if debt == nil {
-			return false
-		}
-		// The committed provider states have not changed since the debt's
-		// revision (a steady-state pass makes no edits and no ownership
-		// movement), so the lost notice is republished verbatim at its own
-		// revision. on_change actions are not re-armed: they already had their
-		// at-most-once chance at the commit.
+	if !fresh && debt != nil {
 		revision = debt.Revision
-		providers = make([]notice.ProviderState, 0, len(debt.Providers))
-		for _, p := range debt.Providers {
-			providers = append(providers, notice.ProviderState{ID: p.ID, Enabled: p.Enabled})
-		}
 	}
+	providers := providerNoticeStates(debt, edits, nil)
 	doc, err := notice.RenderProvider(revision, c.now(), providers)
 	if err != nil {
 		return c.recordProviderNoticeFailure(s, revision, providers, "render", err)
@@ -47,16 +37,17 @@ func (c *Coordinator) notifyProviderGate(desired policy.Desired, s *state.State,
 	if err := notice.Publish(path, doc); err != nil {
 		return c.recordProviderNoticeFailure(s, revision, providers, "publish", err)
 	}
-	// Confirmed publication clears the republication debt; a stale debt from
-	// an older revision is superseded by this pass's fresh document.
-	if s.PendingProviderNotice != nil {
+	// Confirmed publication clears the republication debt. Fresh provider
+	// edits still arm their own post-commit action even when older debt was
+	// included in the published document.
+	changed := s.PendingProviderNotice != nil
+	if changed {
 		s.PendingProviderNotice = nil
-		return true
 	}
 	if fresh && len(desired.Operational.OnChange) > 0 {
 		c.pendingChange = &pendingChange{revision: revision, notice: doc, actions: desired.Operational.OnChange}
 	}
-	return false
+	return changed
 }
 
 // recordProviderNoticeFailure appends a sanitized notice failure event and
@@ -67,6 +58,69 @@ func (c *Coordinator) notifyProviderGate(desired policy.Desired, s *state.State,
 func (c *Coordinator) recordProviderNoticeFailure(s *state.State, revision uint64, providers []notice.ProviderState, stage string, err error) bool {
 	s.PendingProviderNotice = pendingNoticeDebt(revision, providerStatesToEdits(providers))
 	return c.recordNoticeFailure(s, revision, stage, err)
+}
+
+// reconcileProviderNoticeDebt keeps pending provider states that still match
+// the registered global config, then overlays states committed by fresh edits.
+func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled map[string]bool, revision uint64, edits []policyProviderEdit) *state.PendingProviderNotice {
+	states := make(map[string]bool)
+	if previous != nil {
+		for _, p := range previous.Providers {
+			if current, ok := enabled[p.ID]; !ok || current == p.Enabled {
+				states[p.ID] = p.Enabled
+			}
+		}
+	}
+	for _, edit := range edits {
+		states[edit.id] = edit.enabled
+	}
+	if len(states) == 0 {
+		return nil
+	}
+	if len(edits) == 0 && previous != nil {
+		revision = previous.Revision
+	}
+	ids := make([]string, 0, len(states))
+	for id := range states {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	debt := &state.PendingProviderNotice{Revision: revision, Providers: make([]state.ProviderNoticeState, 0, len(ids))}
+	for _, id := range ids {
+		debt.Providers = append(debt.Providers, state.ProviderNoticeState{ID: id, Enabled: states[id]})
+	}
+	return debt
+}
+
+// providerNoticeStates merges any debt with fresh edits, where a fresh state
+// for a provider takes precedence. When enabled is non-nil, stale debt is
+// omitted unless it still matches the committed value.
+func providerNoticeStates(debt *state.PendingProviderNotice, edits []policyProviderEdit, enabled map[string]bool) []notice.ProviderState {
+	states := make(map[string]bool)
+	if debt != nil {
+		for _, p := range debt.Providers {
+			if enabled != nil {
+				current, ok := enabled[p.ID]
+				if !ok || current != p.Enabled {
+					continue
+				}
+			}
+			states[p.ID] = p.Enabled
+		}
+	}
+	for _, edit := range edits {
+		states[edit.id] = edit.enabled
+	}
+	ids := make([]string, 0, len(states))
+	for id := range states {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	providers := make([]notice.ProviderState, 0, len(ids))
+	for _, id := range ids {
+		providers = append(providers, notice.ProviderState{ID: id, Enabled: states[id]})
+	}
+	return providers
 }
 
 // pendingNoticeDebt builds the republication debt for one committed pass.
