@@ -178,6 +178,8 @@ func analyzeRoot(in Input, disableProvider string) Report {
 		groupSources: map[string][]parsedGroup{},
 		definitions:  []Definition{},
 		unknownRefs:  map[string]bool{},
+		memo:         map[groupResolutionKey]groupResolution{},
+		budget:       maxGroupExpansions,
 	}
 	for _, id := range in.Enrolled {
 		r.enrolled[id] = true
@@ -263,6 +265,17 @@ func analyzeRoot(in Input, disableProvider string) Report {
 		}
 	}
 
+	// Fail closed on the groupless shape: with zero configured groups there is
+	// nothing to resolve, so the only remaining routes are the binary's
+	// shipped defaults and the dynamic catalog, whose composition this
+	// offline analyzer has never observed. Classifying that shape Safe would
+	// authorize a disable on unproven evidence (rev3: pin shipped composition
+	// in a binary fixture or classify the affected routes pending-unknown —
+	// never generalize).
+	if global != nil && len(r.groupSources) == 0 && (global.hasProviders || global.hasModels) {
+		r.pending("no modelgroups are configured in any registered layer; shipped default-route composition is unproven")
+	}
+
 	r.resolveGroups(global)
 	r.checkDefinitions(global)
 
@@ -330,6 +343,52 @@ type resolver struct {
 	definitions  []Definition
 	groupSources map[string][]parsedGroup
 	unknownRefs  map[string]bool
+	// memo caches one group source's resolved leaves per (group, layer,
+	// disabled) so shared references resolve once instead of exponentially:
+	// a chain of groups each referencing the next twice would otherwise
+	// expand 2^n leaf walks under the coordinator's mutation lock.
+	memo map[groupResolutionKey]groupResolution
+	// budget bounds the total resolveLeaves work per root analysis — both
+	// expansions and appended leaves, so a hostile graph is bounded in time
+	// AND output size (memoized sub-lists re-appended many times would
+	// otherwise build a 2^n-element result even with cached expansions). A
+	// hostile or merely oversized graph exhausts it and fails closed
+	// pending-unknown instead of hanging the reconcile.
+	budget int
+}
+
+// groupResolutionKey identifies one memoized leaf resolution: the group name,
+// the layer supplying its leaves, and the provider state it was resolved
+// under.
+type groupResolutionKey struct {
+	group      string
+	layerIndex int
+	disabled   bool
+}
+
+// groupResolution is one memoized resolution: the resolved leaf list (duplicates
+// and order preserved) and whether it was tainted by unresolved references.
+type groupResolution struct {
+	leaves  []string
+	tainted bool
+}
+
+// maxGroupExpansions bounds resolveLeaves work per analyzed root — expansions
+// plus appended leaves. A memoized sane config stays orders of magnitude
+// below it; the bound exists so a hostile reference graph fails closed
+// quickly rather than spinning under the mutation lock.
+const maxGroupExpansions = 50000
+
+// chargeLeaves debits n units of analysis budget (one expansion or n appended
+// leaves). It reports whether budget remains; on exhaustion it records the
+// pending reason once and the caller fails its subtree closed.
+func (r *resolver) chargeLeaves(n int) bool {
+	r.budget -= n
+	if r.budget > 0 {
+		return true
+	}
+	r.pending("modelgroups resolution exceeded the analysis budget; the composition is left unproven")
+	return false
 }
 
 func (r *resolver) pending(s string) { r.reasons[pendingPrefix+": "+s] = true }
@@ -399,6 +458,21 @@ func (r *resolver) resolveLeaves(global *parsedLayer, group string, src parsedGr
 			return nil, true
 		}
 	}
+	key := groupResolutionKey{group: group, layerIndex: src.layerIndex, disabled: disabled}
+	if hit, ok := r.memo[key]; ok {
+		// Re-appending a cached sub-list still costs output budget: many
+		// references to one healthy group would otherwise build an
+		// exponential result from cheap cache hits.
+		if !r.chargeLeaves(len(hit.leaves)) {
+			return nil, true
+		}
+		// Return a copy so callers appending to their own leaf lists can never
+		// alias the cached slice.
+		return append([]string(nil), hit.leaves...), hit.tainted
+	}
+	if !r.chargeLeaves(1) {
+		return nil, true
+	}
 	out := []string{}
 	tainted := false
 	for _, l := range src.leaves {
@@ -424,6 +498,9 @@ func (r *resolver) resolveLeaves(global *parsedLayer, group string, src parsedGr
 			next := append(append([]string{}, stack...), group)
 			for _, s := range sources {
 				leaves, t := r.resolveLeaves(global, ref, s, disabled, next)
+				if len(leaves) > 0 && !r.chargeLeaves(len(leaves)) {
+					return nil, true
+				}
 				out = append(out, leaves...)
 				tainted = tainted || t
 			}
@@ -436,9 +513,13 @@ func (r *resolver) resolveLeaves(global *parsedLayer, group string, src parsedGr
 			continue
 		}
 		if usable {
+			if !r.chargeLeaves(1) {
+				return nil, true
+			}
 			out = append(out, l.value)
 		}
 	}
+	r.memo[key] = groupResolution{leaves: append([]string(nil), out...), tainted: tainted}
 	return out, tainted
 }
 

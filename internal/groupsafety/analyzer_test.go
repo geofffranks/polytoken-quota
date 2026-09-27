@@ -1,6 +1,7 @@
 package groupsafety
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -861,4 +862,116 @@ modelgroups:
 			t.Fatalf("analysis not deterministic: %v vs %v", r.Reasons, again.Reasons)
 		}
 	})
+}
+
+// TestGroupEligibilityGrouplessConfigIsPendingUnknown proves the fail-closed
+// classification for registered roots that configure no modelgroups at all:
+// with zero configured groups there is nothing to resolve, so the only
+// remaining routes are the binary's shipped defaults and the dynamic catalog,
+// whose composition the offline analyzer has never observed. Such a shape
+// must never classify a disable Safe (COMP-1).
+func TestGroupEligibilityGrouplessConfigIsPendingUnknown(t *testing.T) {
+	groupless := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  stub:
+    url: http://127.0.0.1:9
+    enabled: true
+  alt:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  stub/m1:
+    provider: stub
+    enabled: true
+  alt/a1:
+    provider: alt
+    enabled: true
+`)}
+	r := analyze("stub", groupless)
+	wantVerdict(t, r, PendingUnknown)
+	wantReason(t, r, "no modelgroups are configured")
+
+	// The guard keys on configured groups, not on tier-default presence: the
+	// same config with one configured group stays on the proven Safe path
+	// (mirrors the absent-nano grouped fixture, which the binary reloads).
+	grouped := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  stub:
+    url: http://127.0.0.1:9
+    enabled: true
+  alt:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  stub/m1:
+    provider: stub
+    enabled: true
+  alt/a1:
+    provider: alt
+    enabled: true
+modelgroups:
+  polytoken:default_model_full: alt/a1
+`)}
+	wantVerdict(t, analyze("stub", grouped), Safe)
+
+	// A project layer's groups also satisfy the guard for the combined-root
+	// analysis: the composed root has configured groups to reason about.
+	projected := Layer{ID: "proj", Config: []byte("version: 4\nmodelgroups:\n  failover: [alt/a1]\n")}
+	wantVerdict(t, analyze("stub", groupless, projected), Safe)
+}
+
+// TestGroupEligibilityHostileReferenceGraphBounded proves the analyzer bounds
+// reference resolution (ADV-1): a chain of groups each referencing the next
+// twice would expand 2^n leaf walks and 2^n-element lists without the
+// memoized, budgeted resolver. The analysis must return promptly with a
+// pending-unknown verdict instead of hanging the reconcile under the mutation
+// lock.
+func TestGroupEligibilityHostileReferenceGraphBounded(t *testing.T) {
+	const depth = 40
+	var b strings.Builder
+	b.WriteString("version: 4\nproviders:\n  stub:\n    url: http://127.0.0.1:9\n    enabled: true\nmodels:\n  stub/m1:\n    provider: stub\n    enabled: true\nmodelgroups:\n")
+	for i := depth - 1; i >= 0; i-- {
+		if i == depth-1 {
+			b.WriteString(fmt.Sprintf("  g%02d: [stub/m1]\n", i))
+			continue
+		}
+		b.WriteString(fmt.Sprintf("  g%02d: [mg:g%02d, mg:g%02d]\n", i, i+1, i+1))
+	}
+	global := Layer{ID: "global", Global: true, Config: []byte(b.String())}
+	r := analyze("stub", global)
+	wantVerdict(t, r, PendingUnknown)
+	wantReason(t, r, "analysis budget")
+
+	// A healthy deeply-referencing graph stays fully resolvable within the
+	// budget: duplicates and order are preserved through memoized
+	// sub-resolutions, and the disable verdict matches the resolved graph.
+	healthy := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  stub:
+    url: http://127.0.0.1:9
+    enabled: true
+  alt:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  stub/m1:
+    provider: stub
+    enabled: true
+  alt/a1:
+    provider: alt
+    enabled: true
+modelgroups:
+  base: [stub/m1, alt/a1]
+  mid: [mg:base, mg:base]
+  top: [mg:mid, alt/a1]
+`)}
+	hr := analyze("stub", healthy)
+	wantVerdict(t, hr, Safe)
+	want := []string{"stub/m1", "alt/a1", "stub/m1", "alt/a1", "alt/a1"}
+	if !reflect.DeepEqual(hr.GroupsBefore["top"], want) {
+		t.Fatalf("healthy deep graph leaves = %v, want %v", hr.GroupsBefore["top"], want)
+	}
+	if wantAfter := []string{"alt/a1", "alt/a1", "alt/a1"}; !reflect.DeepEqual(hr.GroupsAfter["top"], wantAfter) {
+		t.Fatalf("healthy deep graph post-disable leaves = %v, want %v", hr.GroupsAfter["top"], wantAfter)
+	}
 }
