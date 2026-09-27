@@ -41,8 +41,10 @@ func (c *Coordinator) SelectionSnapshot(_ context.Context) (selection.Snapshot, 
 		// Selection ranks enumerated models and projects managed chains —
 		// exactly the fields a provider-only policy rejects. Return the clear
 		// unsupported result instead of silently selecting over an empty graph.
-		return selection.Snapshot{}, providerOnlyUnsupported("select/select-eval",
-			"model selection projects managed model chains, which a provider-only policy does not define")
+		// The error wraps both sentinels: the service-level unsupported
+		// contract and the selection runner's dedicated fatal classification.
+		return selection.Snapshot{}, fmt.Errorf("%w (%w)", providerOnlyUnsupported("select/select-eval",
+			"model selection projects managed model chains, which a provider-only policy does not define"), selection.ErrUnsupportedPolicyMode)
 	}
 	inputs.Desired = desired
 	if c.State == nil {

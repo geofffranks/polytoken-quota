@@ -91,29 +91,34 @@ type FatalKind string
 
 // Fatal failure kinds.
 const (
-	FatalRequest    FatalKind = "request"    // invalid invocation or conflicting flags
-	FatalPolicy     FatalKind = "policy"     // candidate policy or fixtures missing/unreadable/invalid
-	FatalSnapshot   FatalKind = "snapshot"   // desired configuration or state unreadable/invalid
-	FatalRefresh    FatalKind = "refresh"    // the opt-in quota refresh failed
-	FatalConsent    FatalKind = "consent"    // disclosure not enabled in the desired configuration
-	FatalCredential FatalKind = "credential" // runtime credential missing or unusable
-	FatalTask       FatalKind = "task"       // task empty, not UTF-8, or over the byte bound
-	FatalAssessor   FatalKind = "assessor"   // assessment client unavailable
-	FatalCanceled   FatalKind = "canceled"   // the run's context ended before completion
+	FatalRequest  FatalKind = "request"  // invalid invocation or conflicting flags
+	FatalPolicy   FatalKind = "policy"   // candidate policy or fixtures missing/unreadable/invalid
+	FatalSnapshot FatalKind = "snapshot" // desired configuration or state unreadable/invalid
+	// FatalUnsupportedMode marks a selection request against a policy mode
+	// that does not define managed chains (provider-only). The fixed sentence
+	// names the unsupported capability instead of the generic snapshot text.
+	FatalUnsupportedMode FatalKind = "unsupported-mode" // selection unsupported for the policy mode
+	FatalRefresh         FatalKind = "refresh"          // the opt-in quota refresh failed
+	FatalConsent         FatalKind = "consent"          // disclosure not enabled in the desired configuration
+	FatalCredential      FatalKind = "credential"       // runtime credential missing or unusable
+	FatalTask            FatalKind = "task"             // task empty, not UTF-8, or over the byte bound
+	FatalAssessor        FatalKind = "assessor"         // assessment client unavailable
+	FatalCanceled        FatalKind = "canceled"         // the run's context ended before completion
 )
 
 // fatalSentences are the fixed, safe Error() sentences per kind. They never
 // embed paths, configuration values, or causes.
 var fatalSentences = map[FatalKind]string{
-	FatalRequest:    "selection: invalid invocation",
-	FatalPolicy:     "selection: candidate policy or fixtures are missing, unreadable, or invalid",
-	FatalSnapshot:   "selection: desired configuration or state is unreadable or invalid",
-	FatalRefresh:    "selection: quota refresh failed; selection stopped",
-	FatalConsent:    "selection: disclosure requires selection.jev.enabled in the desired configuration",
-	FatalCredential: "selection: assessment credential is unavailable",
-	FatalTask:       "selection: task is empty, not valid UTF-8, or exceeds the 64 KiB limit",
-	FatalAssessor:   "selection: assessment is unavailable",
-	FatalCanceled:   "selection: run was canceled before completion",
+	FatalRequest:         "selection: invalid invocation",
+	FatalPolicy:          "selection: candidate policy or fixtures are missing, unreadable, or invalid",
+	FatalSnapshot:        "selection: desired configuration or state is unreadable or invalid",
+	FatalUnsupportedMode: "selection: model selection is unsupported for provider-only policies (no managed model chains)",
+	FatalRefresh:         "selection: quota refresh failed; selection stopped",
+	FatalConsent:         "selection: disclosure requires selection.jev.enabled in the desired configuration",
+	FatalCredential:      "selection: assessment credential is unavailable",
+	FatalTask:            "selection: task is empty, not valid UTF-8, or exceeds the 64 KiB limit",
+	FatalAssessor:        "selection: assessment is unavailable",
+	FatalCanceled:        "selection: run was canceled before completion",
 }
 
 // FatalError is a fatal orchestration failure. Error() is the fixed safe
@@ -136,6 +141,22 @@ func (e *FatalError) Error() string {
 // Unwrap exposes the wrapped cause for errors.Is classification. The cause is
 // not safe to print.
 func (e *FatalError) Unwrap() error { return e.err }
+
+// ErrUnsupportedPolicyMode is wrapped by snapshot sources when selection is
+// invoked against a policy mode that does not define managed chains. The
+// runner classifies it as FatalUnsupportedMode so the fixed sentence names the
+// unsupported capability instead of the generic snapshot text.
+var ErrUnsupportedPolicyMode = errors.New("selection: model selection is unsupported for this policy mode")
+
+// snapshotFatal classifies a SelectionSnapshot failure. The provider-only
+// unsupported result is a deliberate, safe, fixed message — not a config or
+// state read failure — so it gets its own fatal kind.
+func snapshotFatal(err error) *FatalError {
+	if errors.Is(err, ErrUnsupportedPolicyMode) {
+		return fatal(FatalUnsupportedMode, err)
+	}
+	return fatal(FatalSnapshot, err)
+}
 
 func fatal(kind FatalKind, cause error) *FatalError {
 	return &FatalError{Kind: kind, err: cause}
@@ -307,7 +328,7 @@ func (r *SelectRunner) Run(ctx context.Context, req SelectRequest) (SelectOutcom
 	}
 	snap, err := r.Snapshot.SelectionSnapshot(ctx)
 	if err != nil {
-		return SelectOutcome{}, fatal(FatalSnapshot, err)
+		return SelectOutcome{}, snapshotFatal(err)
 	}
 	out.AsOf = snap.AsOf
 
@@ -484,7 +505,7 @@ func (r *EvaluationRunner) RunEval(ctx context.Context, req EvalInvocation) (*Re
 	}
 	snap, err := r.Snapshot.SelectionSnapshot(ctx)
 	if err != nil {
-		return nil, fatal(FatalSnapshot, err)
+		return nil, snapshotFatal(err)
 	}
 	// Local validation before any disclosure: policy parse, fixture parse,
 	// and phase/tier coverage all complete before the first remote call.

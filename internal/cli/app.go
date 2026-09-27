@@ -505,6 +505,12 @@ func runReconcile(ctx context.Context, args []string, deps Dependencies, stdout,
 	if verbose {
 		writeVerboseTrace(stdout, out)
 	}
+	if !out.Accepted && errors.Is(out.Error, service.ErrProviderOnlyUnsupported) {
+		// A quiet reconcile prints nothing by contract (exit code only), but an
+		// unsupported result must be clear, not a silent failure: surface the
+		// provider-only rejection without changing legacy error rendering.
+		fmt.Fprintln(stderr, validate.DefaultSanitize([]byte(out.Error.Error())))
+	}
 	if dryRun {
 		return dryRunExitCode(out)
 	}

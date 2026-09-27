@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -200,6 +201,37 @@ func TestStatusJSONCarriesProviderOnly(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), `"provider_only":true`) {
 		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+// reconcileUnsupportedSpy returns the provider-only unsupported outcome from
+// Reconcile.
+type reconcileUnsupportedSpy struct {
+	depsSpy
+}
+
+func (s *reconcileUnsupportedSpy) Dependencies() Dependencies {
+	return Dependencies{Mutator: s, Diagnoser: s, SnapshotBuilder: s}
+}
+
+func (s *reconcileUnsupportedSpy) Reconcile(_ context.Context, _, _, _ bool) service.Outcome {
+	s.Mutations++
+	return service.Outcome{Accepted: false, Error: fmt.Errorf("wrapped: %w: %s",
+		service.ErrProviderOnlyUnsupported, "reconcile provider gating is not implemented")}
+}
+
+// TestReconcileProviderOnlyMessageRendered proves the quiet reconcile renders
+// the provider-only unsupported message on stderr (the quiet exit-code-only
+// contract stays untouched for every other error).
+func TestReconcileProviderOnlyMessageRendered(t *testing.T) {
+	spy := &reconcileUnsupportedSpy{}
+	var stdout, stderr bytes.Buffer
+	code := Run(context.Background(), []string{"reconcile"}, strings.NewReader(""), &stdout, &stderr, spy.Dependencies())
+	if code != ExitRejected {
+		t.Fatalf("exit=%d", code)
+	}
+	if !strings.Contains(stderr.String(), "provider-only policies do not support legacy chain management") {
+		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
 
