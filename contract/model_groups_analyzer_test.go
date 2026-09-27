@@ -164,10 +164,14 @@ models:
   stub/m1:
     provider: stub
     provider_name: m1
+    class: full
+    context_window: 8192
     enabled: true
   stub/m2:
     provider: stub
     provider_name: m2
+    class: full
+    context_window: 8192
     enabled: true
 modelgroups:
   failover:
@@ -207,8 +211,8 @@ modelgroups:
 	}
 	t.Cleanup(func() { _ = candidate.Cleanup() })
 	env := isolateEnv(t, work)
-	if code := runCommand(t, bin, env, candidate, work, "config", "validate"); code != 0 {
-		t.Fatalf("composed staged candidate failed validation (exit %d)", code)
+	if out, code := polyRun(t, bin, env, candidate.ConfigDir, work, "config", "validate"); code != 0 {
+		t.Fatalf("composed staged candidate failed validation (exit %d): %s", code, out)
 	}
 	data, err := os.ReadFile(filepath.Join(candidate.ConfigDir, "config.yaml"))
 	if err != nil {
