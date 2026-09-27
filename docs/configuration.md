@@ -17,6 +17,92 @@ global:
   full: [codex/gpt-5]
 ```
 
+## Policy modes: legacy and provider-only
+
+The `mode` key selects the policy grammar. It is optional:
+
+- **Legacy** (no `mode` key, or `mode: legacy`): the full grammar documented on
+  this page — provider mappings enumerate concrete `models`, targets carry
+  desired chains (`full`/`mini`/`nano`/`classifier`) and `definitions`, and
+  quota may reorder chains when `routing` is enabled.
+- **`mode: provider-only`** (strictly opt-in): quota tracks enrolled Polytoken
+  provider IDs and never edits models, chains, or definitions. Every other key
+  on this page keeps its legacy meaning.
+
+```yaml
+version: 1
+mode: provider-only
+providers:
+  codex:
+    quota:
+      adapter: codex
+  team-llm: {}
+global:
+  root: /home/user/.config/polytoken
+```
+
+### Provider-only grammar
+
+- `providers.<id>` enrolls the Polytoken provider ID `<id>`. IDs are enrolled
+  verbatim — they do not need to name a quota adapter. A mapping may be empty
+  (`id: {}`): the provider is visible in diagnostics but never polled.
+- `providers.<id>.quota` optionally attaches quota polling. Unlike legacy
+  mode, the quota block must name its adapter explicitly with `quota.adapter`
+  (one of the built-in adapter names). The Anthropic rules carry over:
+  `adapter: anthropic` requires `monthly_budget_usd` unless
+  `mode: subscription` is set, and `adapter: anthropic-subscription` is always
+  subscription mode (no budget, no `mode` key).
+- `global.root` is required: it is the single configuration root the
+  provider-only policy targets.
+- Legacy fields are **rejected** in provider-only mode, and the file fails to
+  load: `models` under a provider, `full`/`mini`/`nano`/`classifier` chains and
+  `definitions` on a target, `projects`, and the top-level `routing` and
+  `selection` sections. A mixed legacy/provider-only file never half-converts
+  an installation.
+- `operational` behaves exactly as in legacy mode.
+
+### Provider-only command support
+
+| Command | Provider-only behavior |
+|---|---|
+| `init --provider-only [--force]` | Create (or, with `--force`, replace) the policy enrolling the live global provider IDs. Never adopts model groups, models, chains, or definitions. |
+| `init --provider-only --preview` | Read-only migration preview (see below). |
+| `status` | Provider-level status with `provider_only: true`; route/chain sections are empty by design and the text view says so. |
+| `check` | Polls enrolled, adapter-configured providers as usual. |
+| `check --reconcile` | Unsupported: provider gating is not implemented and there are no chains to reconcile. Rejected with guidance; run `check` without `--reconcile`. |
+| `reconcile` | Unsupported (same reason). Rejected, never a silent no-op. |
+| `routing enable/disable/reset` | Unsupported: chain-based routing is legacy behavior and a provider-only policy rejects the `routing` section. |
+| `doctor` | Maintained: policy schema, state, publication/journal, and quota findings work; no chain findings exist. |
+| `history` | Maintained: state history is independent of the policy mode. |
+| `select`, `select-eval` | Unsupported: model selection projects managed chains, which a provider-only policy does not define. |
+| `install-hook` / `notice-hook` | Maintained: hook installation and the notice path are mode-independent. |
+
+### Migrating a legacy policy to provider-only mode
+
+`init --provider-only --force` over an existing legacy policy is a migration:
+
+- The operator-authored `operational` section (timeouts, notice path,
+  `on_change` actions, backup retention) is carried into the new policy.
+- The replaced legacy policy file is preserved at
+  `desired.yaml.before-provider-only` next to the original.
+- The migration preview — printed by the command, and available in advance
+  via `init --provider-only --preview` — reports:
+  - the provider IDs the new policy enrolls and the global root it targets;
+  - every legacy quota-authored edit that **persists as operator-owned**:
+    previously managed `defaults.full`/`mini`/`nano`/`classifier` chains,
+    definition chains, and `models.*` enablement stay in your Polytoken
+    configuration exactly as quota left them. Provider-only quota never
+    removes or rewrites those edits; they are yours to change or revert.
+  - the managed-file backup root and apply journal paths (with whether files
+    exist there yet) and the preserved policy path;
+  - rollback guidance (restore the preserved policy file, or restore a
+    managed-file backup, and rerun `init` without `--provider-only`).
+- The migration only replaces the quota policy file. Polytoken configuration
+  bytes are never touched.
+
+A plain legacy `init --force` over a provider-only policy is rejected: leaving
+provider-only mode is a deliberate migration, never a side effect.
+
 ## `version`
 
 Required. Currently `1`. A missing or different version is rejected at load.
