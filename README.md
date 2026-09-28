@@ -2,7 +2,7 @@
 
 `polytoken-quota` polls provider quota directly, records durable sanitized state, and reconciles explicitly managed Polytoken model fields. It supports one global Polytoken configuration and registered project configurations.
 
-Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires either a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription-window polling. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by quota projection pace (how fast each is burning its quota relative to its reset cycle), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
+Quota polling participates per supported provider mapping: omitted or empty `quota` uses adapter defaults, while Anthropic requires either a positive `monthly_budget_usd` for API spend polling or `mode: subscription` for experimental Claude subscription-window polling. Quota-based routing is enabled by default. The tool ranks configured, pollable providers by a use-it-or-lose-it signal (how much quota each would forfeit unused at reset, net of how far it has overspent), availability, balance group, off-peak schedules, and weight, then applies the resulting order through the normal validated reconciliation flow. Set `routing: {enabled: false}` in `desired.yaml` to opt out.
 
 The tool never contacts a running Polytoken daemon from host commands; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). Provider-only policies are an explicit opt-in: they gate enrolled Polytoken providers without managing groups, defaults, model flags, or facet/subagent assignments, and do not guarantee a particular fallback. The tool stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
 
@@ -138,7 +138,7 @@ The `opencode-go` adapter polls OpenCode Go's read-only usage endpoint (`GET /ze
 
 `percent` is **percent used**, never dollars, so this adapter needs no `monthly_budget_usd`. All three windows participate in routing, and the provider's effective remaining allowance is the minimum across them — the same conservative rule the Codex adapter applies to its 5-hour session window. A `rolling` window at 100% therefore demotes the provider for the remainder of that 5-hour window even when the monthly allowance is largely unused. That is deliberate and matches existing repo-wide behaviour, not an OpenCode-specific rule.
 
-Reset anchoring uses the longest window reporting a future reset (in practice `monthly`). The 5-hour `rolling` window is shorter than the one-day quota-cycle floor, so it never drives next-reset or pace projection — but it does still govern availability.
+Reset anchoring uses the longest window reporting a future reset (in practice `monthly`). The 5-hour `rolling` window is shorter than the one-day quota-cycle floor, so it never drives next-reset or the routing signal — but it does still govern availability.
 
 Fail-closed semantics:
 
