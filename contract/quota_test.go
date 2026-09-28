@@ -1138,6 +1138,23 @@ func TestAntigravityContractFixtures(t *testing.T) {
 			t.Fatalf("gemini_weekly=%+v", weekly)
 		}
 	})
+	t.Run("live_shape", func(t *testing.T) {
+		// Real agy print-mode envelope (synthetic values): the exhausted
+		// Claude/GPT group must not make the Gemini snapshot unavailable.
+		snap, err := fetchAntigravityFixture(t, "live_shape.json")
+		if err != nil || snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable || len(snap.Windows) != 2 {
+			t.Fatalf("snap=%+v err=%v", snap, err)
+		}
+		weekly := contractFindWindow(snap.Windows, "gemini_weekly")
+		fiveHour := contractFindWindow(snap.Windows, "gemini_5h")
+		if weekly == nil || weekly.Period == nil || *weekly.Period != 7*24*time.Hour || math.Abs(*weekly.UsagePercent-40) > 1e-9 ||
+			weekly.ResetAt == nil || !weekly.ResetAt.Equal(time.Date(2026, 8, 20, 7, 0, 0, 0, time.UTC)) {
+			t.Fatalf("gemini_weekly=%+v", weekly)
+		}
+		if fiveHour == nil || fiveHour.Period == nil || *fiveHour.Period != 5*time.Hour || math.Abs(*fiveHour.UsagePercent-10) > 1e-9 {
+			t.Fatalf("gemini_5h=%+v", fiveHour)
+		}
+	})
 	t.Run("disabled_bucket", func(t *testing.T) {
 		snap, err := fetchAntigravityFixture(t, "disabled_bucket.json")
 		if err != nil || len(snap.Windows) != 1 || snap.Windows[0].Name != "gemini_weekly" || snap.Availability != quota.QuotaAvailable {
@@ -1155,7 +1172,7 @@ func TestAntigravityContractFixtures(t *testing.T) {
 }
 
 func TestAntigravityContractFixturesAreSecretFree(t *testing.T) {
-	for _, name := range []string{"quota.json", "no_gemini.json", "wrong_command.json", "disabled_bucket.json"} {
+	for _, name := range []string{"quota.json", "live_shape.json", "no_gemini.json", "wrong_command.json", "disabled_bucket.json"} {
 		b, err := os.ReadFile(filepath.Join("testdata", "quota", "antigravity", name))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

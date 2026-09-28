@@ -113,8 +113,8 @@ func AntigravityEvidence(_ time.Time) Evidence {
 		Endpoint:    "exec:agy -p /quota --output-format json",
 		Method:      "EXEC",
 		AuthType:    "vendor-cli-session",
-		SchemaNote:  "command {name:/quota, data:{groups[{displayName, buckets[{bucketId, remainingFraction, resetTime, disabled}]}]}}; Gemini group only; derived from quota-axi's adapter, not captured live",
-		FixturePath: "contract/testdata/quota/antigravity/quota.json",
+		SchemaNote:  "print-mode envelope {status, response, usage, command:{name:usage|quota, data:{groups[{name, buckets[{id, window, remaining_fraction, reset_time}]}]}}}; zero tokens/turns; camelCase aliases accepted; Gemini group only; parser derived from quota-axi, shape confirmed against a live account 2026-09-28",
+		FixturePath: "contract/testdata/quota/antigravity/live_shape.json",
 		RecordedAt:  recorded,
 		ReviewBy:    recorded.AddDate(0, 3, 0), // quarterly review per evidence policy
 	}

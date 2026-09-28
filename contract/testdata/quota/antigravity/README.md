@@ -1,10 +1,16 @@
 Synthetic fixtures for the Antigravity adapter, which runs
 `agy -p /quota --output-format json` and parses its stdout.
 
-These are **not** live captures. The shapes follow quota-axi's agy print-mode
-normalizer. Run `polytoken-quota check` with the `agy` CLI installed and logged
-in to confirm the vendor output still matches. A mismatch fails closed.
+These are **not** live captures; all values are synthetic. `live_shape.json`
+reproduces the structure a live, eligible account returned on 2026-09-28: a
+print-mode envelope (`status`, `response` text table, zero-token `usage`)
+carrying `command: {name: "usage", data: {groups: [...]}}` with snake_case
+bucket fields and a `window` of `weekly` or `5h`. The other fixtures follow
+quota-axi's agy normalizer, including its camelCase aliases. A mismatch fails
+closed.
 
+- `live_shape.json`: the live structure with a Gemini group (weekly 60% left,
+  5-hour 90% left) and an exhausted Claude/GPT group that must be ignored.
 - `quota.json`: a `/quota` result with a Gemini group (5-hour bucket with a
   numeric remaining fraction and ISO reset; weekly bucket with a
   `{case, value}` remaining fraction and epoch-millisecond reset) and a
