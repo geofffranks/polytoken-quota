@@ -1,0 +1,15 @@
+{
+  "command": {
+    "name": "/help",
+    "data": {
+      "groups": [
+        {
+          "displayName": "Gemini",
+          "buckets": [
+            { "bucketId": "gemini-weekly", "remainingFraction": 0.5, "resetTime": "2026-08-20T00:00:00Z" }
+          ]
+        }
+      ]
+    }
+  }
+}

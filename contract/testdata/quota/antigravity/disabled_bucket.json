@@ -1,0 +1,18 @@
+{
+  "command": {
+    "name": "/usage",
+    "data": {
+      "summary": {
+        "groups": [
+          {
+            "name": "Gemini",
+            "buckets": [
+              { "bucketId": "gemini-5h", "disabled": true, "remainingFraction": 0, "resetTime": "2026-08-15T13:00:00Z" },
+              { "bucket_id": "gemini-weekly", "remaining_fraction": 0.9, "reset_time": "2026-08-20T00:00:00Z" }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

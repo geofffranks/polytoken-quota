@@ -325,6 +325,15 @@ var builtInAdapters = []AdapterDefinition{
 			return NewOpenCodeGoSource(id, client, creds, reg, now)
 		},
 	},
+	{
+		Name:     antigravityProviderName,
+		Evidence: AntigravityEvidence,
+		// The Antigravity source runs the vendor agy CLI with its own login;
+		// the HTTP client, creds, and budget parameters are deliberately unused.
+		New: func(id string, _ *BoundedClient, _ CredentialResolver, _ float64, reg *EvidenceRegistry, now time.Time) QuotaSource {
+			return NewAntigravitySource(id, nil, reg, now)
+		},
+	},
 }
 
 // AdapterDefinitions returns the built-in adapter definitions in stable name
