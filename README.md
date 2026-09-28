@@ -154,7 +154,7 @@ The endpoint contract is derived from OpenCode's first-party open-source console
 
 ### Antigravity adapter
 
-The `antigravity` adapter runs the Antigravity CLI's local quota command, `agy -p /quota --output-format json`, so the `agy` CLI must be installed on `PATH` and already logged in. Only the **Gemini** quota group is counted (its 5-hour and weekly buckets); the Claude/GPT group is ignored. The CLI runs without a shell, with a 15-second timeout, and with `open`/`xdg-open` replaced by stubs that refuse, so a logged-out CLI cannot launch a browser login from a scheduled run; it fails closed instead. The adapter does not inspect other processes. Like OpenCode Go, the output shape was derived from another client rather than a live capture.
+The `antigravity` adapter runs the Antigravity CLI's local quota command, `agy -p /quota --output-format json`, so the `agy` CLI must be installed on `PATH` and already logged in. Only the **Gemini** quota group is counted (its 5-hour and weekly buckets); the Claude/GPT group is ignored. The CLI runs without a shell, with a 15-second timeout, and with `open`/`xdg-open` replaced by stubs that refuse, so a logged-out CLI cannot launch a browser login from a scheduled run; it fails closed instead. The adapter does not inspect other processes. The expected output shape follows [quota-axi](https://github.com/kunchenguid/quota-axi) and has **not** yet been confirmed against a live, eligible account. An `agy` account that Google has flagged as ineligible ("Verify your account to continue") fails the check until you verify it in a browser yourself.
 
 ### Anthropic adapters
 
@@ -456,11 +456,52 @@ Routing uses a deterministic lexicographic ranking, not a blended score:
 
 1. Providers must be eligible: their mode is `normal` or `reserve`, their snapshot is fresh, and it contains usable remaining quota.
 2. Eligible providers stay grouped by `balance_group`; groups appear in their first configured order and do not interleave.
-3. Within each group, providers are ordered by a **use-it-or-lose-it signal**, highest first. For each quota window of at least one day that reports a period, a reset time, and remaining quota, the signal adds how much quota would be forfeited at reset (remaining fraction ÷ fraction of the period left, with at least one hour left) and subtracts how far usage has outrun time (used fraction ÷ fraction of the period elapsed, rounded up to whole days). Windows are averaged weighted by period length and the result is clamped to ±100. Positive means quota will reach reset unused, zero is exactly on pace, and negative means overdrawn. A provider close to reset with quota left therefore drains first. Windows shorter than one day (such as 5-hour session limits) do not affect the signal, though an exhausted one still makes the provider ineligible.
+3. Within each group, providers are ordered by their **use-it-or-lose-it signal**, highest first (see [How the routing signal is scored](#how-the-routing-signal-is-scored)). Positive means quota will reach reset unused, zero is exactly on pace, and negative means overdrawn.
 4. Signals are clustered: after sorting, a new cluster starts wherever two neighboring signals differ by 0.20 or more. Providers in the same cluster are tied on the signal, and off-peak before peak, then higher `weight`, break the tie.
 5. If providers remain equal after signal, schedule, and weight, they share a routing rank. Each desired route then keeps its own authored order for those providers; mapping ID is used only to keep diagnostic presentation deterministic. If any eligible provider in a balance group has no signal (no qualifying window), the signal is skipped for that whole group. Ineligible providers remain at the end and are never disabled by routing.
 
 For example, if `codex` and `neuralwatt` are both eligible in the same balance group with signals +0.40 and +0.30, and equal schedule and weight, they share a rank. A researcher chain authored as `neuralwatt` then `codex` stays Neuralwatt-first, while an implementer chain authored as `codex` then `neuralwatt` stays Codex-first. If Codex's signal were +0.90 instead, Codex would rank first in both chains.
+
+### How the routing signal is scored
+
+Subscription quota is use-it-or-lose-it: whatever is left when a window resets is gone. The signal asks, for each provider, "how much paid allowance am I about to forfeit, net of how far I have already overspent?" and routes work to whoever would waste the most by being skipped.
+
+**Which windows count.** A window contributes when it reports a period of **at least one day**, a reset time, and a remaining fraction. Shorter windows, such as 5-hour session limits, are rate limits rather than quota cycles, so they never move the signal. An exhausted short window still makes the provider ineligible, so it drops out of ranking entirely until that window resets.
+
+**Per-window gap.** For a window with period `P`, remaining fraction `r` (0–1), and time until reset `R`:
+
+```text
+left     = max( clamp(R, 0, P) / P ,  1 hour / P )       # fraction of the period still to come
+elapsed  = max( min(ceil_to_day(P - R), P) / P ,  5 minutes / P )  # fraction already gone
+gap      = r / left  -  (1 - r) / elapsed
+```
+
+- `r / left` is the **forfeiture pressure**. Quota left over with little time remaining is about to expire, so this term grows as reset approaches.
+- `(1 - r) / elapsed` is the **burn rate**. It measures how much has been used relative to how much of the cycle has passed. Using quota faster than time passes makes it large.
+- On exact pace, for example 3/7 used on day 3 of a 7-day window, the two terms cancel and the gap is 0.
+
+**Combining windows.** When a provider reports several qualifying windows, such as weekly and monthly, their gaps are averaged weighted by period length, so a 30-day window counts about four times as much as a 7-day one. The result is clamped to ±100.
+
+**Why the floors and rounding.**
+- Elapsed time is **rounded up to whole days**. Right after a reset, a few minutes of use would otherwise look like a huge overdraft. The rounding means the signal leans slightly positive within a day, which is intentional.
+- The **one-hour floor** on time left keeps a window at or past its reset finite. Without it, a window about to reset with quota left would divide by zero.
+- The **five-minute floor** on elapsed time does the same for a window whose reset is a full period away.
+
+**Worked examples** (one 7-day window each):
+
+| Situation | Used | Day | Signal | Reading |
+|---|---|---|---|---|
+| Exactly on pace | 3/7 | 3 | **0.00** | nothing to reclaim, nothing overdrawn |
+| Under pace | 1/7 | 3 | **+1.17** | quota is piling up; prefer this provider |
+| Over pace | 5/7 | 3 | **−1.17** | burning too fast; route elsewhere |
+| Early, half pace | 1/7 | 2 | **+0.70** | ahead, but plenty of time to catch up |
+| Late, half pace | 3/7 | 6 | **+3.50** | 4/7 of the week expires tomorrow; drain it now |
+
+The last two rows show the difference from the old pace ranking. Both have used quota at half the rate time has passed, so pace called them equal. The signal knows the late one is about to lose most of its allowance and puts it first.
+
+**Rank ties.** The signal is continuous, but tiny differences shouldn't override your authored chain order on every poll. Providers are sorted by signal and grouped whenever neighbors differ by less than **0.20**. Mid-cycle, 0.20 of signal corresponds to about 0.10 of the used ÷ elapsed ratio, the same sensitivity the old pace bands had. Within a group, off-peak, `weight`, and then each chain's own authored order decide. If any eligible provider in a balance group reports no qualifying window, the signal is ignored for that whole group rather than guessed. `status` shows each provider's value as `peak, signal +0.42` / `off-peak, signal -1.30`.
+
+**Credit.** The signal is adapted from the `spendPriority` metric in [quota-axi](https://github.com/kunchenguid/quota-axi) by Kun Chen (MIT). The Antigravity adapter also follows quota-axi's `agy` output normalizer. This project reimplements those ideas in Go, keeps its own fail-closed eligibility rules, and ignores sub-day windows, so the numbers will not match quota-axi's exactly.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 
