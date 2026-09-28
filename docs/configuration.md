@@ -149,7 +149,6 @@ block, the key must also name a built-in quota adapter:
 | `anthropic` | Anthropic Admin API spend against `monthly_budget_usd` |
 | `neuralwatt` | Neuralwatt Cloud quota endpoint |
 | `opencode-go` | OpenCode Go usage-window polling (`OPENCODE_GO_API_KEY`, else OpenCode's `auth.json`) |
-| `antigravity` | Gemini quota group from the logged-in `agy` CLI (`agy -p /quota`) |
 
 A quota block under any other key is rejected at load with the valid names.
 Supported non-Anthropic mappings may omit `quota` or use `quota: {}`; both forms

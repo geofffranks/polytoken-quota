@@ -152,10 +152,6 @@ Not synthesized: the endpoint exposes no dollar amounts and no per-model breakdo
 
 The endpoint contract is derived from OpenCode's first-party open-source console code and is **not officially documented**, so its evidence is reviewed quarterly rather than annually. If OpenCode changes or withdraws the route, the adapter fails closed instead of reporting a stale or invented allowance.
 
-### Antigravity adapter
-
-The `antigravity` adapter runs the Antigravity CLI's local quota command, `agy -p /quota --output-format json`, so the `agy` CLI must be installed on `PATH` and already logged in. Only the **Gemini** quota group is counted (its 5-hour and weekly buckets); the Claude/GPT group is ignored. The CLI runs without a shell, with a 15-second timeout, and with `open`/`xdg-open` replaced by stubs that refuse, so a logged-out CLI cannot launch a browser login from a scheduled run; it fails closed instead. The adapter does not inspect other processes. The parser follows [quota-axi](https://github.com/kunchenguid/quota-axi)'s `agy` normalizer and was confirmed against a live account on 2026-09-28. The command is a local lookup that reports zero model tokens and zero turns, so polling costs no inference. An `agy` account that Google has flagged as ineligible ("Verify your account to continue") fails the check until you verify it in a browser yourself.
-
 ### Anthropic adapters
 
 The default `anthropic` API mode is for pay-as-you-go Anthropic **API** accounts.
@@ -501,7 +497,7 @@ The last two rows show the difference from the old pace ranking. Both have used 
 
 **Rank ties.** The signal is continuous, but tiny differences shouldn't override your authored chain order on every poll. Providers are sorted by signal and grouped whenever neighbors differ by less than **0.20**. Mid-cycle, 0.20 of signal corresponds to about 0.10 of the used ÷ elapsed ratio, the same sensitivity the old pace bands had. Within a group, off-peak, `weight`, and then each chain's own authored order decide. If any eligible provider in a balance group reports no qualifying window, the signal is ignored for that whole group rather than guessed. `status` shows each provider's value as `peak, signal +0.42` / `off-peak, signal -1.30`.
 
-**Credit.** The signal is adapted from the `spendPriority` metric in [quota-axi](https://github.com/kunchenguid/quota-axi) by Kun Chen (MIT). The Antigravity adapter also follows quota-axi's `agy` output normalizer. This project reimplements those ideas in Go, keeps its own fail-closed eligibility rules, and ignores sub-day windows, so the numbers will not match quota-axi's exactly.
+**Credit.** The signal is adapted from the `spendPriority` metric in [quota-axi](https://github.com/kunchenguid/quota-axi) by Kun Chen (MIT). This project reimplements those ideas in Go, keeps its own fail-closed eligibility rules, and ignores sub-day windows, so the numbers will not match quota-axi's exactly.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 

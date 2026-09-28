@@ -309,7 +309,6 @@ func buildReleaseRegistry() *quota.EvidenceRegistry {
 	reg.Register(quota.AnthropicSubscriptionEvidence(time.Now()))
 	reg.Register(quota.NeuralwattEvidence(time.Now()))
 	reg.Register(quota.OpenCodeGoEvidence(time.Now()))
-	reg.Register(quota.AntigravityEvidence(time.Now()))
 	return reg
 }
 
@@ -1090,96 +1089,6 @@ func TestNeuralwattContractFixtureIsSecretFree(t *testing.T) {
 	body := loadNeuralwattFixture(t)
 	if secretPattern.MatchString(string(body)) {
 		t.Fatal("Neuralwatt fixture contains a secret pattern")
-	}
-}
-
-// --- Antigravity adapter fixture acceptance ---------------------------------
-//
-// These replay the synthetic agy /quota fixtures through the real adapter via
-// a fake runner; no process is spawned.
-
-type antigravityFixtureRunner struct{ out []byte }
-
-func (antigravityFixtureRunner) LookPath(name string) (string, error) {
-	return "/synthetic/bin/" + name, nil
-}
-
-func (r antigravityFixtureRunner) Run(context.Context, string, []string, []string) ([]byte, error) {
-	return r.out, nil
-}
-
-func fetchAntigravityFixture(t *testing.T, name string) (quota.QuotaSnapshot, error) {
-	t.Helper()
-	path := filepath.Join("testdata", "quota", "antigravity", name)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture %s: %v", path, err)
-	}
-	reg := quota.NewEvidenceRegistry()
-	reg.Register(quota.AntigravityEvidence(contractNow))
-	src := quota.NewAntigravitySource("antigravity-fixture", antigravityFixtureRunner{out: b}, reg, contractNow)
-	src.TempDir = t.TempDir()
-	return src.Fetch(context.Background())
-}
-
-func TestAntigravityContractFixtures(t *testing.T) {
-	t.Run("quota", func(t *testing.T) {
-		snap, err := fetchAntigravityFixture(t, "quota.json")
-		if err != nil || snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable || len(snap.Windows) != 2 {
-			t.Fatalf("snap=%+v err=%v", snap, err)
-		}
-		fiveHour := contractFindWindow(snap.Windows, "gemini_5h")
-		weekly := contractFindWindow(snap.Windows, "gemini_weekly")
-		if fiveHour == nil || fiveHour.Period == nil || *fiveHour.Period != 5*time.Hour || math.Abs(*fiveHour.UsagePercent-25) > 1e-9 {
-			t.Fatalf("gemini_5h=%+v", fiveHour)
-		}
-		if weekly == nil || weekly.Period == nil || *weekly.Period != 7*24*time.Hour || math.Abs(*weekly.UsagePercent-60) > 1e-9 ||
-			weekly.ResetAt == nil || !weekly.ResetAt.Equal(time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)) {
-			t.Fatalf("gemini_weekly=%+v", weekly)
-		}
-	})
-	t.Run("live_shape", func(t *testing.T) {
-		// Real agy print-mode envelope (synthetic values): the exhausted
-		// Claude/GPT group must not make the Gemini snapshot unavailable.
-		snap, err := fetchAntigravityFixture(t, "live_shape.json")
-		if err != nil || snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaAvailable || len(snap.Windows) != 2 {
-			t.Fatalf("snap=%+v err=%v", snap, err)
-		}
-		weekly := contractFindWindow(snap.Windows, "gemini_weekly")
-		fiveHour := contractFindWindow(snap.Windows, "gemini_5h")
-		if weekly == nil || weekly.Period == nil || *weekly.Period != 7*24*time.Hour || math.Abs(*weekly.UsagePercent-40) > 1e-9 ||
-			weekly.ResetAt == nil || !weekly.ResetAt.Equal(time.Date(2026, 8, 20, 7, 0, 0, 0, time.UTC)) {
-			t.Fatalf("gemini_weekly=%+v", weekly)
-		}
-		if fiveHour == nil || fiveHour.Period == nil || *fiveHour.Period != 5*time.Hour || math.Abs(*fiveHour.UsagePercent-10) > 1e-9 {
-			t.Fatalf("gemini_5h=%+v", fiveHour)
-		}
-	})
-	t.Run("disabled_bucket", func(t *testing.T) {
-		snap, err := fetchAntigravityFixture(t, "disabled_bucket.json")
-		if err != nil || len(snap.Windows) != 1 || snap.Windows[0].Name != "gemini_weekly" || snap.Availability != quota.QuotaAvailable {
-			t.Fatalf("snap=%+v err=%v", snap, err)
-		}
-	})
-	for _, name := range []string{"no_gemini.json", "wrong_command.json"} {
-		t.Run(name, func(t *testing.T) {
-			snap, err := fetchAntigravityFixture(t, name)
-			if err == nil || snap.Status != quota.SourceFailed {
-				t.Fatalf("snap=%+v err=%v; want fail closed", snap, err)
-			}
-		})
-	}
-}
-
-func TestAntigravityContractFixturesAreSecretFree(t *testing.T) {
-	for _, name := range []string{"quota.json", "live_shape.json", "no_gemini.json", "wrong_command.json", "disabled_bucket.json"} {
-		b, err := os.ReadFile(filepath.Join("testdata", "quota", "antigravity", name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		if secretPattern.MatchString(string(b)) {
-			t.Fatalf("Antigravity fixture %s contains a secret pattern", name)
-		}
 	}
 }
 
