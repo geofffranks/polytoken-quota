@@ -314,15 +314,26 @@ type RankingResult struct {
 	Entries []RankEntry // sorted by rank
 }
 
-const underPaceThreshold = 0.90
+// Signal tuning constants.
+const (
+	// signalTieBand is the adjacent-difference gap that starts a new signal
+	// cluster. Mid-cycle, a signal difference of 0.20 corresponds to a 0.10
+	// used/elapsed pace difference.
+	signalTieBand = 0.20
+	// signalClamp bounds the signal so near-reset windows cannot dominate
+	// numerically.
+	signalClamp = 100.0
+	// minTimeRemaining floors the time-to-reset fraction so a window at (or
+	// past) its reset still yields a finite signal.
+	minTimeRemaining = time.Hour
+)
 
 // rankItem is the per-provider data computed before sorting within a group.
 type rankItem struct {
 	policy  ProviderPolicy
 	offPeak bool
-	pace    *float64 // projection pace; nil when not computable
-	tier    int      // pace tier: 0 under pace, 1 at/over pace, -1 without pace
-	cluster int      // pace cluster index within the at/over-pace tier
+	signal  *float64 // use-it-or-lose-it signal; nil when not computable
+	cluster int      // signal cluster index (0 = highest signal); -1 without signal
 	weight  int
 }
 
@@ -334,20 +345,15 @@ type entry struct {
 }
 
 // less compares two items within a balance group by the lexicographic key
-// sequence: pace tier/cluster (pairwise) → off-peak → weight → mapping ID.
+// sequence: signal cluster (pairwise) → off-peak → weight → mapping ID.
 // Mapping ID stabilizes presentation only; semanticRankEqual deliberately omits
 // it so an exact routing tie can preserve each chain's authored order.
 func (a rankItem) less(b rankItem) bool {
-	// Key 1: pace tier and cluster (pairwise: both must have a pace). All
-	// under-pace providers share tier 0; at/over-pace providers use their
-	// ascending cluster in tier 1. Providers without pace skip this key.
-	if a.pace != nil && b.pace != nil {
-		if a.tier != b.tier {
-			return a.tier < b.tier
-		}
-		if a.tier == 1 && a.cluster != b.cluster {
-			return a.cluster < b.cluster
-		}
+	// Key 1: signal cluster (pairwise: both must have a signal). Cluster 0
+	// holds the highest signals, so a lower index ranks first. Providers
+	// without a signal skip this key.
+	if a.signal != nil && b.signal != nil && a.cluster != b.cluster {
+		return a.cluster < b.cluster
 	}
 	// Key 2: off-peak before peak.
 	if a.offPeak != b.offPeak {
@@ -363,40 +369,46 @@ func (a rankItem) less(b rankItem) bool {
 
 // semanticRankEqual reports whether two eligible items have the same routing
 // priority. Mapping ID is intentionally excluded: it orders diagnostics but does
-// not override a chain's authored preference. Pace is either present for every
-// item in a group or cleared from the entire group before sorting.
+// not override a chain's authored preference. The signal is either present for
+// every item in a group or cleared from the entire group before sorting.
 func (a rankItem) semanticRankEqual(b rankItem) bool {
-	if a.pace != nil && (a.tier != b.tier || (a.tier == 1 && a.cluster != b.cluster)) {
+	if a.signal != nil && a.cluster != b.cluster {
 		return false
 	}
 	return a.offPeak == b.offPeak && a.weight == b.weight
 }
 
-// minProjectionPeriod is the minimum window duration eligible to be a projection
-// anchor. It is quota.MinQuotaCyclePeriod — windows shorter than one day (e.g.
+// minProjectionPeriod is the minimum window duration that contributes to the
+// signal. It is quota.MinQuotaCyclePeriod — windows shorter than one day (e.g.
 // codex's 5h session window) are rate limits, not quota cycles — shared with the
-// status display's next-reset selection so pace and NEXT RESET cannot disagree
-// about which window is "the quota".
+// status display's next-reset selection so the signal and NEXT RESET cannot
+// disagree about which windows are "the quota". Exhausted short windows still
+// make a provider ineligible through CheckEligibility.
 const minProjectionPeriod = quota.MinQuotaCyclePeriod
 
-// computePace calculates the projection pace for a provider from its anchor
-// window — the longest window with Period + ResetAt + a usable remaining that
-// clears the minimum-period floor. Returns the pace and true when computable;
-// 0 and false when no qualifying window exists.
+// computeSignal calculates the use-it-or-lose-it signal for a provider from
+// every window with Period ≥ minProjectionPeriod, a ResetAt, and a usable
+// remaining fraction. It returns ok=false when no window qualifies.
 //
-//	usedFrac    = 1 - remainingFraction
-//	elapsedFrac = ceilToDay(clamp01(1 - (ResetAt - now) / Period))
-//	pace        = usedFrac / max(elapsedFrac, eps)
+// For each qualifying window with period P and remaining fraction r:
 //
-// Elapsed time is rounded up to whole days before normalization. This avoids
-// transient pace spikes immediately after a reset while retaining a small
-// epsilon for a window that has not reached its first day. Pace < 1.0 →
-// under-utilized (ranks first); pace > 1.0 → over-utilized.
-func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
+//	t   = max(clamp(ResetAt - now, 0, P) / P, 1h/P)          // time left
+//	e   = max(min(ceilToDay(P - (ResetAt - now)), P) / P, 5m/P) // time elapsed
+//	gap = r/t - (1-r)/e
+//
+// The signal is the period-weighted mean of gap, clamped to ±signalClamp. The
+// first term grows as unused quota approaches forfeiture at reset; the second
+// grows as usage outpaces elapsed time. Positive means quota will reach reset
+// unused (prefer), zero is exactly on pace, and negative is overdrawn.
+//
+// Elapsed time is rounded up to whole days so a freshly reset quota is measured
+// against one day rather than a few minutes; this biases the signal slightly
+// positive within a day.
+func computeSignal(snap *quota.QuotaSnapshot, now time.Time) (signal float64, ok bool) {
 	if snap == nil {
 		return 0, false
 	}
-	var anchor *quota.QuotaWindow
+	var weighted, totalPeriod float64
 	for i := range snap.Windows {
 		w := &snap.Windows[i]
 		if w.Period == nil || *w.Period < minProjectionPeriod {
@@ -405,80 +417,65 @@ func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok boo
 		if w.ResetAt == nil {
 			continue
 		}
-		if w.Remaining() == nil {
+		rem := w.Remaining()
+		if rem == nil {
 			continue
 		}
-		if anchor == nil || *w.Period > *anchor.Period {
-			anchor = w
+		period := *w.Period
+		timeToReset := w.ResetAt.Sub(now)
+		if timeToReset < 0 {
+			timeToReset = 0
+		} else if timeToReset > period {
+			timeToReset = period
 		}
+		// Quantize elapsed time upward to whole days, capped at the period.
+		elapsed := period - timeToReset
+		elapsed = ((elapsed + 24*time.Hour - 1) / (24 * time.Hour)) * (24 * time.Hour)
+		if elapsed > period {
+			elapsed = period
+		}
+		p := float64(period)
+		elapsedFrac := math.Max(float64(elapsed)/p, float64(5*time.Minute)/p)
+		leftFrac := math.Max(float64(timeToReset)/p, float64(minTimeRemaining)/p)
+		r := *rem
+		gap := r/leftFrac - (1-r)/elapsedFrac
+		weighted += gap * p
+		totalPeriod += p
 	}
-	if anchor == nil {
+	if totalPeriod == 0 {
 		return 0, false
 	}
-	rem := anchor.Remaining()
-	usedFrac := 1.0 - *rem
-	timeToReset := anchor.ResetAt.Sub(now)
-	elapsed := *anchor.Period - timeToReset
-	if elapsed < 0 {
-		elapsed = 0
-	} else if elapsed > *anchor.Period {
-		elapsed = *anchor.Period
-	}
-	// Quantize elapsed time upward so a newly reset quota is measured against
-	// one day, not a few minutes or seconds. This makes pace stable enough for
-	// periodic reconciliation while preserving the full-period endpoint.
-	elapsed = ((elapsed + 24*time.Hour - 1) / (24 * time.Hour)) * (24 * time.Hour)
-	elapsedFrac := float64(elapsed) / float64(*anchor.Period)
-	eps := float64(5*time.Minute) / float64(*anchor.Period)
-	if elapsedFrac < eps {
-		elapsedFrac = eps
-	}
-	return usedFrac / elapsedFrac, true
+	return math.Max(-signalClamp, math.Min(signalClamp, weighted/totalPeriod)), true
 }
 
-// assignPaceClusters assigns pace tiers and cluster indices to entries within
-// a balance group. If any member lacks pace, pace is cleared for the whole group
-// so sorting remains transitive and no comparison is invented against missing
-// data. Otherwise providers below the underPaceThreshold share tier 0, while
-// at/over-threshold providers get tier 1 and connected pace clusters.
-func assignPaceClusters(items []entry) {
+// assignSignalClusters assigns signal cluster indices to entries within a
+// balance group. If any member lacks a signal, the signal is cleared for the
+// whole group so sorting remains transitive and no comparison is invented
+// against missing data. Otherwise members are sorted by signal descending and a
+// new cluster starts whenever adjacent signals differ by at least signalTieBand.
+func assignSignalClusters(items []entry) {
 	for i := range items {
-		if items[i].item.pace == nil {
+		if items[i].item.signal == nil {
 			for j := range items {
-				items[j].item.pace = nil
-				items[j].item.tier = -1
+				items[j].item.signal = nil
 				items[j].item.cluster = -1
 			}
 			return
 		}
 	}
-	type paced struct {
-		idx  int
-		pace float64
+	order := make([]int, len(items))
+	for i := range order {
+		order[i] = i
 	}
-	var ps []paced
-	for i := range items {
-		items[i].item.tier = -1
-		items[i].item.cluster = -1
-		if items[i].item.pace == nil {
-			continue
-		}
-		if *items[i].item.pace < underPaceThreshold {
-			items[i].item.tier = 0
-			continue
-		}
-		items[i].item.tier = 1
-		ps = append(ps, paced{idx: i, pace: *items[i].item.pace})
-	}
-	sort.Slice(ps, func(i, j int) bool {
-		return ps[i].pace < ps[j].pace
+	sort.SliceStable(order, func(i, j int) bool {
+		return *items[order[i]].item.signal > *items[order[j]].item.signal
 	})
 	clusterIdx := 0
-	for i, p := range ps {
-		if i > 0 && p.pace-ps[i-1].pace >= 0.10 {
+	for i, idx := range order {
+		if i > 0 && *items[order[i-1]].item.signal-*items[idx].item.signal >= signalTieBand {
 			clusterIdx++
 		}
-		items[p.idx].item.cluster = clusterIdx
+		items[idx].item.cluster = clusterIdx
 	}
 }
 
@@ -489,8 +486,8 @@ func assignPaceClusters(items []entry) {
 // keys. Providers equal on semantic keys share a rank so each desired chain can
 // preserve its authored order; mapping ID stabilizes only this result's display
 // order. Ineligible providers are placed after all eligible ones, sorted by
-// mapping ID. Pace is compared only when every eligible provider in the balance
-// group can project; otherwise the group falls through to off-peak → weight.
+// mapping ID. The signal is compared only when every eligible provider in the
+// balance group has one; otherwise the group falls through to off-peak → weight.
 func Rank(in RankingInput) RankingResult {
 	obsBy := make(map[string]ProviderObs, len(in.Obs))
 	for _, o := range in.Obs {
@@ -511,8 +508,8 @@ func Rank(in RankingInput) RankingResult {
 			reason = el.Reason
 			item = rankItem{policy: p, weight: p.weight(), offPeak: offPeakAt(p.Schedule, in.Now), cluster: -1}
 			if obs.Snapshot != nil {
-				if pace, ok := computePace(obs.Snapshot, in.Now); ok {
-					item.pace = &pace
+				if signal, ok := computeSignal(obs.Snapshot, in.Now); ok {
+					item.signal = &signal
 				}
 			}
 		} else {
@@ -542,10 +539,10 @@ func Rank(in RankingInput) RankingResult {
 		groups[g].items = append(groups[g].items, e)
 	}
 
-	// Assign pace clusters and stable-sort within each group.
+	// Assign signal clusters and stable-sort within each group.
 	for _, name := range groupOrder {
 		g := groups[name]
-		assignPaceClusters(g.items)
+		assignSignalClusters(g.items)
 		sort.SliceStable(g.items, func(i, j int) bool {
 			return g.items[i].item.less(g.items[j].item)
 		})
@@ -598,14 +595,14 @@ func (e entry) toRankEntry(rank int) RankEntry {
 }
 
 // explain renders a short, sanitized explanation referencing the decisive
-// factors (projection pace and off-peak status) for an eligible provider.
+// factors (signal and off-peak status) for an eligible provider.
 func (e entry) explain() string {
 	status := "peak"
 	if e.item.offPeak {
 		status = "off-peak"
 	}
-	if e.item.pace != nil {
-		return fmt.Sprintf("%s, pace %d%%", status, int(math.Round(*e.item.pace*100)))
+	if e.item.signal != nil {
+		return fmt.Sprintf("%s, signal %+.2f", status, *e.item.signal)
 	}
 	return status
 }

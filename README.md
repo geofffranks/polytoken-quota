@@ -390,7 +390,7 @@ For `select`, `0` means `confirmed`; `2` means `uncertain`, `no_selection`, or `
 
 ## Meaningful event history
 
-`polytoken-quota history` is a newest-first timeline of meaningful provider and routing events, not a generic reconcile counter. It records quota low/reached/reset transitions, provider failures/recoveries, manual disable/enable/reset actions, ignored stale hooks, quota-poll failures, and routing changes such as rank, eligibility, pace explanation, or peak/off-peak changes. Unchanged quota observations and unchanged routing decisions are suppressed.
+`polytoken-quota history` is a newest-first timeline of meaningful provider and routing events, not a generic reconcile counter. It records quota low/reached/reset transitions, provider failures/recoveries, manual disable/enable/reset actions, ignored stale hooks, quota-poll failures, and routing changes such as rank, eligibility, signal explanation, or peak/off-peak changes. Unchanged quota observations and unchanged routing decisions are suppressed.
 
 ```text
 EVENT HISTORY
@@ -398,7 +398,7 @@ Reported at: 2026-08-14 02:30:00 UTC
 
 WHEN                 PROVIDER   EVENT                    RESULT
 2026-08-14 02:22:35  zai        quota_reached             disabled; removed from managed chains
-2026-08-13 14:04:03  codex      routing_changed           rank 1 -> 3; over pace
+2026-08-13 14:04:03  codex      routing_changed           rank 1 -> 3; overdrawn
 2026-08-13 10:19:59  zai        provider_recovered        available; quota remains exhausted
 2026-08-13 10:15:00  zai        quota_low                 IGNORED; stale quota event
 ```
@@ -431,8 +431,8 @@ polytoken-quota status
 routing: enabled    last checked: 2026-08-14 09:12 UTC
 
 PROVIDER  STATUS     REASON                    QUOTA                     NEXT RESET
-codex     available  peak, pace 50%            5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
-zai       available  off-peak, pace 109%       5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
+codex     available  peak, signal +1.00        5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
+zai       available  off-peak, signal -0.19    5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
 minime    enabled    not configured             no data                   —
 
 TARGET  SOURCE                 ROUTE     DESIRED       EFFECTIVE
@@ -452,11 +452,11 @@ Routing uses a deterministic lexicographic ranking, not a blended score:
 
 1. Providers must be eligible: their mode is `normal` or `reserve`, their snapshot is fresh, and it contains usable remaining quota.
 2. Eligible providers stay grouped by `balance_group`; groups appear in their first configured order and do not interleave.
-3. Within each group, providers are first separated into two pace tiers. Providers with **projection pace below 90%** are treated as equally under-paced: their exact pace does not differentiate them. They rank ahead of providers at or above 90%, and ties break by off-peak before peak, then higher `weight`.
-4. Among providers at or above 90%, lower projection pace ranks first. Providers within 10% absolute pace are treated as tied, with off-peak and `weight` breaking ties. Pace is the ratio of used-fraction to elapsed-fraction from each provider's longest qualifying quota window (period + reset + remaining, minimum one day).
-5. If providers remain equal after pace, schedule, and weight, they share a routing rank. Each desired route then keeps its own authored order for those providers; mapping ID is used only to keep diagnostic presentation deterministic. If any eligible provider in a balance group cannot compute a pace (no qualifying window), pace is skipped for that whole group. Ineligible providers remain at the end and are never disabled by routing.
+3. Within each group, providers are ordered by a **use-it-or-lose-it signal**, highest first. For each quota window of at least one day that reports a period, a reset time, and remaining quota, the signal adds how much quota would be forfeited at reset (remaining fraction ÷ fraction of the period left, with at least one hour left) and subtracts how far usage has outrun time (used fraction ÷ fraction of the period elapsed, rounded up to whole days). Windows are averaged weighted by period length and the result is clamped to ±100. Positive means quota will reach reset unused, zero is exactly on pace, and negative means overdrawn. A provider close to reset with quota left therefore drains first. Windows shorter than one day (such as 5-hour session limits) do not affect the signal, though an exhausted one still makes the provider ineligible.
+4. Signals are clustered: after sorting, a new cluster starts wherever two neighboring signals differ by 0.20 or more. Providers in the same cluster are tied on the signal, and off-peak before peak, then higher `weight`, break the tie.
+5. If providers remain equal after signal, schedule, and weight, they share a routing rank. Each desired route then keeps its own authored order for those providers; mapping ID is used only to keep diagnostic presentation deterministic. If any eligible provider in a balance group has no signal (no qualifying window), the signal is skipped for that whole group. Ineligible providers remain at the end and are never disabled by routing.
 
-For example, if `codex` and `neuralwatt` are both eligible in the same balance group, both have pace below 90%, and have equal schedule and weight, they share a rank. A researcher chain authored as `neuralwatt` then `codex` stays Neuralwatt-first, while an implementer chain authored as `codex` then `neuralwatt` stays Codex-first. If one provider is below 90% and the other is at or above 90%, the under-paced provider ranks first.
+For example, if `codex` and `neuralwatt` are both eligible in the same balance group with signals +0.40 and +0.30, and equal schedule and weight, they share a rank. A researcher chain authored as `neuralwatt` then `codex` stays Neuralwatt-first, while an implementer chain authored as `codex` then `neuralwatt` stays Codex-first. If Codex's signal were +0.90 instead, Codex would rank first in both chains.
 
 The utility does not install, start, stop, or control timers. Set up scheduling manually and choose a cadence permitted by each provider. If desired, add jitter in the external scheduler or wrapper so multiple machines do not poll at once.
 

@@ -28,136 +28,139 @@ var allDays = []DayOfWeek{Monday, Tuesday, Wednesday, Thursday, Friday, Saturday
 // rankNow is the stable injected "now" used across ranking tests.
 var rankNow = time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 
-// dayOf maps a time.Weekday to the canonical DayOfWeek abbreviation.
-func TestComputePace(t *testing.T) {
-	week := 7 * 24 * time.Hour
-	halfWeek := week / 2
+// weekWindow builds a 7-day window whose reset lands after daysElapsed of the
+// cycle has passed (fractional days allowed), with usedFrac of the quota used.
+func weekWindow(usedFrac, daysElapsed float64) quota.QuotaWindow {
+	period := 7 * 24 * time.Hour
+	elapsed := time.Duration(daysElapsed * float64(24*time.Hour))
+	return quota.QuotaWindow{
+		Used: fptr(usedFrac), Limit: fptr(1),
+		ResetAt: tptr(rankNow.Add(period - elapsed)), Period: durptr(period),
+	}
+}
 
+func TestComputeSignal(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	month := 30 * 24 * time.Hour
 	tests := []struct {
-		name   string
-		window quota.QuotaWindow
-		now    time.Time
-		want   float64
-		ok     bool
+		name    string
+		windows []quota.QuotaWindow
+		want    float64
+		ok      bool
 	}{
 		{
-			name:   "on track: 50% used, 3.5 days elapsed rounds to 4 days",
-			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
-			now:    rankNow,
-			want:   0.875,
-			ok:     true,
+			name:    "exactly on pace at a whole-day boundary is zero",
+			windows: []quota.QuotaWindow{weekWindow(3.0/7.0, 3)},
+			want:    0,
+			ok:      true,
 		},
 		{
-			name:   "under-utilized: 30% used, 3.5 days elapsed rounds to 4 days",
-			window: quota.QuotaWindow{Used: fptr(30), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
-			now:    rankNow,
-			want:   0.525,
-			ok:     true,
+			name: "on pace mid-day leans positive from whole-day rounding",
+			// 3.5 days rounds to 4: r/t - u/e = 0.5/0.5 - 0.5/(4/7).
+			windows: []quota.QuotaWindow{weekWindow(0.5, 3.5)},
+			want:    0.125,
+			ok:      true,
 		},
 		{
-			name:   "over-utilized: 70% used, 3.5 days elapsed rounds to 4 days",
-			window: quota.QuotaWindow{Used: fptr(70), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek)), Period: durptr(week)},
-			now:    rankNow,
-			want:   1.225,
-			ok:     true,
+			name: "overdrawn is negative",
+			// (2/7)/(4/7) - (5/7)/(3/7)
+			windows: []quota.QuotaWindow{weekWindow(5.0/7.0, 3)},
+			want:    0.5 - 5.0/3.0,
+			ok:      true,
 		},
 		{
-			name:   "fresh: 0% used, near-reset start",
-			window: quota.QuotaWindow{Used: fptr(0), Limit: fptr(100), ResetAt: tptr(rankNow.Add(week)), Period: durptr(week)},
-			now:    rankNow,
-			want:   0.0,
-			ok:     true,
+			name: "late-cycle surplus is strongly positive",
+			// 0.8/(1/7) - 0.2/(6/7)
+			windows: []quota.QuotaWindow{weekWindow(0.2, 6)},
+			want:    5.6 - 0.2*7.0/6.0,
+			ok:      true,
 		},
 		{
-			name:   "no qualifying window: period below 1-day floor",
-			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(2 * time.Hour)), Period: durptr(5 * time.Hour)},
-			now:    rankNow,
-			ok:     false,
+			name: "first minute measures burn against one whole day",
+			windows: []quota.QuotaWindow{{
+				Used: fptr(0.01), Limit: fptr(1),
+				ResetAt: tptr(rankNow.Add(week - time.Minute)), Period: durptr(week),
+			}},
+			want: 0.99*float64(week)/float64(week-time.Minute) - 0.01*7,
+			ok:   true,
 		},
 		{
-			name:   "no qualifying window: nil period",
-			window: quota.QuotaWindow{Used: fptr(50), Limit: fptr(100), ResetAt: tptr(rankNow.Add(halfWeek))},
-			now:    rankNow,
-			ok:     false,
+			name: "sub-day window alone does not qualify",
+			windows: []quota.QuotaWindow{{
+				Used: fptr(0.5), Limit: fptr(1),
+				ResetAt: tptr(rankNow.Add(2 * time.Hour)), Period: durptr(5 * time.Hour),
+			}},
+			ok: false,
+		},
+		{
+			name:    "nil period does not qualify",
+			windows: []quota.QuotaWindow{{Used: fptr(0.5), Limit: fptr(1), ResetAt: tptr(rankNow.Add(time.Hour))}},
+			ok:      false,
+		},
+		{
+			name:    "missing reset does not qualify",
+			windows: []quota.QuotaWindow{{Used: fptr(0.5), Limit: fptr(1), Period: durptr(week)}},
+			ok:      false,
+		},
+		{
+			name: "sub-day window is ignored alongside a weekly window",
+			windows: []quota.QuotaWindow{
+				{Used: fptr(0.99), Limit: fptr(1), ResetAt: tptr(rankNow.Add(time.Hour)), Period: durptr(5 * time.Hour)},
+				weekWindow(5.0/7.0, 3),
+			},
+			want: 0.5 - 5.0/3.0,
+			ok:   true,
+		},
+		{
+			name: "weekly and monthly windows combine as a period-weighted mean",
+			windows: []quota.QuotaWindow{
+				weekWindow(3.0/7.0, 3), // 0
+				// 20 of 30 days elapsed, half used: 0.5/(1/3) - 0.5/(2/3) = 0.75.
+				{Used: fptr(0.5), Limit: fptr(1), ResetAt: tptr(rankNow.Add(10 * 24 * time.Hour)), Period: durptr(month)},
+			},
+			want: 0.75 * 30 / 37,
+			ok:   true,
+		},
+		{
+			name:    "unused quota at reset clamps to +100",
+			windows: []quota.QuotaWindow{{Used: fptr(0), Limit: fptr(1), ResetAt: tptr(rankNow), Period: durptr(week)}},
+			want:    100,
+			ok:      true,
+		},
+		{
+			name:    "fully used at cycle start clamps to -100",
+			windows: []quota.QuotaWindow{{Used: fptr(1), Limit: fptr(1), ResetAt: tptr(rankNow.Add(week)), Period: durptr(week)}},
+			want:    -100,
+			ok:      true,
+		},
+		{
+			name: "reset in the past stays finite through the one-hour floor",
+			// 0.5/(1h/7d) - 0.5/1
+			windows: []quota.QuotaWindow{{Used: fptr(0.5), Limit: fptr(1), ResetAt: tptr(rankNow.Add(-time.Hour)), Period: durptr(week)}},
+			want:    0.5*168 - 0.5,
+			ok:      true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{tc.window}}
-			got, ok := computePace(snap, tc.now)
+			got, ok := computeSignal(&quota.QuotaSnapshot{Windows: tc.windows}, rankNow)
 			if ok != tc.ok {
-				t.Fatalf("computePace ok = %v, want %v", ok, tc.ok)
+				t.Fatalf("computeSignal ok = %v, want %v", ok, tc.ok)
 			}
 			if ok && !floatClose(got, tc.want) {
-				t.Fatalf("computePace = %.4f, want %.4f", got, tc.want)
+				t.Fatalf("computeSignal = %.6f, want %.6f", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestComputePaceRoundsElapsedTimeUpToWholeDays(t *testing.T) {
-	period := 31 * 24 * time.Hour
-	used := 0.01
-	window := quota.QuotaWindow{
-		Used: fptr(used), Limit: fptr(1),
-		ResetAt: tptr(rankNow.Add(period - time.Minute)), Period: durptr(period),
-	}
-	pace, ok := computePace(&quota.QuotaSnapshot{Windows: []quota.QuotaWindow{window}}, rankNow)
-	if !ok {
-		t.Fatal("expected pace to be computable")
-	}
-	// One minute elapsed rounds up to one day, so 1% usage is projected at
-	// 31% pace rather than producing a transient multi-thousand-percent spike.
-	want := used / (1.0 / 31.0)
-	if !floatClose(pace, want) {
-		t.Fatalf("pace = %.4f, want %.4f", pace, want)
+func TestComputeSignalNilSnapshot(t *testing.T) {
+	if _, ok := computeSignal(nil, rankNow); ok {
+		t.Fatal("nil snapshot must not produce a signal")
 	}
 }
 
-func TestComputePaceAnchorSelection(t *testing.T) {
-	week := 7 * 24 * time.Hour
-	twoDays := 2 * 24 * time.Hour
-	// Two qualifying windows (>1 day): the longer (7d) must be the anchor.
-	// Set different used fractions so we can tell which was chosen.
-	shortWin := quota.QuotaWindow{
-		Name: "short", Used: fptr(90), Limit: fptr(100),
-		ResetAt: tptr(rankNow.Add(week)), Period: durptr(twoDays),
-	}
-	longWin := quota.QuotaWindow{
-		Name: "long", Used: fptr(10), Limit: fptr(100),
-		ResetAt: tptr(rankNow.Add(week / 2)), Period: durptr(week),
-	}
-	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{shortWin, longWin}}
-	pace, ok := computePace(snap, rankNow)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	// longWin: usedFrac=0.1, 3.5 elapsed days rounds to 4 days, so pace=0.175.
-	// If shortWin were the anchor: usedFrac=0.9, elapsedFrac varies.
-	// Verify the long window was used (pace should be 0.175).
-	if want := 0.175; !floatClose(pace, want) {
-		t.Fatalf("pace = %.4f, want %.4f (wrong anchor selected)", pace, want)
-	}
-}
-
-func TestComputePaceClampBounds(t *testing.T) {
-	week := 7 * 24 * time.Hour
-	// now is after ResetAt → elapsedFrac clamps to 1.0.
-	// usedFrac = 0.5 → pace = 0.5/1.0 = 0.5.
-	w := quota.QuotaWindow{
-		Used: fptr(50), Limit: fptr(100),
-		ResetAt: tptr(rankNow.Add(-time.Hour)), Period: durptr(week),
-	}
-	snap := &quota.QuotaSnapshot{Windows: []quota.QuotaWindow{w}}
-	pace, ok := computePace(snap, rankNow)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if want := 0.5; !floatClose(pace, want) {
-		t.Fatalf("pace = %.4f, want %.4f", pace, want)
-	}
-}
-
+// dayOf maps a time.Weekday to the canonical DayOfWeek abbreviation.
 func dayOf(t time.Time) DayOfWeek {
 	switch t.Weekday() {
 	case time.Sunday:
@@ -219,9 +222,20 @@ func remSnapReset(mid string, rem float64, checkedAt, reset time.Time) *quota.Qu
 	}
 }
 
-// paceSnap creates a snapshot with one window that has a computable pace.
-// usedFrac and elapsedFrac are both in [0,1]; the window period is one week
-// anchored on rankNow.
+// signalSnap builds a fresh, available snapshot around weekWindow.
+func signalSnap(mid string, usedFrac, daysElapsed float64) *quota.QuotaSnapshot {
+	return &quota.QuotaSnapshot{
+		MappingID:    mid,
+		CheckedAt:    rankNow,
+		Status:       quota.SourceFresh,
+		Availability: quota.QuotaAvailable,
+		Windows:      []quota.QuotaWindow{weekWindow(usedFrac, daysElapsed)},
+	}
+}
+
+// paceSnap creates a snapshot with one weekly window that has a computable
+// signal. usedFrac and elapsedFrac are both in [0,1]. At elapsedFrac 0.5 the
+// 3.5 elapsed days round up to 4, so the signal is 2 - 3.75*usedFrac.
 func paceSnap(mid string, usedFrac, elapsedFrac float64) *quota.QuotaSnapshot {
 	period := 7 * 24 * time.Hour
 	timeToReset := time.Duration((1 - elapsedFrac) * float64(period))
@@ -667,13 +681,125 @@ func TestRankExactTieSharesRank(t *testing.T) {
 	}
 }
 
-// ----- Part 5: pace projection ranking -------------------------------------
+// ----- Part 5: signal ranking ----------------------------------------------
 
-func TestRankPaceLowerFirst(t *testing.T) {
-	// A: pace 0.6 (under-utilized), B: pace 1.4 (over-utilized). Gap > 10%.
+func TestRankOrdersBySignalDescending(t *testing.T) {
+	// Signals +1.17 / 0 / -1.17. Weights oppose the signal order so the test
+	// fails if weight were consulted before the signal.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "over", Weight: 5},
+			{MappingID: "on", Weight: 3},
+			{MappingID: "under", Weight: 1},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "over", Mode: "normal", Snapshot: signalSnap("over", 5.0/7.0, 3)},
+			{MappingID: "on", Mode: "normal", Snapshot: signalSnap("on", 3.0/7.0, 3)},
+			{MappingID: "under", Mode: "normal", Snapshot: signalSnap("under", 1.0/7.0, 3)},
+		},
+	}
+	got := Rank(in)
+	eqOrder(t, got, "under", "on", "over")
+	if got.Entries[0].Rank == got.Entries[1].Rank || got.Entries[1].Rank == got.Entries[2].Rank {
+		t.Fatalf("ranks = %d, %d, %d; want distinct", got.Entries[0].Rank, got.Entries[1].Rank, got.Entries[2].Rank)
+	}
+}
+
+func TestRankSignalTieBandSharesRank(t *testing.T) {
+	// Signals +0.125 and -0.025 are 0.15 apart, inside the 0.20 tie band.
 	in := RankingInput{
 		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}},
+		Policies: []ProviderPolicy{{MappingID: "zeta"}, {MappingID: "alpha"}},
+		Obs: []ProviderObs{
+			{MappingID: "zeta", Mode: "normal", Snapshot: paceSnap("zeta", 0.50, 0.5)},
+			{MappingID: "alpha", Mode: "normal", Snapshot: paceSnap("alpha", 0.54, 0.5)},
+		},
+	}
+	got := Rank(in)
+	if got.Entries[0].Rank != got.Entries[1].Rank {
+		t.Fatalf("ranks = %d, %d; want shared rank inside the tie band", got.Entries[0].Rank, got.Entries[1].Rank)
+	}
+}
+
+func TestRankSignalTieBandOffPeakDecides(t *testing.T) {
+	offPeak := alwaysOffPeak(t)
+	// Signals +0.125 (peak) and -0.025 (off-peak) share a cluster, so off-peak
+	// decides.
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b", Schedule: &offPeak}},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.50, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a")
+}
+
+func TestRankNoUnderPaceTier(t *testing.T) {
+	// Signals +0.9 and +0.3 were both "under pace" (paces 0.51 and 0.79) and
+	// used to share a tier where weight decided. They now rank separately.
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "low", Weight: 5}, {MappingID: "high", Weight: 1}},
+		Obs: []ProviderObs{
+			{MappingID: "low", Mode: "normal", Snapshot: paceSnap("low", 1.7/3.75, 0.5)},
+			{MappingID: "high", Mode: "normal", Snapshot: paceSnap("high", 1.1/3.75, 0.5)},
+		},
+	}
+	got := Rank(in)
+	eqOrder(t, got, "high", "low")
+	if got.Entries[0].Rank == got.Entries[1].Rank {
+		t.Fatal("signals 0.9 and 0.3 must not share a rank")
+	}
+}
+
+func TestRankSignalClusterChain(t *testing.T) {
+	// Signals: a +0.125, b -0.025, c -0.25. a-b is inside the band, b-c is not.
+	// Within cluster 0, weight decides (b=3 before a=1).
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.50, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.60, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "a", "c")
+}
+
+func TestRankSignalClustersChainTransitively(t *testing.T) {
+	// Signals +0.3 / +0.15 / 0.0: each adjacent pair is inside the band, so
+	// all three share one cluster even though the span exceeds it.
+	in := RankingInput{
+		Now: rankNow,
+		Policies: []ProviderPolicy{
+			{MappingID: "a", Weight: 1},
+			{MappingID: "b", Weight: 3},
+			{MappingID: "c", Weight: 2},
+		},
+		Obs: []ProviderObs{
+			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 1.7/3.75, 0.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 1.85/3.75, 0.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 2.0/3.75, 0.5)},
+		},
+	}
+	eqOrder(t, Rank(in), "b", "c", "a")
+}
+
+func TestRankSignalBeatsOffPeak(t *testing.T) {
+	offPeak := alwaysOffPeak(t)
+	// a: peak, signal +0.875. b: off-peak, signal -0.625. The signal gap
+	// exceeds the band, so it outranks off-peak.
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b", Schedule: &offPeak}},
 		Obs: []ProviderObs{
 			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
 			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
@@ -682,99 +808,21 @@ func TestRankPaceLowerFirst(t *testing.T) {
 	eqOrder(t, Rank(in), "a", "b")
 }
 
-func TestRankPaceWithinTenPercentOffPeakDecides(t *testing.T) {
-	offPeak := alwaysOffPeak(t)
-	// A: pace 1.0 (off-peak), B: pace 1.08 (peak). Gap = 0.08 < 10% → tied.
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "a", Schedule: &offPeak},
-			{MappingID: "b"},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.5, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
-		},
-	}
-	eqOrder(t, Rank(in), "a", "b")
-}
-
-func TestRankPaceUnderNinetyPercentSharesRankWhenOtherwiseEqual(t *testing.T) {
+func TestRankLateCycleSurplusBeatsEarlyCycle(t *testing.T) {
+	// Both have used quota at half the elapsed rate. The one about to reset
+	// with 4/7 left (signal +3.5) must drain before the early-cycle one (+0.7).
 	in := RankingInput{
 		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "codex"}, {MappingID: "neuralwatt"}},
+		Policies: []ProviderPolicy{{MappingID: "early", Weight: 5}, {MappingID: "late"}},
 		Obs: []ProviderObs{
-			{MappingID: "codex", Mode: "normal", Snapshot: paceSnap("codex", 0.035, 0.5)},
-			{MappingID: "neuralwatt", Mode: "normal", Snapshot: paceSnap("neuralwatt", 0.27, 0.5)},
+			{MappingID: "early", Mode: "normal", Snapshot: signalSnap("early", 1.0/7.0, 2)},
+			{MappingID: "late", Mode: "normal", Snapshot: signalSnap("late", 3.0/7.0, 6)},
 		},
 	}
-	got := Rank(in)
-	codex, neuralwatt := got.Entries[0], got.Entries[1]
-	if codex.Rank != neuralwatt.Rank {
-		t.Fatalf("under-pace ranks = %d, %d; want shared rank", codex.Rank, neuralwatt.Rank)
-	}
+	eqOrder(t, Rank(in), "late", "early")
 }
 
-func TestRankPaceUnderNinetyPercentIsEqualTier(t *testing.T) {
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "low", Weight: 1},
-			{MappingID: "high", Weight: 5},
-		},
-		Obs: []ProviderObs{
-			// These paces are far more than 10 percentage points apart. The
-			// under-90% policy must nevertheless treat them as one tier, so
-			// configured weight decides.
-			{MappingID: "low", Mode: "normal", Snapshot: paceSnap("low", 0.05714285714285714, 0.5)},
-			{MappingID: "high", Mode: "normal", Snapshot: paceSnap("high", 0.45714285714285713, 0.5)},
-		},
-	}
-	eqOrder(t, Rank(in), "high", "low")
-}
-
-func TestRankPaceNinetyPercentIsOutsideEqualTier(t *testing.T) {
-	period := 10 * 24 * time.Hour
-	atReset := rankNow.Add(5 * 24 * time.Hour)
-	atSnapshot := func(id string, used float64) *quota.QuotaSnapshot {
-		return &quota.QuotaSnapshot{
-			MappingID: id, CheckedAt: rankNow, Status: quota.SourceFresh,
-			Availability: quota.QuotaAvailable,
-			Windows: []quota.QuotaWindow{{
-				Used: fptr(used), Limit: fptr(1), ResetAt: tptr(atReset), Period: durptr(period),
-			}},
-		}
-	}
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "under"}, {MappingID: "at"}},
-		Obs: []ProviderObs{
-			{MappingID: "under", Mode: "normal", Snapshot: atSnapshot("under", 0.44)}, // pace 0.88
-			{MappingID: "at", Mode: "normal", Snapshot: atSnapshot("at", 0.46)},       // pace 0.92
-		},
-	}
-	// A pace at or above 0.90 is not under pace; it remains in the
-	// pace-ranked tier.
-	eqOrder(t, Rank(in), "under", "at")
-}
-
-func TestRankPaceAtOrAboveNinetyRetainsPaceOrdering(t *testing.T) {
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "slower", Weight: 5},
-			{MappingID: "faster", Weight: 1},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "slower", Mode: "normal", Snapshot: paceSnap("slower", 0.75, 0.5)}, // pace 1.50
-			{MappingID: "faster", Mode: "normal", Snapshot: paceSnap("faster", 0.50, 0.5)}, // pace 1.00
-		},
-	}
-	// Weight cannot override distinct pace clusters in the at/over-90% tier.
-	eqOrder(t, Rank(in), "faster", "slower")
-}
-
-func TestRankPaceGroupSkipWhenAnyProviderLacksPace(t *testing.T) {
+func TestRankSignalGroupSkipWhenAnyProviderLacksSignal(t *testing.T) {
 	policies := map[string]ProviderPolicy{
 		"a": {MappingID: "a"},
 		"m": {MappingID: "m"},
@@ -783,7 +831,7 @@ func TestRankPaceGroupSkipWhenAnyProviderLacksPace(t *testing.T) {
 	observations := map[string]ProviderObs{
 		"a": {MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.75, 0.5)},
 		"m": {MappingID: "m", Mode: "normal", Snapshot: remSnap("m", 0.5, rankNow)},
-		"z": {MappingID: "z", Mode: "normal", Snapshot: paceSnap("z", 0.50, 0.5)},
+		"z": {MappingID: "z", Mode: "normal", Snapshot: paceSnap("z", 0.10, 0.5)},
 	}
 	for _, ids := range [][]string{
 		{"a", "m", "z"}, {"a", "z", "m"}, {"m", "a", "z"},
@@ -797,75 +845,13 @@ func TestRankPaceGroupSkipWhenAnyProviderLacksPace(t *testing.T) {
 		got := Rank(in)
 		eqOrder(t, got, "a", "m", "z")
 		if got.Entries[0].Rank != got.Entries[1].Rank || got.Entries[1].Rank != got.Entries[2].Rank {
-			t.Fatalf("input %v ranks = %d, %d, %d; want shared rank after group pace skip", ids, got.Entries[0].Rank, got.Entries[1].Rank, got.Entries[2].Rank)
+			t.Fatalf("input %v ranks = %d, %d, %d; want shared rank after group signal skip", ids, got.Entries[0].Rank, got.Entries[1].Rank, got.Entries[2].Rank)
 		}
 	}
 }
 
-func TestRankPaceClusterChain(t *testing.T) {
-	// A: pace 1.0, B: pace 1.08, C: pace 1.25.
-	// A-B gap 0.08 < 10% → same cluster. B-C gap 0.17 > 10% → new cluster.
-	// Within cluster 0: weight decides (B=3 before A=1). These fixtures are
-	// deliberately at/above the under-pace threshold so this test continues to
-	// exercise the 10% clustering behavior.
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "a", Weight: 1},
-			{MappingID: "b", Weight: 3},
-			{MappingID: "c", Weight: 2},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 4.0/7.0, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.6171428571428571, 0.5)},
-			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 5.0/7.0, 0.5)},
-		},
-	}
-	eqOrder(t, Rank(in), "b", "a", "c")
-}
-
-func TestRankPaceBeatsOffPeak(t *testing.T) {
-	// Headline inversion: a peak provider with lower pace outranks an off-peak
-	// provider with higher pace when the gap exceeds 10%.
-	offPeak := alwaysOffPeak(t)
-	// A: peak, pace 0.6 (under-utilized). B: off-peak, pace 1.4 (over-utilized).
-	// Gap = 0.8 > 10% → pace outranks off-peak: A wins.
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "a"},
-			{MappingID: "b", Schedule: &offPeak},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
-		},
-	}
-	eqOrder(t, Rank(in), "a", "b")
-}
-
-func TestRankPaceUnderNinetyIgnoresTransitiveClusterGaps(t *testing.T) {
-	// All three providers are under pace, so even gaps larger than the old 10%
-	// cluster threshold do not affect their order; weight decides.
-	in := RankingInput{
-		Now: rankNow,
-		Policies: []ProviderPolicy{
-			{MappingID: "a", Weight: 1},
-			{MappingID: "b", Weight: 3},
-			{MappingID: "c", Weight: 2},
-		},
-		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.0, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.04, 0.5)},
-			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.08, 0.5)},
-		},
-	}
-	eqOrder(t, Rank(in), "b", "c", "a")
-}
-
-func TestRankPaceReorderedDeterminism(t *testing.T) {
-	// All-paced group: reordering input Policies/Obs yields the same order.
-	// Paces 0.6 / 1.0 / 1.4 are all >10% apart, so each is its own cluster.
+func TestRankSignalReorderedDeterminism(t *testing.T) {
+	// Signals +0.875 / +0.125 / -0.625 each sit in their own cluster.
 	policies := []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}}
 	obs := []ProviderObs{
 		{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
@@ -873,15 +859,48 @@ func TestRankPaceReorderedDeterminism(t *testing.T) {
 		{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.7, 0.5)},
 	}
 	first := Rank(RankingInput{Now: rankNow, Policies: policies, Obs: obs})
-
-	// Same data, shuffled input order.
 	second := Rank(RankingInput{
 		Now:      rankNow,
 		Policies: []ProviderPolicy{policies[2], policies[0], policies[1]},
 		Obs:      []ProviderObs{obs[2], obs[0], obs[1]},
 	})
-	if !reflect.DeepEqual(order(first), order(second)) {
-		t.Fatalf("reordered input changed order:\n  first:  %v\n  second: %v", order(first), order(second))
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("reordered input changed ranking:\n  first:  %+v\n  second: %+v", first, second)
+	}
+	eqOrder(t, first, "a", "b", "c")
+}
+
+func TestRankExplainSignalFormat(t *testing.T) {
+	offPeak := alwaysOffPeak(t)
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "pk"}, {MappingID: "off", Schedule: &offPeak}},
+		Obs: []ProviderObs{
+			{MappingID: "pk", Mode: "normal", Snapshot: signalSnap("pk", 1.0/7.0, 3)},
+			{MappingID: "off", Mode: "normal", Snapshot: signalSnap("off", 5.0/7.0, 3)},
+		},
+	}
+	want := map[string]string{"pk": "peak, signal +1.17", "off": "off-peak, signal -1.17"}
+	for _, e := range Rank(in).Entries {
+		if e.Explanation != want[e.MappingID] {
+			t.Fatalf("%s explanation = %q, want %q", e.MappingID, e.Explanation, want[e.MappingID])
+		}
+	}
+}
+
+func TestRankExplainOmitsGroupSkippedSignal(t *testing.T) {
+	in := RankingInput{
+		Now:      rankNow,
+		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nosignal"}},
+		Obs: []ProviderObs{
+			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},
+			{MappingID: "nosignal", Mode: "normal", Snapshot: remSnap("nosignal", 0.5, rankNow)},
+		},
+	}
+	for _, e := range Rank(in).Entries {
+		if e.Eligible && strings.Contains(e.Explanation, "signal") {
+			t.Fatalf("group-skipped signal leaked into %s explanation %q", e.MappingID, e.Explanation)
+		}
 	}
 }
 
@@ -911,22 +930,6 @@ func TestRankBalanceGroupIsolation(t *testing.T) {
 }
 
 // ----- Part 7: ineligible placement ----------------------------------------
-
-func TestRankExplainOmitsGroupSkippedPace(t *testing.T) {
-	in := RankingInput{
-		Now:      rankNow,
-		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nopace"}},
-		Obs: []ProviderObs{
-			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},
-			{MappingID: "nopace", Mode: "normal", Snapshot: remSnap("nopace", 0.5, rankNow)},
-		},
-	}
-	for _, e := range Rank(in).Entries {
-		if e.Eligible && strings.Contains(e.Explanation, "pace") {
-			t.Fatalf("group-skipped pace leaked into %s explanation %q", e.MappingID, e.Explanation)
-		}
-	}
-}
 
 func TestRankIneligiblePlacement(t *testing.T) {
 	in := RankingInput{

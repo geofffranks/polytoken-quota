@@ -224,10 +224,10 @@ func (s QuotaSnapshot) NextResetAt() *time.Time {
 
 // MinQuotaCyclePeriod is the minimum window period eligible to be treated as a
 // quota cycle rather than a short rate limit. It matches the routing policy's
-// projection floor (computePace) so pace calculations and the status display
-// agree on which window is "the quota": windows shorter than one day (e.g.
+// signal floor (computeSignal) so the routing signal and the status display
+// agree on which windows are "the quota": windows shorter than one day (e.g.
 // codex's 5h session window) are rate limits, not quota cycles, and never drive
-// next-reset or pace.
+// next-reset or the signal.
 const MinQuotaCyclePeriod = 24 * time.Hour
 
 // NextQuotaResetAt returns the reset time of the quota-cycle anchor: the window
