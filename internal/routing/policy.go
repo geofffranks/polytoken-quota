@@ -418,7 +418,9 @@ func computeSignal(snap *quota.QuotaSnapshot, now time.Time) (signal float64, ok
 			continue
 		}
 		rem := w.Remaining()
-		if rem == nil {
+		// A NaN remaining (e.g. an infinite limit) would make every signal
+		// comparison false and break sort ordering.
+		if rem == nil || math.IsNaN(*rem) {
 			continue
 		}
 		period := *w.Period

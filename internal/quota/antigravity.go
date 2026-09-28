@@ -55,6 +55,9 @@ func (execAgyRunner) Run(ctx context.Context, path string, args, env []string) (
 	stdout.max = antigravityMaxStdout
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = env
+	// Bound the wait for stdout to close after the context kills agy, in case
+	// a descendant process inherited the pipe.
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdout = &stdout
 	// Stderr is discarded: it can carry account details and is never surfaced.
 	cmd.Stderr = nil

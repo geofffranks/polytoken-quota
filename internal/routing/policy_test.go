@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -96,6 +97,14 @@ func TestComputeSignal(t *testing.T) {
 			name:    "nil period does not qualify",
 			windows: []quota.QuotaWindow{{Used: fptr(0.5), Limit: fptr(1), ResetAt: tptr(rankNow.Add(time.Hour))}},
 			ok:      false,
+		},
+		{
+			name: "NaN remaining does not qualify",
+			windows: []quota.QuotaWindow{{
+				Used: fptr(1), Limit: fptr(math.Inf(1)),
+				ResetAt: tptr(rankNow.Add(time.Hour)), Period: durptr(week),
+			}},
+			ok: false,
 		},
 		{
 			name:    "missing reset does not qualify",
