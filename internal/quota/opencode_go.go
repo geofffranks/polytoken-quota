@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -70,6 +72,57 @@ type OpenCodeGoSource struct {
 	Credentials CredentialResolver
 	Evidence    *EvidenceRegistry
 	Now         func() time.Time
+	// DataHome overrides the directory holding "opencode/auth.json" for the
+	// fallback credential. Empty uses $XDG_DATA_HOME, then ~/.local/share.
+	DataHome string
+}
+
+// opencodeGoAuthEntries are the OpenCode auth.json entries checked, in order,
+// when OPENCODE_GO_API_KEY is unset.
+var opencodeGoAuthEntries = []string{"opencode-go", "opencode"}
+
+// authFileKey returns the API key OpenCode stored in its auth.json, or "" when
+// the file, entry, or key is missing or malformed. The file is read
+// transiently; its contents never reach an error or snapshot.
+func (o *OpenCodeGoSource) authFileKey() string {
+	path := openCodeAuthPath(o.DataHome, os.Getenv("XDG_DATA_HOME"), userHomeDir())
+	contents, err := o.Credentials.Resolve(CredentialRef{Kind: CredentialFile, Locator: path})
+	if err != nil {
+		return ""
+	}
+	var entries map[string]struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal([]byte(contents), &entries) != nil {
+		return ""
+	}
+	for _, name := range opencodeGoAuthEntries {
+		if key := cleanOpenCodeGoKey(entries[name].Key); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// openCodeAuthPath returns OpenCode's auth.json path: under dataHome when set,
+// else $XDG_DATA_HOME, else ~/.local/share.
+func openCodeAuthPath(dataHome, xdgDataHome, home string) string {
+	base := dataHome
+	if base == "" {
+		base = xdgDataHome
+	}
+	if base == "" {
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "opencode", "auth.json")
+}
+
+func userHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // OpenCodeGoEvidence returns the reviewed, sanitized OpenCode Go contract
@@ -151,7 +204,11 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 	key, err := o.Credentials.Resolve(CredentialRef{Kind: CredentialEnv, Locator: opencodeGoAPIKeyEnv})
 	key = cleanOpenCodeGoKey(key)
 	if err != nil || key == "" {
-		msg := "opencode-go: could not resolve OPENCODE_GO_API_KEY"
+		// Fall back to the key OpenCode itself stored at login.
+		key = o.authFileKey()
+	}
+	if key == "" {
+		msg := "opencode-go: could not resolve OPENCODE_GO_API_KEY or an OpenCode auth.json key"
 		return o.fail(msg), errors.New(msg)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opencodeGoUsageEndpoint, nil)
@@ -171,7 +228,7 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		msg := fmt.Sprintf("opencode-go: server error (HTTP %d)", resp.StatusCode)
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			msg = "opencode-go: authentication failed; check OPENCODE_GO_API_KEY"
+			msg = "opencode-go: authentication failed; check OPENCODE_GO_API_KEY or OpenCode auth.json"
 		case http.StatusForbidden:
 			// Distinct from an auth failure: the EntitlementError envelope
 			// means the key authenticated but has no OpenCode Go subscription.
