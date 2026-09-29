@@ -217,16 +217,17 @@ func (r *authFallbackResolver) Resolve(ref CredentialRef) (string, error) {
 }
 
 func TestOpenCodeGoAuthJSONFallback(t *testing.T) {
-	for name, tc := range map[string]struct {
+	for _, tc := range []struct {
+		name     string
 		authJSON string
 		want     string
 	}{
-		"opencode-go entry":        {`{"opencode-go":{"type":"api","key":"k-go"},"opencode":{"key":"k-general"}}`, "k-go"},
-		"falls back to opencode":   {`{"opencode":{"type":"api","key":"k-general"}}`, "k-general"},
-		"blank go entry skipped":   {`{"opencode-go":{"key":"  "},"opencode":{"key":"k-general"}}`, "k-general"},
-		"quoted key is cleaned up": {`{"opencode-go":{"key":"\"k-quoted\""}}`, "k-quoted"},
+		{"opencode-go entry", `{"opencode-go":{"type":"api","key":"k-go"},"opencode":{"key":"k-general"}}`, "k-go"},
+		{"falls back to opencode", `{"opencode":{"type":"api","key":"k-general"}}`, "k-general"},
+		{"blank go entry skipped", `{"opencode-go":{"key":"  "},"opencode":{"key":"k-general"}}`, "k-general"},
+		{"quoted key is cleaned up", `{"opencode-go":{"key":"\"k-quoted\""}}`, "k-quoted"},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
 			creds := &authFallbackResolver{authJSON: tc.authJSON}
 			src.Credentials = creds
@@ -261,15 +262,18 @@ func TestOpenCodeGoEnvKeyWinsOverAuthJSON(t *testing.T) {
 }
 
 func TestOpenCodeGoAuthJSONUnusableFailsClosed(t *testing.T) {
-	for name, creds := range map[string]*authFallbackResolver{
-		"missing file": {fileErr: errors.New("could not resolve credential: file")},
-		"malformed":    {authJSON: `{not json`},
-		"no entry":     {authJSON: `{"anthropic":{"key":"` + opencodeGoTestKey + `"}}`},
-		"non-string":   {authJSON: `{"opencode-go":{"key":42}}`},
+	for _, tc := range []struct {
+		name  string
+		creds *authFallbackResolver
+	}{
+		{"missing file", &authFallbackResolver{fileErr: errors.New("could not resolve credential: file")}},
+		{"malformed", &authFallbackResolver{authJSON: `{not json`}},
+		{"no entry", &authFallbackResolver{authJSON: `{"anthropic":{"key":"` + opencodeGoTestKey + `"}}`}},
+		{"non-string", &authFallbackResolver{authJSON: `{"opencode-go":{"key":42}}`}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
-			src.Credentials = creds
+			src.Credentials = tc.creds
 			snap, err := src.Fetch(context.Background())
 			if err == nil || snap.Status != SourceFailed || len(doer.calls) != 0 {
 				t.Fatalf("snap=%+v err=%v calls=%d; want fail closed", snap, err, len(doer.calls))
@@ -286,10 +290,37 @@ func TestOpenCodeAuthPath(t *testing.T) {
 		{"/d", "/x", "/h", "/d/opencode/auth.json"},
 		{"", "/x", "/h", "/x/opencode/auth.json"},
 		{"", "", "/h", "/h/.local/share/opencode/auth.json"},
+		// Degenerate inputs must never yield a working-directory-relative path.
+		{"", "", "", ""},
+		{"rel", "", "/h", ""},
+		{"", "rel", "/h", ""},
+		{"", "", "rel-home", ""},
 	}
 	for _, tc := range cases {
-		if got := openCodeAuthPath(tc.dataHome, tc.xdg, tc.home); got != filepath.FromSlash(tc.want) {
-			t.Fatalf("openCodeAuthPath(%q,%q,%q)=%q want %q", tc.dataHome, tc.xdg, tc.home, got, tc.want)
+		want := tc.want
+		if want != "" {
+			want = filepath.FromSlash(want)
+		}
+		if got := openCodeAuthPath(tc.dataHome, tc.xdg, tc.home); got != want {
+			t.Fatalf("openCodeAuthPath(%q,%q,%q)=%q want %q", tc.dataHome, tc.xdg, tc.home, got, want)
+		}
+	}
+}
+
+func TestOpenCodeGoAuthJSONSkippedWithoutAbsolutePath(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "")
+	src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
+	creds := &authFallbackResolver{authJSON: `{"opencode-go":{"key":"` + opencodeGoTestKey + `"}}`}
+	src.Credentials = creds
+	src.DataHome = ""
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || len(doer.calls) != 0 {
+		t.Fatalf("snap=%+v err=%v calls=%d; want fail closed", snap, err, len(doer.calls))
+	}
+	for _, ref := range creds.refs {
+		if ref.Kind == CredentialFile {
+			t.Fatalf("auth.json read despite no absolute path: %+v", ref)
 		}
 	}
 }

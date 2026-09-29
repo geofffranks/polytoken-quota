@@ -242,27 +242,6 @@ func signalSnap(mid string, usedFrac, daysElapsed float64) *quota.QuotaSnapshot 
 	}
 }
 
-// paceSnap creates a snapshot with one weekly window that has a computable
-// signal. usedFrac and elapsedFrac are both in [0,1]. At elapsedFrac 0.5 the
-// 3.5 elapsed days round up to 4, so the signal is 2 - 3.75*usedFrac.
-func paceSnap(mid string, usedFrac, elapsedFrac float64) *quota.QuotaSnapshot {
-	period := 7 * 24 * time.Hour
-	timeToReset := time.Duration((1 - elapsedFrac) * float64(period))
-	return &quota.QuotaSnapshot{
-		MappingID:    mid,
-		CheckedAt:    rankNow,
-		Status:       quota.SourceFresh,
-		Availability: quota.QuotaAvailable,
-		Windows: []quota.QuotaWindow{{
-			Name:    "primary",
-			Used:    fptr(usedFrac),
-			Limit:   fptr(1.0),
-			ResetAt: tptr(rankNow.Add(timeToReset)),
-			Period:  durptr(period),
-		}},
-	}
-}
-
 // order returns the ordered mapping IDs of a ranking result.
 func order(r RankingResult) []string {
 	out := make([]string, len(r.Entries))
@@ -721,8 +700,8 @@ func TestRankSignalTieBandSharesRank(t *testing.T) {
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "zeta"}, {MappingID: "alpha"}},
 		Obs: []ProviderObs{
-			{MappingID: "zeta", Mode: "normal", Snapshot: paceSnap("zeta", 0.50, 0.5)},
-			{MappingID: "alpha", Mode: "normal", Snapshot: paceSnap("alpha", 0.54, 0.5)},
+			{MappingID: "zeta", Mode: "normal", Snapshot: signalSnap("zeta", 0.50, 3.5)},
+			{MappingID: "alpha", Mode: "normal", Snapshot: signalSnap("alpha", 0.54, 3.5)},
 		},
 	}
 	got := Rank(in)
@@ -739,22 +718,22 @@ func TestRankSignalTieBandOffPeakDecides(t *testing.T) {
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b", Schedule: &offPeak}},
 		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.50, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
+			{MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 0.50, 3.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: signalSnap("b", 0.54, 3.5)},
 		},
 	}
 	eqOrder(t, Rank(in), "b", "a")
 }
 
-func TestRankNoUnderPaceTier(t *testing.T) {
-	// Signals +0.9 and +0.3 were both "under pace" (paces 0.51 and 0.79) and
-	// used to share a tier where weight decided. They now rank separately.
+func TestRankDistinctSignalsRankSeparately(t *testing.T) {
+	// Signals +0.9 and +0.3 sit outside the cluster band, so weight must not
+	// tie-break them: they rank separately.
 	in := RankingInput{
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "low", Weight: 5}, {MappingID: "high", Weight: 1}},
 		Obs: []ProviderObs{
-			{MappingID: "low", Mode: "normal", Snapshot: paceSnap("low", 1.7/3.75, 0.5)},
-			{MappingID: "high", Mode: "normal", Snapshot: paceSnap("high", 1.1/3.75, 0.5)},
+			{MappingID: "low", Mode: "normal", Snapshot: signalSnap("low", 1.7/3.75, 3.5)},
+			{MappingID: "high", Mode: "normal", Snapshot: signalSnap("high", 1.1/3.75, 3.5)},
 		},
 	}
 	got := Rank(in)
@@ -775,9 +754,9 @@ func TestRankSignalClusterChain(t *testing.T) {
 			{MappingID: "c", Weight: 2},
 		},
 		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.50, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.54, 0.5)},
-			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.60, 0.5)},
+			{MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 0.50, 3.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: signalSnap("b", 0.54, 3.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: signalSnap("c", 0.60, 3.5)},
 		},
 	}
 	eqOrder(t, Rank(in), "b", "a", "c")
@@ -794,9 +773,9 @@ func TestRankSignalClustersChainTransitively(t *testing.T) {
 			{MappingID: "c", Weight: 2},
 		},
 		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 1.7/3.75, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 1.85/3.75, 0.5)},
-			{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 2.0/3.75, 0.5)},
+			{MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 1.7/3.75, 3.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: signalSnap("b", 1.85/3.75, 3.5)},
+			{MappingID: "c", Mode: "normal", Snapshot: signalSnap("c", 2.0/3.75, 3.5)},
 		},
 	}
 	eqOrder(t, Rank(in), "b", "c", "a")
@@ -810,8 +789,8 @@ func TestRankSignalBeatsOffPeak(t *testing.T) {
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "a"}, {MappingID: "b", Schedule: &offPeak}},
 		Obs: []ProviderObs{
-			{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
-			{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.7, 0.5)},
+			{MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 0.3, 3.5)},
+			{MappingID: "b", Mode: "normal", Snapshot: signalSnap("b", 0.7, 3.5)},
 		},
 	}
 	eqOrder(t, Rank(in), "a", "b")
@@ -838,9 +817,9 @@ func TestRankSignalGroupSkipWhenAnyProviderLacksSignal(t *testing.T) {
 		"z": {MappingID: "z"},
 	}
 	observations := map[string]ProviderObs{
-		"a": {MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.75, 0.5)},
+		"a": {MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 0.75, 3.5)},
 		"m": {MappingID: "m", Mode: "normal", Snapshot: remSnap("m", 0.5, rankNow)},
-		"z": {MappingID: "z", Mode: "normal", Snapshot: paceSnap("z", 0.10, 0.5)},
+		"z": {MappingID: "z", Mode: "normal", Snapshot: signalSnap("z", 0.10, 3.5)},
 	}
 	for _, ids := range [][]string{
 		{"a", "m", "z"}, {"a", "z", "m"}, {"m", "a", "z"},
@@ -863,9 +842,9 @@ func TestRankSignalReorderedDeterminism(t *testing.T) {
 	// Signals +0.875 / +0.125 / -0.625 each sit in their own cluster.
 	policies := []ProviderPolicy{{MappingID: "a"}, {MappingID: "b"}, {MappingID: "c"}}
 	obs := []ProviderObs{
-		{MappingID: "a", Mode: "normal", Snapshot: paceSnap("a", 0.3, 0.5)},
-		{MappingID: "b", Mode: "normal", Snapshot: paceSnap("b", 0.5, 0.5)},
-		{MappingID: "c", Mode: "normal", Snapshot: paceSnap("c", 0.7, 0.5)},
+		{MappingID: "a", Mode: "normal", Snapshot: signalSnap("a", 0.3, 3.5)},
+		{MappingID: "b", Mode: "normal", Snapshot: signalSnap("b", 0.5, 3.5)},
+		{MappingID: "c", Mode: "normal", Snapshot: signalSnap("c", 0.7, 3.5)},
 	}
 	first := Rank(RankingInput{Now: rankNow, Policies: policies, Obs: obs})
 	second := Rank(RankingInput{
@@ -902,7 +881,7 @@ func TestRankExplainOmitsGroupSkippedSignal(t *testing.T) {
 		Now:      rankNow,
 		Policies: []ProviderPolicy{{MappingID: "proj"}, {MappingID: "nosignal"}},
 		Obs: []ProviderObs{
-			{MappingID: "proj", Mode: "normal", Snapshot: paceSnap("proj", 0.5, 0.5)},
+			{MappingID: "proj", Mode: "normal", Snapshot: signalSnap("proj", 0.5, 3.5)},
 			{MappingID: "nosignal", Mode: "normal", Snapshot: remSnap("nosignal", 0.5, rankNow)},
 		},
 	}

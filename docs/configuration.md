@@ -161,8 +161,10 @@ polled.
 
 Provider note: `opencode-go` reports percentages rather than dollars, so it needs
 no `monthly_budget_usd` and may omit `quota` or use `quota: {}`. Its credential is
-the transient `OPENCODE_GO_API_KEY`; when that variable is unresolved the adapter
-fails closed and makes no HTTP request. It polls three windows (`rolling`,
+the transient `OPENCODE_GO_API_KEY` when set, otherwise the key OpenCode itself
+stored in its `auth.json` (the `opencode-go` entry, then `opencode`; the `key`
+field only, read from an absolute path). Only when neither resolves does the
+adapter fail closed and make no HTTP request. It polls three windows (`rolling`,
 `weekly`, `monthly`) and is subject to the same fail-closed evidence gate as every
 other adapter. See the
 [OpenCode Go adapter](../README.md#opencode-go-adapter) section of the README.
