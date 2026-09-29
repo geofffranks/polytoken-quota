@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -179,13 +180,148 @@ func TestOpenCodeGoUnresolvedCredentialFailsClosedWithoutRequest(t *testing.T) {
 			if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
 				t.Fatalf("snapshot=%+v err=%v", snap, err)
 			}
-			if err.Error() != "opencode-go: could not resolve "+opencodeGoAPIKeyEnv {
+			if err.Error() != "opencode-go: could not resolve "+opencodeGoAPIKeyEnv+" or an OpenCode auth.json key" {
 				t.Fatalf("err=%v", err)
 			}
 			if len(doer.calls) != 0 {
 				t.Fatalf("fail-closed path made %d HTTP calls, want 0", len(doer.calls))
 			}
 		})
+	}
+}
+
+// opencodeGoUsageJSON is a minimal valid usage body for credential tests.
+const opencodeGoUsageJSON = `{"usage":{"rolling":{"status":"ok","percent":12.5,"resetsAt":"2026-08-15T16:00:00Z"}}}`
+
+// authFallbackResolver fails env lookups and serves file lookups from a fixed
+// auth.json body, recording every ref.
+type authFallbackResolver struct {
+	envValue string
+	authJSON string
+	fileErr  error
+	refs     []CredentialRef
+}
+
+func (r *authFallbackResolver) Resolve(ref CredentialRef) (string, error) {
+	r.refs = append(r.refs, ref)
+	if ref.Kind == CredentialEnv {
+		if r.envValue == "" {
+			return "", errors.New("could not resolve credential: env")
+		}
+		return r.envValue, nil
+	}
+	if r.fileErr != nil {
+		return "", r.fileErr
+	}
+	return r.authJSON, nil
+}
+
+func TestOpenCodeGoAuthJSONFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		authJSON string
+		want     string
+	}{
+		{"opencode-go entry", `{"opencode-go":{"type":"api","key":"k-go"},"opencode":{"key":"k-general"}}`, "k-go"},
+		{"falls back to opencode", `{"opencode":{"type":"api","key":"k-general"}}`, "k-general"},
+		{"blank go entry skipped", `{"opencode-go":{"key":"  "},"opencode":{"key":"k-general"}}`, "k-general"},
+		{"quoted key is cleaned up", `{"opencode-go":{"key":"\"k-quoted\""}}`, "k-quoted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
+			creds := &authFallbackResolver{authJSON: tc.authJSON}
+			src.Credentials = creds
+			src.DataHome = "/synthetic/data"
+			if _, err := src.Fetch(context.Background()); err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if got := doer.lastCall().Header.Get("Authorization"); got != "Bearer "+tc.want {
+				t.Fatalf("Authorization=%q want Bearer %s", got, tc.want)
+			}
+			want := CredentialRef{Kind: CredentialFile, Locator: filepath.Join("/synthetic/data", "opencode", "auth.json")}
+			if len(creds.refs) != 2 || creds.refs[1] != want {
+				t.Fatalf("refs=%+v want env then %+v", creds.refs, want)
+			}
+		})
+	}
+}
+
+func TestOpenCodeGoEnvKeyWinsOverAuthJSON(t *testing.T) {
+	src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
+	creds := &authFallbackResolver{envValue: "k-env", authJSON: `{"opencode-go":{"key":"k-file"}}`}
+	src.Credentials = creds
+	if _, err := src.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got := doer.lastCall().Header.Get("Authorization"); got != "Bearer k-env" {
+		t.Fatalf("Authorization=%q", got)
+	}
+	if len(creds.refs) != 1 {
+		t.Fatalf("auth.json read even though the env key resolved: refs=%+v", creds.refs)
+	}
+}
+
+func TestOpenCodeGoAuthJSONUnusableFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		creds *authFallbackResolver
+	}{
+		{"missing file", &authFallbackResolver{fileErr: errors.New("could not resolve credential: file")}},
+		{"malformed", &authFallbackResolver{authJSON: `{not json`}},
+		{"no entry", &authFallbackResolver{authJSON: `{"anthropic":{"key":"` + opencodeGoTestKey + `"}}`}},
+		{"non-string", &authFallbackResolver{authJSON: `{"opencode-go":{"key":42}}`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
+			src.Credentials = tc.creds
+			snap, err := src.Fetch(context.Background())
+			if err == nil || snap.Status != SourceFailed || len(doer.calls) != 0 {
+				t.Fatalf("snap=%+v err=%v calls=%d; want fail closed", snap, err, len(doer.calls))
+			}
+			if strings.Contains(err.Error(), opencodeGoTestKey) || strings.Contains(snap.Error, opencodeGoTestKey) {
+				t.Fatal("auth.json contents leaked into the error")
+			}
+		})
+	}
+}
+
+func TestOpenCodeAuthPath(t *testing.T) {
+	cases := []struct{ dataHome, xdg, home, want string }{
+		{"/d", "/x", "/h", "/d/opencode/auth.json"},
+		{"", "/x", "/h", "/x/opencode/auth.json"},
+		{"", "", "/h", "/h/.local/share/opencode/auth.json"},
+		// Degenerate inputs must never yield a working-directory-relative path.
+		{"", "", "", ""},
+		{"rel", "", "/h", ""},
+		{"", "rel", "/h", ""},
+		{"", "", "rel-home", ""},
+	}
+	for _, tc := range cases {
+		want := tc.want
+		if want != "" {
+			want = filepath.FromSlash(want)
+		}
+		if got := openCodeAuthPath(tc.dataHome, tc.xdg, tc.home); got != want {
+			t.Fatalf("openCodeAuthPath(%q,%q,%q)=%q want %q", tc.dataHome, tc.xdg, tc.home, got, want)
+		}
+	}
+}
+
+func TestOpenCodeGoAuthJSONSkippedWithoutAbsolutePath(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", "")
+	src, doer := opencodeGoTestSource(t, opencodeGoUsageJSON, http.StatusOK, true)
+	creds := &authFallbackResolver{authJSON: `{"opencode-go":{"key":"` + opencodeGoTestKey + `"}}`}
+	src.Credentials = creds
+	src.DataHome = ""
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || len(doer.calls) != 0 {
+		t.Fatalf("snap=%+v err=%v calls=%d; want fail closed", snap, err, len(doer.calls))
+	}
+	for _, ref := range creds.refs {
+		if ref.Kind == CredentialFile {
+			t.Fatalf("auth.json read despite no absolute path: %+v", ref)
+		}
 	}
 }
 

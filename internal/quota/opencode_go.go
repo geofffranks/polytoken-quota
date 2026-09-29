@@ -11,14 +11,19 @@
 // exposes them.
 //
 // Credentials are transient: OPENCODE_GO_API_KEY is resolved for the immediate
-// request, attached as a Bearer header, and discarded. No key, account
-// identity, raw response, or provider-controlled message is persisted or
-// returned.
+// request, attached as a Bearer header, and discarded. When that variable is
+// unset the adapter falls back to the key OpenCode itself stored in its
+// auth.json (the "opencode-go" entry, then "opencode"; the "key" field only),
+// read transiently from an absolute path. With neither source resolving, the
+// adapter fails closed and makes no HTTP request. No key, account identity,
+// raw response, or provider-controlled message is persisted or returned.
 //
 // The endpoint contract is derived from the provider's first-party
 // open-source console code and is not officially documented: it is reviewed
 // quarterly per the evidence policy and must be re-verified whenever the
-// console implementation drifts.
+// console implementation drifts. The auth.json file contract (location,
+// entry names, key field) is OpenCode-owned and equally undocumented; it is
+// recorded in OpenCodeGoEvidence and falls under the same quarterly review.
 package quota
 
 import (
@@ -27,6 +32,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -70,6 +77,67 @@ type OpenCodeGoSource struct {
 	Credentials CredentialResolver
 	Evidence    *EvidenceRegistry
 	Now         func() time.Time
+	// DataHome overrides the directory holding "opencode/auth.json" for the
+	// fallback credential. Empty uses $XDG_DATA_HOME, then ~/.local/share.
+	DataHome string
+}
+
+// opencodeGoAuthEntries are the OpenCode auth.json entries checked, in order,
+// when OPENCODE_GO_API_KEY is unset.
+var opencodeGoAuthEntries = []string{"opencode-go", "opencode"}
+
+// authFileKey returns the API key OpenCode stored in its auth.json, or "" when
+// the file, entry, or key is missing or malformed. The file is read
+// transiently; its contents never reach an error or snapshot.
+func (o *OpenCodeGoSource) authFileKey() string {
+	path := openCodeAuthPath(o.DataHome, os.Getenv("XDG_DATA_HOME"), userHomeDir())
+	if path == "" {
+		return ""
+	}
+	contents, err := o.Credentials.Resolve(CredentialRef{Kind: CredentialFile, Locator: path})
+	if err != nil {
+		return ""
+	}
+	var entries map[string]struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal([]byte(contents), &entries) != nil {
+		return ""
+	}
+	for _, name := range opencodeGoAuthEntries {
+		if key := cleanOpenCodeGoKey(entries[name].Key); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// openCodeAuthPath returns OpenCode's auth.json path: under dataHome when set,
+// else $XDG_DATA_HOME, else ~/.local/share. It returns "" — skipping the file
+// fallback — when the result would not be absolute (for example HOME unset in
+// a service environment), so the lookup never resolves against the working
+// directory.
+func openCodeAuthPath(dataHome, xdgDataHome, home string) string {
+	base := dataHome
+	if base == "" {
+		base = xdgDataHome
+	}
+	if base == "" && home != "" {
+		base = filepath.Join(home, ".local", "share")
+	}
+	path := filepath.Join(base, "opencode", "auth.json")
+	if base == "" || !filepath.IsAbs(path) {
+		return ""
+	}
+	return path
+}
+
+func userHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }
 
 // OpenCodeGoEvidence returns the reviewed, sanitized OpenCode Go contract
@@ -80,7 +148,7 @@ func OpenCodeGoEvidence(_ time.Time) Evidence {
 		Endpoint:    opencodeGoUsageEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "bearer-api-key",
-		SchemaNote:  "three windows: rolling/weekly/monthly, each {status, percent, resetsAt}; percent is percent USED (never dollars); windows decode in fixed order rolling, weekly, monthly; errors: 401 AuthError envelope, 403 EntitlementError envelope with a valid key that has no OpenCode Go subscription; contract derived from the provider's first-party open-source console code and not officially documented — re-verify at the quarterly evidence review",
+		SchemaNote:  "three windows: rolling/weekly/monthly, each {status, percent, resetsAt}; percent is percent USED (never dollars); windows decode in fixed order rolling, weekly, monthly; errors: 401 AuthError envelope, 403 EntitlementError envelope with a valid key that has no OpenCode Go subscription; local fallback credential: OpenCode auth.json at <DataHome|$XDG_DATA_HOME|~/.local/share>/opencode/auth.json (absolute path only), entries opencode-go then opencode, key field only, used when OPENCODE_GO_API_KEY is unset; contract derived from the provider's first-party open-source console code and not officially documented — re-verify the endpoint and the auth.json contract at the quarterly evidence review",
 		FixturePath: "contract/testdata/quota/opencode-go/usage.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review; contract is not officially documented
@@ -151,7 +219,11 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 	key, err := o.Credentials.Resolve(CredentialRef{Kind: CredentialEnv, Locator: opencodeGoAPIKeyEnv})
 	key = cleanOpenCodeGoKey(key)
 	if err != nil || key == "" {
-		msg := "opencode-go: could not resolve OPENCODE_GO_API_KEY"
+		// Fall back to the key OpenCode itself stored at login.
+		key = o.authFileKey()
+	}
+	if key == "" {
+		msg := "opencode-go: could not resolve OPENCODE_GO_API_KEY or an OpenCode auth.json key"
 		return o.fail(msg), errors.New(msg)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, opencodeGoUsageEndpoint, nil)
@@ -171,7 +243,7 @@ func (o *OpenCodeGoSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		msg := fmt.Sprintf("opencode-go: server error (HTTP %d)", resp.StatusCode)
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			msg = "opencode-go: authentication failed; check OPENCODE_GO_API_KEY"
+			msg = "opencode-go: authentication failed; check OPENCODE_GO_API_KEY or OpenCode auth.json"
 		case http.StatusForbidden:
 			// Distinct from an auth failure: the EntitlementError envelope
 			// means the key authenticated but has no OpenCode Go subscription.

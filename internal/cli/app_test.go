@@ -708,7 +708,7 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
 		Providers: []service.MergedStatusProvider{{
 			Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true,
-			Reason:      "off-peak, pace 109%",
+			Reason:      "off-peak, signal -0.19",
 			Windows:     []service.QuotaWindowReport{{Name: "5h", Used: &used, Limit: &limit, ResetAt: &reset}},
 			NextResetAt: &reset,
 		}},
@@ -763,7 +763,7 @@ func TestStatusJSONMergedEnvelope(t *testing.T) {
 	if len(parsed.Providers) != 1 || parsed.Providers[0].Provider != "zai" || parsed.Providers[0].Status != "available" {
 		t.Fatalf("providers wrong: %+v", parsed.Providers)
 	}
-	if parsed.Providers[0].Rank != 1 || !parsed.Providers[0].OffPeak || !parsed.Providers[0].Eligible || parsed.Providers[0].Reason != "off-peak, pace 109%" {
+	if parsed.Providers[0].Rank != 1 || !parsed.Providers[0].OffPeak || !parsed.Providers[0].Eligible || parsed.Providers[0].Reason != "off-peak, signal -0.19" {
 		t.Fatalf("provider ranking fields missing: %+v", parsed.Providers[0])
 	}
 	win := parsed.Providers[0].Windows[0]

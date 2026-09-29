@@ -476,7 +476,7 @@ func TestLoadRoutingQuotaBackwardCompat(t *testing.T) {
 }
 
 func TestLoadOmittedQuotaDefaults(t *testing.T) {
-	for _, id := range []string{"codex", "zai", "neuralwatt"} {
+	for _, id := range []string{"codex", "zai", "neuralwatt", "opencode-go"} {
 		t.Run(id, func(t *testing.T) {
 			yaml := "version: 1\nproviders:\n  " + id + ":\n    models: [" + id + "/model]\n"
 			d, err := Load(writeTemp(t, yaml))

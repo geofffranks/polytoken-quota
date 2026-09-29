@@ -86,7 +86,7 @@ func TestMergedStatusTextLayout(t *testing.T) {
 		RoutingEnabled: true,
 		LastChecked:    time.Date(2026, 8, 14, 9, 12, 0, 0, time.UTC),
 		Providers: []service.MergedStatusProvider{
-			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, pace 109%", Windows: []service.QuotaWindowReport{
+			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, signal -0.19", Windows: []service.QuotaWindowReport{
 				{Name: "5h", Used: &used, Limit: &limit},
 				{Name: "weekly", Used: &used, Limit: &limit},
 			}, NextResetAt: &reset},
@@ -108,7 +108,7 @@ func TestMergedStatusTextLayout(t *testing.T) {
 		"routing: enabled",
 		"last checked: 2026-08-14 09:12 UTC",
 		"PROVIDER STATUS REASON QUOTA NEXT RESET",
-		"zai available off-peak, pace 109% 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
+		"zai available off-peak, signal -0.19 5h 41/80, weekly 41/80 2026-08-15 00:00 UTC",
 		"minime enabled not configured no data —",
 		"TARGET SOURCE ROUTE DESIRED EFFECTIVE",
 		"global config.yaml global glm-4.6 glm-4.6",
@@ -161,7 +161,7 @@ func TestMergedStatusTextReasonColors(t *testing.T) {
 		reason string
 		dimmed bool
 	}{
-		{"peak, pace 36%", false},
+		{"peak, signal +1.36", false},
 		{"off-peak", false},
 		{"not configured", true},
 	} {
@@ -229,8 +229,8 @@ func TestMergedStatusTextANSIAlignment(t *testing.T) {
 func TestMergedStatusTextUsesHiddenRankForProviderOrder(t *testing.T) {
 	report := service.MergedStatusReport{
 		Providers: []service.MergedStatusProvider{
-			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, pace 109%"},
-			{Provider: "codex", Status: "available", Rank: 0, Eligible: true, Reason: "peak, pace 50%"},
+			{Provider: "zai", Status: "available", Rank: 1, OffPeak: true, Eligible: true, Reason: "off-peak, signal -0.19"},
+			{Provider: "codex", Status: "available", Rank: 0, Eligible: true, Reason: "peak, signal +1.00"},
 		},
 	}
 	var out bytes.Buffer

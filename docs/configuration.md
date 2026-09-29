@@ -148,7 +148,7 @@ block, the key must also name a built-in quota adapter:
 | `zai` | Z.ai allowance polling |
 | `anthropic` | Anthropic Admin API spend against `monthly_budget_usd` |
 | `neuralwatt` | Neuralwatt Cloud quota endpoint |
-| `opencode-go` | OpenCode Go usage-window polling |
+| `opencode-go` | OpenCode Go usage-window polling (`OPENCODE_GO_API_KEY`, else OpenCode's `auth.json`) |
 
 A quota block under any other key is rejected at load with the valid names.
 Supported non-Anthropic mappings may omit `quota` or use `quota: {}`; both forms
@@ -161,8 +161,10 @@ polled.
 
 Provider note: `opencode-go` reports percentages rather than dollars, so it needs
 no `monthly_budget_usd` and may omit `quota` or use `quota: {}`. Its credential is
-the transient `OPENCODE_GO_API_KEY`; when that variable is unresolved the adapter
-fails closed and makes no HTTP request. It polls three windows (`rolling`,
+the transient `OPENCODE_GO_API_KEY` when set, otherwise the key OpenCode itself
+stored in its `auth.json` (the `opencode-go` entry, then `opencode`; the `key`
+field only, read from an absolute path). Only when neither resolves does the
+adapter fail closed and make no HTTP request. It polls three windows (`rolling`,
 `weekly`, `monthly`) and is subject to the same fail-closed evidence gate as every
 other adapter. See the
 [OpenCode Go adapter](../README.md#opencode-go-adapter) section of the README.
@@ -193,7 +195,7 @@ There is no `adapter` field; the mapping key selects the adapter.
 | `monthly_budget_usd` | none | Required and positive for `anthropic` in `api` mode: the monthly spend ceiling treated as that provider's quota. Unused by the other adapters and forbidden in `subscription` mode. |
 | `freshness_ttl` | `30m` | How long a successful snapshot stays eligible for ranking. Raise it if you check less often than every 30 minutes. |
 | `balance_group` | `default` | Providers are only ranked against others in the same group. Use to keep, say, a paid and a free provider from competing. |
-| `weight` | `1` | Global tie-break between providers otherwise ranked equal. Higher wins. When pace, schedule, and weight are all equal, providers share a routing rank and each route keeps its authored chain order. Pace is compared only when every eligible provider in the balance group can compute it. |
+| `weight` | `1` | Global tie-break between providers otherwise ranked equal. Higher wins. When signal cluster, schedule, and weight are all equal, providers share a routing rank and each route keeps its authored chain order. The signal is compared only when every eligible provider in the balance group can compute it. |
 | `schedule` | none (never off-peak) | Off-peak windows for ranking; see below. |
 
 ### `schedule`
