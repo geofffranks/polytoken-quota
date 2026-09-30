@@ -108,9 +108,9 @@ func TestProviderOwnershipLegacyStateMigratesWithoutField(t *testing.T) {
 // TestProviderOwnershipGateAxisMigrates proves the additive gate-attribution
 // schema (axis, threshold, engaged revision) migrates and round-trips: a
 // legacy state file without the fields loads cleanly with legacy-claim
-// semantics, a pace-attributed record persists and reloads unchanged, and a
-// hand-edited unknown axis value degrades to the legacy axis (never pace-held,
-// attribution cleared) instead of failing the load.
+// semantics, a signal-attributed record persists and reloads unchanged, and a
+// hand-edited unknown axis value degrades to the legacy axis (never
+// signal-held, attribution cleared) instead of failing the load.
 func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 	st, p := ownershipTestStore(t)
 	legacy := `{"Schema":4,"Revision":3,"Providers":{},"Targets":{}}`
@@ -127,14 +127,14 @@ func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 	if loaded.Schema != CurrentSchema {
 		t.Fatalf("legacy schema not migrated: %d", loaded.Schema)
 	}
-	// A pace-attributed claim written on this schema round trips exactly.
-	pace := ProviderOwnership{
+	// A signal-attributed claim written on this schema round trips exactly.
+	signal := ProviderOwnership{
 		BaselinePresent: true, BaselineValue: true, Owned: true,
-		Axis: OwnershipAxisPace, Threshold: 1.25, EngagedRevision: 9,
+		Axis: OwnershipAxisSignal, Threshold: -0.25, EngagedRevision: 9,
 	}
-	loaded = loaded.WithOwnership("prov-pace", pace)
-	if !loaded.ProviderOwnership["prov-pace"].PaceHeld() {
-		t.Fatalf("pace claim not pace-held: %+v", loaded.ProviderOwnership["prov-pace"])
+	loaded = loaded.WithOwnership("prov-signal", signal)
+	if !loaded.ProviderOwnership["prov-signal"].SignalHeld() {
+		t.Fatalf("signal claim not signal-held: %+v", loaded.ProviderOwnership["prov-signal"])
 	}
 	if err := st.Save(loaded); err != nil {
 		t.Fatal(err)
@@ -143,13 +143,13 @@ func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, ok := again.OwnershipOf("prov-pace")
-	if !ok || got != pace {
-		t.Fatalf("pace claim round trip = %+v (ok=%v), want %+v", got, ok, pace)
+	got, ok := again.OwnershipOf("prov-signal")
+	if !ok || got != signal {
+		t.Fatalf("signal claim round trip = %+v (ok=%v), want %+v", got, ok, signal)
 	}
 
 	// A hand-edited unknown axis value loads as a legacy claim: still owned
-	// expected-off, never pace-held, attribution fields cleared.
+	// expected-off, never signal-held, attribution fields cleared.
 	handEdited := `{"Schema":5,"Revision":4,"Providers":{},"Targets":{},` +
 		`"ProviderOwnership":{"prov-x":{"BaselinePresent":true,"BaselineValue":true,"Owned":true,` +
 		`"Axis":"bogus","Threshold":3.5,"EngagedRevision":12}}}`
@@ -165,8 +165,8 @@ func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 	if !ok || got != want {
 		t.Fatalf("unknown axis record = %+v (ok=%v), want legacy %+v", got, ok, want)
 	}
-	if got.PaceHeld() {
-		t.Fatalf("unknown axis record must never be pace-held")
+	if got.SignalHeld() {
+		t.Fatalf("unknown axis record must never be signal-held")
 	}
 	// The degraded record persists canonically as legacy.
 	if err := st.Save(degraded); err != nil {
@@ -181,7 +181,7 @@ func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 	}
 
 	// An empty axis stays legacy, and reserve/disabled axes round trip without
-	// becoming pace-held.
+	// becoming signal-held.
 	mixed := `{"Schema":5,"Revision":4,"Providers":{},"Targets":{},` +
 		`"ProviderOwnership":{"prov-legacy":{"Owned":true},` +
 		`"prov-reserve":{"Owned":true,"Axis":"reserve"},` +
@@ -200,8 +200,8 @@ func TestProviderOwnershipGateAxisMigrates(t *testing.T) {
 		if !ok || got.Axis != wantAxis {
 			t.Fatalf("%s axis = %+v (ok=%v), want %q", id, got, ok, wantAxis)
 		}
-		if got.PaceHeld() {
-			t.Fatalf("%s must never be pace-held", id)
+		if got.SignalHeld() {
+			t.Fatalf("%s must never be signal-held", id)
 		}
 	}
 }

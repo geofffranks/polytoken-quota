@@ -41,10 +41,10 @@ type ProviderOwnership struct {
 
 // Ownership gate axes. The empty string is the legacy-claim axis: a claim
 // recorded before attribution, owned expected-off with no axis semantics
-// (never pace-held in the pool rule, never blocks recovery).
+// (never signal-held in the pool rule, never blocks recovery).
 const (
 	OwnershipAxisLegacy   = ""
-	OwnershipAxisPace     = "pace"
+	OwnershipAxisSignal   = "signal"
 	OwnershipAxisReserve  = "reserve"
 	OwnershipAxisDisabled = "disabled"
 )
@@ -54,16 +54,16 @@ const (
 // can never smuggle an unbounded string into gate decisions.
 func ValidOwnershipAxis(axis string) bool {
 	switch axis {
-	case OwnershipAxisLegacy, OwnershipAxisPace, OwnershipAxisReserve, OwnershipAxisDisabled:
+	case OwnershipAxisLegacy, OwnershipAxisSignal, OwnershipAxisReserve, OwnershipAxisDisabled:
 		return true
 	}
 	return false
 }
 
-// PaceHeld reports whether the record is a claim currently held by the pace
-// axis (as opposed to reserve/disabled gating or a legacy claim).
-func (o ProviderOwnership) PaceHeld() bool {
-	return o.Owned && o.Axis == OwnershipAxisPace
+// SignalHeld reports whether the record is a claim currently held by the
+// signal axis (as opposed to reserve/disabled gating or a legacy claim).
+func (o ProviderOwnership) SignalHeld() bool {
+	return o.Owned && o.Axis == OwnershipAxisSignal
 }
 
 // OwnershipOf returns the ownership record for provider id and whether one

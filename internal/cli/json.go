@@ -72,7 +72,7 @@ type statusRouteJSON struct {
 //	{"routing_enabled":true,"last_checked":"...Z","providers":[],"routes":[],
 //	 "pending_targets":[],"problem":false,"errors":[],"error":"optional"}
 type statusJSON struct {
-	RoutingEnabled bool                 `json:"routing_enabled"`
+	RoutingEnabled bool `json:"routing_enabled"`
 	// ProviderOnly marks the opt-in provider-only policy mode: routes are
 	// empty by design, never because data was silently dropped.
 	ProviderOnly   bool                 `json:"provider_only"`

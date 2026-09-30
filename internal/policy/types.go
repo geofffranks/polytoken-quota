@@ -120,51 +120,53 @@ type Operational struct {
 	OnChange []OnChangeAction
 }
 
-// DefaultPaceGateThreshold is the pace fraction (1.0 = 100% of the projection
-// window) at which pace gating engages when a quota block omits
-// pace_gate.threshold. It is the documented default of that key, not a magic
-// number: Load applies it here and the gate surfaces it in diagnostics, so one
-// documented value governs every threshold decision.
-const DefaultPaceGateThreshold = 1.0
+// DefaultSignalGateThreshold is the use-it-or-lose-it signal value at which
+// signal gating engages when a quota block omits signal_gate.threshold. Zero
+// is the projected-exhaustion line ("this provider runs out before reset");
+// negative thresholds demand overdraw margin. It is the documented default of
+// that key, not a magic number: Load applies it here and the gate surfaces it
+// in diagnostics, so one documented value governs every threshold decision.
+const DefaultSignalGateThreshold = 0.0
 
-// PaceGateConfig is the resolved pace-gating configuration for one provider
-// mapping (provider-only mode). Gating engages when the provider's observed
-// projection pace reaches Threshold on a fresh quota snapshot. Enabled
-// defaults to true and Threshold to DefaultPaceGateThreshold: Load resolves an
-// absent pace_gate block (or any omitted key within it) to those defaults, and
-// Resolved applies the same defaults to a hand-constructed config, so every
-// consumer sees the effective values.
-type PaceGateConfig struct {
-	Enabled   bool
+// SignalGateConfig is the resolved signal-gating configuration for one
+// provider mapping (provider-only mode). Gating engages when the provider's
+// observed use-it-or-lose-it routing signal falls to or below Threshold on a
+// fresh quota snapshot. The zero value IS the documented default (gating on
+// at DefaultSignalGateThreshold): Disabled is false and Threshold is zero,
+// the projected-exhaustion line. This makes an explicitly disabled gate
+// ({Disabled: true}) representable next to an absent signal_gate block,
+// which Load resolves to the zero value.
+type SignalGateConfig struct {
+	// Disabled records an explicit `signal_gate: {enabled: false}`. The wire
+	// grammar stays positive ("enabled"); the resolved form is inverted so
+	// the struct's zero value means "as documented" with no ambiguity
+	// between "absent" and "explicitly off".
+	Disabled  bool
 	Threshold float64
 }
 
-// DefaultPaceGate returns the documented default pace-gating configuration:
-// gating on at DefaultPaceGateThreshold.
-func DefaultPaceGate() PaceGateConfig {
-	return PaceGateConfig{Enabled: true, Threshold: DefaultPaceGateThreshold}
+// DefaultSignalGate returns the documented default signal-gating
+// configuration: gating on at DefaultSignalGateThreshold. It is the zero
+// value of SignalGateConfig.
+func DefaultSignalGate() SignalGateConfig {
+	return SignalGateConfig{}
 }
 
-// Resolved returns p with the documented defaults applied: the zero value
-// (an absent pace_gate block, or a hand-constructed config) resolves to
-// DefaultPaceGate, and a set threshold that is not finite and positive falls
-// back to the default. Load rejects out-of-range explicit thresholds before
-// this point; the fallback exists for hand-built configs, never to launder
-// invalid input.
-func (p PaceGateConfig) Resolved() PaceGateConfig {
-	if p == (PaceGateConfig{}) {
-		return DefaultPaceGate()
-	}
-	if p.Threshold <= 0 || math.IsNaN(p.Threshold) || math.IsInf(p.Threshold, 0) {
-		p.Threshold = DefaultPaceGateThreshold
+// Resolved returns p with the documented defaults applied: a threshold that
+// is not finite and non-positive falls back to the default. Load rejects
+// out-of-range explicit thresholds before this point; the fallback exists for
+// hand-built configs, never to launder invalid input.
+func (p SignalGateConfig) Resolved() SignalGateConfig {
+	if p.Threshold > 0 || math.IsNaN(p.Threshold) || math.IsInf(p.Threshold, 0) {
+		p.Threshold = DefaultSignalGateThreshold
 	}
 	return p
 }
 
 // IsDefault reports whether p is exactly the documented default configuration
 // (the only shape the rendered policy omits).
-func (p PaceGateConfig) IsDefault() bool {
-	return p == DefaultPaceGate()
+func (p SignalGateConfig) IsDefault() bool {
+	return !p.Disabled && p.Threshold == DefaultSignalGateThreshold
 }
 
 // QuotaConfig holds per-provider quota/routing configuration (additive on
@@ -189,12 +191,12 @@ type QuotaConfig struct {
 	// the quota. Neuralwatt reads its provider-reported balance directly.
 	MonthlyBudgetUSD float64
 	Schedule         *routing.Schedule // nil = never off-peak
-	// PaceGate is the resolved pace-gating configuration (additive). It is
-	// consumed only by the provider-only gate; legacy mode keeps
-	// rank-demotion-only pace semantics. Load resolves an absent pace_gate
-	// block to DefaultPaceGate, so the in-memory config always carries the
+	// SignalGate is the resolved signal-gating configuration (additive). It
+	// is consumed only by the provider-only gate; legacy mode keeps
+	// rank-demotion-only semantics. Load resolves an absent signal_gate
+	// block to DefaultSignalGate, so the in-memory config always carries the
 	// effective values.
-	PaceGate PaceGateConfig
+	SignalGate SignalGateConfig
 }
 
 // RoutingConfig holds the top-level routing enablement (additive on Desired).

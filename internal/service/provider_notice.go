@@ -202,7 +202,8 @@ type policyProviderEdit struct {
 // committed global prepare result. Removal restores the operator's absent-key
 // baseline, and an absent `providers.<id>.enabled` key means the provider is
 // default-enabled — so a remove edit reports enabled=true, matching the
-// committed effect. A pace-gated provider's edit carries its sanitized pace
+// committed effect. A signal-gated provider's edit carries its sanitized
+// signal
 // reason so the notice explains the committed state.
 func providerEdits(outcomes []TargetOutcome) []policyProviderEdit {
 	var edits []policyProviderEdit

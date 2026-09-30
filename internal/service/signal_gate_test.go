@@ -1,9 +1,10 @@
 package service
 
-// Pace-gate unit tests (pace gating AC.2): the pure all-hot pool rule table
-// and the planner's pace decision table (engage, hold, transfer, pool-skip
-// release, conflict, degraded-evidence release). All inputs are synthetic
-// values; no filesystem, state store, or clock is involved in the pure table.
+// Signal-gate unit tests (approved amendment: gating keys off the
+// use-it-or-lose-it routing signal): the pure all-hot pool rule table and the
+// planner's signal decision table (engage, hold, transfer, pool-skip release,
+// conflict, degraded-evidence release). All inputs are synthetic values; no
+// filesystem, state store, or clock is involved in the pure table.
 
 import (
 	"strings"
@@ -17,22 +18,22 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
-func paceVerdict(gated bool) routing.PaceGateVerdict {
-	p := 1.36
-	return routing.PaceGateVerdict{MappingID: "", Pace: &p, Gated: gated, Reason: "test"}
+func signalVerdict(gated bool) routing.SignalGateVerdict {
+	s := -0.72
+	return routing.SignalGateVerdict{MappingID: "", Signal: &s, Gated: gated, Reason: "test"}
 }
 
-// TestPacePoolRuleTable proves the all-hot pool escape hatch: a pool is
-// skipped exactly when its proposed pace-gate set covers every member that
+// TestSignalPoolRuleTable proves the all-hot pool escape hatch: a pool is
+// skipped exactly when its proposed signal-gate set covers every member that
 // would otherwise remain enabled (operator-held and reserve/disabled-gated
-// members never count as enabled), and pace-held claims in a skipped pool are
-// released unless another axis still gates them.
-func TestPacePoolRuleTable(t *testing.T) {
-	hot := map[string]routing.PaceGateVerdict{
-		"a": paceVerdict(true),
-		"b": paceVerdict(false), // under threshold / uncomputable pace
-		"c": paceVerdict(true),
-		"d": paceVerdict(true),
+// members never count as enabled), and signal-held claims in a skipped pool
+// are released unless another axis still gates them.
+func TestSignalPoolRuleTable(t *testing.T) {
+	hot := map[string]routing.SignalGateVerdict{
+		"a": signalVerdict(true),
+		"b": signalVerdict(false), // surplus / uncomputable signal
+		"c": signalVerdict(true),
+		"d": signalVerdict(true),
 	}
 	reserve := state.ModeReserve
 	disabled := state.ModeDisabled
@@ -42,7 +43,7 @@ func TestPacePoolRuleTable(t *testing.T) {
 		groups       map[string]string // provider -> balance group
 		liveEnabled  map[string]bool   // absent = live enabled
 		modes        map[string]state.Mode
-		paceHeld     []string
+		signalHeld   []string
 		wantSkipped  []string
 		wantReleased []string
 		wantPools    []string
@@ -62,32 +63,32 @@ func TestPacePoolRuleTable(t *testing.T) {
 			wantPools:   []string{"default"},
 		},
 		{
-			name:        "uncomputable-pace member keeps the pool open (no skip)",
+			name:        "uncomputable-signal member keeps the pool open (no skip)",
 			enrolled:    []string{"a", "b"},
 			wantSkipped: nil,
 			wantPools:   nil,
 		},
 		{
-			name:         "singleton pool is never pace-gated and releases its held claim",
+			name:         "singleton pool is never signal-gated and releases its held claim",
 			enrolled:     []string{"a"},
-			paceHeld:     []string{"a"},
+			signalHeld:   []string{"a"},
 			wantSkipped:  []string{"a"},
 			wantReleased: []string{"a"},
 			wantPools:    []string{"default"},
 		},
 		{
-			name:         "all-hot pool releases pace-held claims",
+			name:         "all-hot pool releases signal-held claims",
 			enrolled:     []string{"a", "c"},
-			paceHeld:     []string{"a"},
+			signalHeld:   []string{"a"},
 			wantSkipped:  []string{"a", "c"},
 			wantReleased: []string{"a"},
 			wantPools:    []string{"default"},
 		},
 		{
-			name:         "reserve-mode pace claim in a skipped pool stays held",
+			name:         "reserve-mode signal claim in a skipped pool stays held",
 			enrolled:     []string{"a", "c"},
 			modes:        map[string]state.Mode{"a": reserve},
-			paceHeld:     []string{"a"},
+			signalHeld:   []string{"a"},
 			wantSkipped:  []string{"a", "c"},
 			wantReleased: nil,
 			wantPools:    []string{"default"},
@@ -140,16 +141,16 @@ func TestPacePoolRuleTable(t *testing.T) {
 				modes[id] = tc.modes[id] // absent = normal
 			}
 			held := map[string]bool{}
-			for _, id := range tc.paceHeld {
+			for _, id := range tc.signalHeld {
 				held[id] = true
 			}
-			dec := pacePoolRule(desired, hot, live, modes, held)
-			if len(dec.SkipPace) != len(tc.wantSkipped) {
-				t.Fatalf("skipped = %v, want %v", keysOf(dec.SkipPace), tc.wantSkipped)
+			dec := signalPoolRule(desired, hot, live, modes, held)
+			if len(dec.SkipSignal) != len(tc.wantSkipped) {
+				t.Fatalf("skipped = %v, want %v", keysOf(dec.SkipSignal), tc.wantSkipped)
 			}
 			for _, id := range tc.wantSkipped {
-				if !dec.SkipPace[id] {
-					t.Fatalf("skipped = %v, want %v to be skipped", keysOf(dec.SkipPace), tc.wantSkipped)
+				if !dec.SkipSignal[id] {
+					t.Fatalf("skipped = %v, want %v to be skipped", keysOf(dec.SkipSignal), tc.wantSkipped)
 				}
 			}
 			if len(dec.Release) != len(tc.wantReleased) {
@@ -172,26 +173,26 @@ func TestPacePoolRuleTable(t *testing.T) {
 	}
 }
 
-// TestPaceGateConfigOfDefaults proves the planner resolves a missing quota
-// section (or pace_gate block) to the documented defaults, and honors an
+// TestSignalGateConfigOfDefaults proves the planner resolves a missing quota
+// section (or signal_gate block) to the documented defaults, and honors an
 // explicit disabled gate.
-func TestPaceGateConfigOfDefaults(t *testing.T) {
+func TestSignalGateConfigOfDefaults(t *testing.T) {
 	desired := policy.Desired{Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{
 		"plain":    {},
-		"off":      {Quota: &policy.QuotaConfig{Adapter: "codex", PaceGate: policy.PaceGateConfig{Enabled: false, Threshold: 1.0}}},
-		"lenient":  {Quota: &policy.QuotaConfig{Adapter: "codex", PaceGate: policy.PaceGateConfig{Enabled: true, Threshold: 1.5}}},
+		"off":      {Quota: &policy.QuotaConfig{Adapter: "codex", SignalGate: policy.SignalGateConfig{Disabled: true, Threshold: 0}}},
+		"lenient":  {Quota: &policy.QuotaConfig{Adapter: "codex", SignalGate: policy.SignalGateConfig{Threshold: -0.5}}},
 		"handmade": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
 	}}
-	if enabled, threshold := paceGateConfigOf(desired, "plain"); !enabled || threshold != policy.DefaultPaceGateThreshold {
+	if enabled, threshold := signalGateConfigOf(desired, "plain"); !enabled || threshold != policy.DefaultSignalGateThreshold {
 		t.Fatalf("plain = %v/%v, want on at the documented default", enabled, threshold)
 	}
-	if enabled, _ := paceGateConfigOf(desired, "off"); enabled {
+	if enabled, _ := signalGateConfigOf(desired, "off"); enabled {
 		t.Fatalf("explicit disabled gate resolved as enabled")
 	}
-	if _, threshold := paceGateConfigOf(desired, "lenient"); threshold != 1.5 {
-		t.Fatalf("lenient threshold = %v, want 1.5", threshold)
+	if _, threshold := signalGateConfigOf(desired, "lenient"); threshold != -0.5 {
+		t.Fatalf("lenient threshold = %v, want -0.5", threshold)
 	}
-	if enabled, threshold := paceGateConfigOf(desired, "handmade"); !enabled || threshold != policy.DefaultPaceGateThreshold {
+	if enabled, threshold := signalGateConfigOf(desired, "handmade"); !enabled || threshold != policy.DefaultSignalGateThreshold {
 		t.Fatalf("handmade = %v/%v, want the documented defaults", enabled, threshold)
 	}
 }
@@ -204,17 +205,17 @@ func keysOf(m map[string]bool) []string {
 	return out
 }
 
-// TestPlanProviderGatePaceDecisionTable proves the planner's pace precedence:
-// engage (disable + pace-attributed claim), hold (intact claim, no bytes),
-// transfer (a recovered reserve claim moves to the pace axis in place,
-// preserving the operator baseline), pool-skip release (through the normal
-// restore branch), conflict (operator re-enable), and degraded-evidence
-// release (the verdict no longer gates).
-func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
+// TestPlanProviderGateSignalDecisionTable proves the planner's signal
+// precedence: engage (disable + signal-attributed claim), hold (intact claim,
+// no bytes), transfer (a recovered reserve claim moves to the signal axis in
+// place, preserving the operator baseline), pool-skip release (through the
+// normal restore branch), conflict (operator re-enable), and
+// degraded-evidence release (the verdict no longer gates).
+func TestPlanProviderGateSignalDecisionTable(t *testing.T) {
 	const rev = 9
-	hot := map[string]routing.PaceGateVerdict{
-		"gp": {Pace: fptr64(1.36), Gated: true, Reason: "pace 136% >= threshold 100%"},
-		"pp": {Pace: fptr64(0.4), Gated: false, Reason: "pace 40% under threshold 100%"},
+	hot := map[string]routing.SignalGateVerdict{
+		"gp": {Signal: fptr64(-0.72), Gated: true, Reason: "signal -0.72 <= threshold +0.00"},
+		"pp": {Signal: fptr64(1.60), Gated: false, Reason: "signal +1.60 above threshold +0.00"},
 	}
 	normal := map[string]state.ProviderState{"gp": {Quota: state.QuotaNormal, Availability: state.Available}}
 	configTrue := []byte("providers:\n  gp:\n    enabled: true\n  zz:\n    enabled: true\n")
@@ -226,7 +227,7 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 		modes    map[string]state.ProviderState
 		cfg      []byte
 		own      map[string]state.ProviderOwnership
-		verdicts map[string]routing.PaceGateVerdict
+		verdicts map[string]routing.SignalGateVerdict
 		// expectations
 		disable, restore, conflict bool
 		claim                      *state.ProviderOwnership // expected published claim
@@ -234,50 +235,50 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 		wantAction                 string
 	}{
 		{
-			name: "fresh over-threshold pace engages and claims the baseline",
+			name:  "fresh projected-exhaustion signal engages and claims the baseline",
 			modes: normal, cfg: configTrue, verdicts: hot,
-			disable: true, claim: &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: rev},
+			disable: true, claim: &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: rev},
 			wantAction: GateActionDisabled,
 		},
 		{
-			name: "intact pace claim holds without editing",
+			name:  "intact signal claim holds without editing",
 			modes: normal, cfg: configFalse,
-			own:      map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 4}},
-			verdicts: hot,
-			claim:    &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 4},
+			own:        map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 4}},
+			verdicts:   hot,
+			claim:      &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 4},
 			wantAction: GateActionHeld,
 		},
 		{
-			name: "recovered reserve claim transfers to the pace axis in place",
+			name:  "recovered reserve claim transfers to the signal axis in place",
 			modes: normal, cfg: configFalse,
-			own:      map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 4}},
-			verdicts: hot,
-			claim:    &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: rev},
+			own:        map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 4}},
+			verdicts:   hot,
+			claim:      &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: rev},
 			wantAction: GateActionHeld,
 		},
 		{
-			name: "operator re-enable over a pace claim conflicts",
+			name:  "operator re-enable over a signal claim conflicts",
 			modes: normal, cfg: configTrue,
-			own:      map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 4}},
-			verdicts: hot,
-			conflict: true,
+			own:        map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 4}},
+			verdicts:   hot,
+			conflict:   true,
 			wantAction: GateActionConflict,
 		},
 		{
-			name: "under-threshold evidence releases the pace claim by restoring the baseline",
+			name:  "surplus signal releases the signal claim by restoring the baseline",
 			modes: normal, cfg: configFalse,
-			own:      map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 4}},
-			verdicts: map[string]routing.PaceGateVerdict{"gp": hot["pp"]},
+			own:      map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 4}},
+			verdicts: map[string]routing.SignalGateVerdict{"gp": hot["pp"]},
 			restore:  true, claimGone: true,
 			wantAction: GateActionRestored,
 		},
 		{
-			name: "missing verdict never gates",
-			modes: normal, cfg: configTrue, verdicts: map[string]routing.PaceGateVerdict{},
+			name:  "missing verdict never gates",
+			modes: normal, cfg: configTrue, verdicts: map[string]routing.SignalGateVerdict{},
 			wantAction: GateActionUnchanged,
 		},
 		{
-			name: "operator-held field claims nothing even when pace is hot",
+			name:  "operator-held field claims nothing even when the signal gates",
 			modes: normal, cfg: configFalse, verdicts: hot,
 			wantAction: GateActionUnchanged,
 		},
@@ -287,7 +288,7 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Every case enrolls a second live provider with a not-gated
 			// verdict: a lone enrolled provider is a singleton pool, and the
-			// pool rule deliberately never pace-gates singletons.
+			// pool rule deliberately never signal-gates singletons.
 			desired := policy.Desired{Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{
 				"gp": {},
 				"zz": {},
@@ -296,7 +297,7 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 			for id, ps := range tc.modes {
 				modes[id] = ps
 			}
-			verdicts := map[string]routing.PaceGateVerdict{"zz": hot["pp"]}
+			verdicts := map[string]routing.SignalGateVerdict{"zz": hot["pp"]}
 			for id, v := range tc.verdicts {
 				verdicts[id] = v
 			}
@@ -359,8 +360,8 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 func fptr64(v float64) *float64 { return &v }
 
 // TestProviderProjectionCarriesGateAttribution proves the diagnostic provider
-// projection surfaces the gate record: a pace claim carries axis, observed
-// pace, threshold, and engaged revision; a legacy claim (no axis) keeps
+// projection surfaces the gate record: a signal claim carries axis, observed
+// signal, threshold, and engaged revision; a legacy claim (no axis) keeps
 // today's presentation with no gate field.
 func TestProviderProjectionCarriesGateAttribution(t *testing.T) {
 	asOf := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
@@ -375,7 +376,7 @@ func TestProviderProjectionCarriesGateAttribution(t *testing.T) {
 	observed := state.State{
 		Providers: map[string]state.ProviderState{"gp": {QuotaSnapshot: snapshot}},
 		ProviderOwnership: map[string]state.ProviderOwnership{
-			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.25, EngagedRevision: 7},
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: -0.25, EngagedRevision: 7},
 		},
 	}
 	providers, errs := projectProviders(desired, observed, asOf)
@@ -383,14 +384,14 @@ func TestProviderProjectionCarriesGateAttribution(t *testing.T) {
 		t.Fatalf("projection errors: %v", errs)
 	}
 	gate := providers[0].Gate
-	if gate == nil || gate.Axis != state.OwnershipAxisPace || gate.EngagedRevision != 7 {
-		t.Fatalf("gate = %+v, want pace attribution at revision 7", gate)
+	if gate == nil || gate.Axis != state.OwnershipAxisSignal || gate.EngagedRevision != 7 {
+		t.Fatalf("gate = %+v, want signal attribution at revision 7", gate)
 	}
-	if gate.Pace == nil || routing.PacePercent(*gate.Pace) != 136 {
-		t.Fatalf("gate pace = %+v, want 136%%", gate.Pace)
+	if gate.Signal == nil || routing.SignalFormat(*gate.Signal) != "-0.72" {
+		t.Fatalf("gate signal = %+v, want -0.72", gate.Signal)
 	}
-	if gate.Threshold == nil || *gate.Threshold != 1.25 {
-		t.Fatalf("gate threshold = %+v, want 1.25", gate.Threshold)
+	if gate.Threshold == nil || *gate.Threshold != -0.25 {
+		t.Fatalf("gate threshold = %+v, want -0.25", gate.Threshold)
 	}
 
 	// Legacy claim: no axis, no gate field.
@@ -401,39 +402,39 @@ func TestProviderProjectionCarriesGateAttribution(t *testing.T) {
 	}
 }
 
-// TestMergedStatusPaceReasonLeads proves a pace-held gate names itself ahead
-// of the ranking explanation in the merged status REASON, and the gate
+// TestMergedStatusSignalReasonLeads proves a signal-held gate names itself
+// ahead of the ranking explanation in the merged status REASON, and the gate
 // attribution rides the row for status --json.
-func TestMergedStatusPaceReasonLeads(t *testing.T) {
+func TestMergedStatusSignalReasonLeads(t *testing.T) {
 	snap := DiagnosticSnapshot{
 		providers: []ProviderProjection{{
 			MappingID: "gp",
 			Gate: &GateReport{
-				Axis: state.OwnershipAxisPace, Pace: fptr64(1.36), Threshold: fptr64(1.0), EngagedRevision: 7,
+				Axis: state.OwnershipAxisSignal, Signal: fptr64(-0.72), Threshold: fptr64(0), EngagedRevision: 7,
 			},
 		}},
-		ranks: []RankEntryReport{{MappingID: "gp", Rank: 0, Eligible: true, Explanation: "peak, pace 136%"}},
+		ranks: []RankEntryReport{{MappingID: "gp", Rank: 0, Eligible: true, Explanation: "peak, signal -0.72"}},
 	}
 	report := snap.MergedStatusView()
 	if len(report.Providers) != 1 {
 		t.Fatalf("providers = %d, want 1", len(report.Providers))
 	}
 	row := report.Providers[0]
-	if !strings.HasPrefix(row.Reason, "pace-gated (136% >= 100%); ") {
-		t.Fatalf("reason = %q, want the pace attribution to lead", row.Reason)
+	if !strings.HasPrefix(row.Reason, "signal-gated (-0.72 <= +0.00); ") {
+		t.Fatalf("reason = %q, want the signal attribution to lead", row.Reason)
 	}
-	if !strings.HasSuffix(row.Reason, "peak, pace 136%") {
+	if !strings.HasSuffix(row.Reason, "peak, signal -0.72") {
 		t.Fatalf("reason = %q, want the ranking explanation to follow", row.Reason)
 	}
-	if row.Gate == nil || row.Gate.Axis != state.OwnershipAxisPace || row.Gate.EngagedRevision != 7 {
-		t.Fatalf("gate = %+v, want the pace attribution carried", row.Gate)
+	if row.Gate == nil || row.Gate.Axis != state.OwnershipAxisSignal || row.Gate.EngagedRevision != 7 {
+		t.Fatalf("gate = %+v, want the signal attribution carried", row.Gate)
 	}
 }
 
-// TestProviderEditsCarryPaceNoticeReason proves a committed pace disable's
-// edit carries the sanitized pace reason for the notice, and reserve edits
+// TestProviderEditsCarrySignalNoticeReason proves a committed signal disable's
+// edit carries the sanitized signal reason for the notice, and reserve edits
 // carry none.
-func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
+func TestProviderEditsCarrySignalNoticeReason(t *testing.T) {
 	off := false
 	outcomes := []TargetOutcome{{
 		Prepare: &PrepareResult{ChangedEdits: []reconcile.FieldEdit{
@@ -441,7 +442,7 @@ func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
 			{File: "config.yaml", Path: []string{"providers", "pp", "enabled"}, Enabled: &off},
 		}},
 		ProviderGates: []ProviderGateSummary{
-			{Provider: "gp", Action: GateActionDisabled, Axis: state.OwnershipAxisPace, Pace: fptr64(1.36), Threshold: fptr64(1.0)},
+			{Provider: "gp", Action: GateActionDisabled, Axis: state.OwnershipAxisSignal, Signal: fptr64(-0.72), Threshold: fptr64(0)},
 			{Provider: "pp", Action: GateActionDisabled, Axis: state.OwnershipAxisReserve},
 		},
 	}}
@@ -452,8 +453,8 @@ func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
 	for _, e := range edits {
 		switch e.id {
 		case "gp":
-			if e.reason != "pace-gated (136% >= 100%)" {
-				t.Fatalf("gp reason = %q, want the pace attribution", e.reason)
+			if e.reason != "signal-gated (-0.72 <= +0.00)" {
+				t.Fatalf("gp reason = %q, want the signal attribution", e.reason)
 			}
 		case "pp":
 			if e.reason != "" {
@@ -468,56 +469,56 @@ func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
 func tptr64(t time.Time) *time.Time           { return &t }
 func durptr64(d time.Duration) *time.Duration { return &d }
 
-// TestAppendPaceGateEventsRecordsTransitions proves the durable event timeline
-// records pace_gated where a pace claim appears and pace_recovered where it
-// disappears, with the pass's sanitized reason, and records nothing when no
-// pace claim changed.
-func TestAppendPaceGateEventsRecordsTransitions(t *testing.T) {
+// TestAppendSignalGateEventsRecordsTransitions proves the durable event
+// timeline records signal_gated where a signal claim appears and
+// signal_recovered where it disappears, with the pass's sanitized reason, and
+// records nothing when no signal claim changed.
+func TestAppendSignalGateEventsRecordsTransitions(t *testing.T) {
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	paceClaim := state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 8}
-	observed := state.State{Revision: 8, ProviderOwnership: map[string]state.ProviderOwnership{"gp": paceClaim}}
+	signalClaim := state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0, EngagedRevision: 8}
+	observed := state.State{Revision: 8, ProviderOwnership: map[string]state.ProviderOwnership{"gp": signalClaim}}
 	plan := providerGatePlan{
 		PublishedOwnership: map[string]state.ProviderOwnership{}, // gp released this pass
 		GateSummary: []ProviderGateSummary{
-			{Provider: "gp", Action: GateActionRestored, Detail: "pace 40% under threshold 100%"},
+			{Provider: "gp", Action: GateActionRestored, Detail: "signal +1.60 above threshold +0.00"},
 		},
 	}
-	next := appendPaceGateEvents(observed, observed, plan, 9, now)
+	next := appendSignalGateEvents(observed, observed, plan, 9, now)
 	if len(next.EventHistory.Events) != 1 {
-		t.Fatalf("events = %+v, want one pace_recovered", next.EventHistory.Events)
+		t.Fatalf("events = %+v, want one signal_recovered", next.EventHistory.Events)
 	}
 	e := next.EventHistory.Events[0]
-	if e.Action != "pace_recovered" || e.MappingID != "gp" || e.Revision != 9 || e.Result != state.EventChanged {
-		t.Fatalf("event = %+v, want a pace_recovered transition for gp at revision 9", e)
+	if e.Action != "signal_recovered" || e.MappingID != "gp" || e.Revision != 9 || e.Result != state.EventChanged {
+		t.Fatalf("event = %+v, want a signal_recovered transition for gp at revision 9", e)
 	}
-	if e.Reason != "pace 40% under threshold 100%" {
+	if e.Reason != "signal +1.60 above threshold +0.00" {
 		t.Fatalf("event reason = %q, want the recovery reason", e.Reason)
 	}
 
 	// Engage: the claim appears where none was held. The published map always
 	// carries every claim kept this pass, so gp's claim rides along unchanged.
 	plan2 := providerGatePlan{
-		PublishedOwnership: map[string]state.ProviderOwnership{"gp": paceClaim, "pp": paceClaim},
+		PublishedOwnership: map[string]state.ProviderOwnership{"gp": signalClaim, "pp": signalClaim},
 		GateSummary: []ProviderGateSummary{
-			{Provider: "pp", Action: GateActionDisabled, Axis: state.OwnershipAxisPace, Detail: "pace 136% >= threshold 100%"},
+			{Provider: "pp", Action: GateActionDisabled, Axis: state.OwnershipAxisSignal, Detail: "signal -0.72 <= threshold +0.00"},
 		},
 	}
 	applied2 := observed
 	applied2.ProviderOwnership = plan2.PublishedOwnership
-	next2 := appendPaceGateEvents(applied2, observed, plan2, 9, now)
+	next2 := appendSignalGateEvents(applied2, observed, plan2, 9, now)
 	if len(next2.EventHistory.Events) != 1 {
-		t.Fatalf("events = %+v, want one pace_gated", next2.EventHistory.Events)
+		t.Fatalf("events = %+v, want one signal_gated", next2.EventHistory.Events)
 	}
 	e2 := next2.EventHistory.Events[0]
-	if e2.Action != "pace_gated" || e2.MappingID != "pp" || e2.Reason != "pace 136% >= threshold 100%" {
-		t.Fatalf("event = %+v, want a pace_gated transition for pp with its reason", e2)
+	if e2.Action != "signal_gated" || e2.MappingID != "pp" || e2.Reason != "signal -0.72 <= threshold +0.00" {
+		t.Fatalf("event = %+v, want a signal_gated transition for pp with its reason", e2)
 	}
 
 	// Unchanged claims record nothing.
-	plan3 := providerGatePlan{PublishedOwnership: map[string]state.ProviderOwnership{"gp": paceClaim}}
+	plan3 := providerGatePlan{PublishedOwnership: map[string]state.ProviderOwnership{"gp": signalClaim}}
 	applied3 := observed
 	applied3.ProviderOwnership = plan3.PublishedOwnership
-	next3 := appendPaceGateEvents(applied3, observed, plan3, 9, now)
+	next3 := appendSignalGateEvents(applied3, observed, plan3, 9, now)
 	if len(next3.EventHistory.Events) != 0 {
 		t.Fatalf("events = %+v, want none for an unchanged claim", next3.EventHistory.Events)
 	}
@@ -528,7 +529,7 @@ func TestAppendPaceGateEventsRecordsTransitions(t *testing.T) {
 // degrades to the legacy axis with its attribution cleared.
 func TestHistoryProviderDetailGateAttributionSanitized(t *testing.T) {
 	tpl := state.RecordTemplate{Revision: 3, Providers: []state.ProviderDetail{
-		{MappingID: "gp", Mode: state.ModeNormal, GateAxis: state.OwnershipAxisPace, GateThreshold: 1.25, GateEngagedRevision: 7},
+		{MappingID: "gp", Mode: state.ModeNormal, GateAxis: state.OwnershipAxisSignal, GateThreshold: -0.25, GateEngagedRevision: 7},
 		{MappingID: "pp", Mode: state.ModeReserve, GateAxis: state.OwnershipAxisReserve},
 		{MappingID: "zz", Mode: state.ModeNormal, GateAxis: "bogus", GateThreshold: 9, GateEngagedRevision: 12},
 	}}
@@ -536,11 +537,11 @@ func TestHistoryProviderDetailGateAttributionSanitized(t *testing.T) {
 	if len(out.Providers) != 3 {
 		t.Fatalf("providers = %d, want 3", len(out.Providers))
 	}
-	if got := out.Providers[0]; got.GateAxis != state.OwnershipAxisPace || got.GateThreshold != 1.25 || got.GateEngagedRevision != 7 {
-		t.Fatalf("gp = %+v, want pace attribution preserved", got)
+	if got := out.Providers[0]; got.GateAxis != state.OwnershipAxisSignal || got.GateThreshold != -0.25 || got.GateEngagedRevision != 7 {
+		t.Fatalf("gp = %+v, want signal attribution preserved", got)
 	}
 	if got := out.Providers[1]; got.GateAxis != state.OwnershipAxisReserve || got.GateThreshold != 0 || got.GateEngagedRevision != 0 {
-		t.Fatalf("pp = %+v, want reserve attribution without pace fields", got)
+		t.Fatalf("pp = %+v, want reserve attribution without signal fields", got)
 	}
 	if got := out.Providers[2]; got.GateAxis != state.OwnershipAxisLegacy || got.GateThreshold != 0 || got.GateEngagedRevision != 0 {
 		t.Fatalf("zz = %+v, want unknown axis degraded to legacy", got)

@@ -74,11 +74,11 @@ func ProjectProviders(desired policy.Desired, observed state.State) []state.Prov
 		reason := providerModeReason(idStr, m, mode, observed)
 		detail := state.ProviderDetail{MappingID: idStr, Mode: mode, Reason: reason}
 		// Gate attribution rides the provider projection so a record shows
-		// which axis held the provider off at record time (pace claims also
+		// which axis held the provider off at record time (signal claims also
 		// carry threshold and engaged revision).
 		if record, ok := observed.OwnershipOf(idStr); ok && record.Owned && record.Axis != "" {
 			detail.GateAxis = record.Axis
-			if record.Axis == state.OwnershipAxisPace {
+			if record.Axis == state.OwnershipAxisSignal {
 				detail.GateThreshold = record.Threshold
 				detail.GateEngagedRevision = record.EngagedRevision
 			}

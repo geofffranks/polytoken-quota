@@ -100,11 +100,11 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	for _, provider := range s.providers {
 		rank := ranks[provider.MappingID]
 		reason := rank.Explanation
-		// A pace-held gate names itself ahead of the ranking explanation: the
+		// A signal-held gate names itself ahead of the ranking explanation: the
 		// reason a provider is OFF must lead the row, and the ranking
 		// explanation (why it ranks where it does) follows.
-		if gate := provider.Gate; gate != nil && gate.Axis == state.OwnershipAxisPace {
-			reason = paceGateReason(gate) + "; " + reason
+		if gate := provider.Gate; gate != nil && gate.Axis == state.OwnershipAxisSignal {
+			reason = signalGateReason(gate) + "; " + reason
 		}
 		row := MergedStatusProvider{
 			Provider: provider.MappingID,

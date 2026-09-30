@@ -86,7 +86,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 				gateRefusal = res.Refusal
 				if res.Refusal == nil {
 					next.ProviderOwnership = res.Plan.PublishedOwnership
-					next = appendPaceGateEvents(next, observed, res.Plan, next.Revision, c.now())
+					next = appendSignalGateEvents(next, observed, res.Plan, next.Revision, c.now())
 					next = c.retireSyntheticPendings(next)
 				} else {
 					next.ProviderOwnership = res.Plan.RefusalOwnership

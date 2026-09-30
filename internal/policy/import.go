@@ -721,16 +721,17 @@ type outQuota struct {
 	Weight           int     `yaml:"weight,omitempty"`
 	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd,omitempty"`
 	Mode             string  `yaml:"mode,omitempty"`
-	// PaceGate round-trips the resolved pace-gating configuration; omitted
-	// entirely when it equals the documented default (which loads back
-	// identically). Serialization keeps import parity: a forced provider-only
-	// re-init can never silently drop a non-default pace_gate setting.
-	PaceGate *outPaceGate `yaml:"pace_gate,omitempty"`
+	// SignalGate round-trips the resolved signal-gating configuration;
+	// omitted entirely when it equals the documented default (which loads
+	// back identically). Serialization keeps import parity: a forced
+	// provider-only re-init can never silently drop a non-default signal_gate
+	// setting.
+	SignalGate *outSignalGate `yaml:"signal_gate,omitempty"`
 }
 
-// outPaceGate is the rendered pace_gate block. It always carries both keys so
-// the rendered form is self-describing.
-type outPaceGate struct {
+// outSignalGate is the rendered signal_gate block. It always carries both
+// keys so the rendered form is self-describing.
+type outSignalGate struct {
 	Enabled   bool    `yaml:"enabled"`
 	Threshold float64 `yaml:"threshold"`
 }
@@ -750,8 +751,8 @@ func quotaOut(q *QuotaConfig) *outQuota {
 		Weight:           q.Weight,
 		MonthlyBudgetUSD: q.MonthlyBudgetUSD,
 	}
-	if pg := q.PaceGate.Resolved(); !pg.IsDefault() {
-		out.PaceGate = &outPaceGate{Enabled: pg.Enabled, Threshold: pg.Threshold}
+	if sg := q.SignalGate.Resolved(); !sg.IsDefault() {
+		out.SignalGate = &outSignalGate{Enabled: !sg.Disabled, Threshold: sg.Threshold}
 	}
 	return out
 }

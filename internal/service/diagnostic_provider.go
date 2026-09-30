@@ -91,13 +91,13 @@ type ResetCreditReport struct {
 }
 
 // GateReport is the sanitized gate attribution for one provider mapping: the
-// gating axis that holds its `enabled` field off, and — for pace claims — the
-// observed projection pace, the engaged threshold, and the revision that
-// engaged the claim. It is diagnostic surfacing only; it never changes the
-// snapshot's fail-closed aggregation semantics.
+// gating axis that holds its `enabled` field off, and — for signal claims —
+// the observed use-it-or-lose-it signal, the engaged threshold, and the
+// revision that engaged the claim. It is diagnostic surfacing only; it never
+// changes the snapshot's fail-closed aggregation semantics.
 type GateReport struct {
 	Axis            string   `json:"axis"`
-	Pace            *float64 `json:"pace,omitempty"`
+	Signal          *float64 `json:"signal,omitempty"`
 	Threshold       *float64 `json:"threshold,omitempty"`
 	EngagedRevision uint64   `json:"engaged_revision,omitempty"`
 }
@@ -172,17 +172,15 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 		entry.ResetCredits = resetCreditReport(ps.ResetCredits, asOf)
 		if record, ok := observed.OwnershipOf(id); ok && record.Owned && record.Axis != "" {
 			g := &GateReport{Axis: record.Axis, EngagedRevision: record.EngagedRevision}
-			if record.Axis == state.OwnershipAxisPace {
+			if record.Axis == state.OwnershipAxisSignal {
 				if ps.QuotaSnapshot != nil {
-					if pace, ok := routing.PaceOf(ps.QuotaSnapshot, asOf); ok {
-						p := pace
-						g.Pace = &p
+					if signal, ok := routing.ComputeSignal(ps.QuotaSnapshot, asOf); ok {
+						s := signal
+						g.Signal = &s
 					}
 				}
-				if record.Threshold > 0 {
-					t := record.Threshold
-					g.Threshold = &t
-				}
+				t := record.Threshold
+				g.Threshold = &t
 			}
 			entry.Gate = g
 		}
@@ -331,7 +329,7 @@ func cloneGateReport(in *GateReport) *GateReport {
 		return nil
 	}
 	out := *in
-	out.Pace = cloneFloat(in.Pace)
+	out.Signal = cloneFloat(in.Signal)
 	out.Threshold = cloneFloat(in.Threshold)
 	return &out
 }

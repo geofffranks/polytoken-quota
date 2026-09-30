@@ -318,11 +318,11 @@ func mutationGateRows(o service.Outcome) []string {
 			if g.Axis != "" {
 				line += " axis=" + validate.DefaultSanitize([]byte(g.Axis))
 			}
-			if g.Pace != nil {
-				line += fmt.Sprintf(" pace=%d%%", routing.PacePercent(*g.Pace))
+			if g.Signal != nil {
+				line += " signal=" + routing.SignalFormat(*g.Signal)
 			}
 			if g.Threshold != nil {
-				line += fmt.Sprintf(" threshold=%d%%", routing.PacePercent(*g.Threshold))
+				line += " threshold=" + routing.SignalFormat(*g.Threshold)
 			}
 			if g.Detail != "" {
 				line += " (" + validate.DefaultSanitize([]byte(g.Detail)) + ")"
