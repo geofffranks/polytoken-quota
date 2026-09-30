@@ -53,10 +53,75 @@ type PaceGateVerdict struct {
 }
 
 // PaceOf reports the projection pace for a snapshot: the pure anchor-window
-// computation the routing rank uses, exported so the provider gate derives
-// from the same source and the two can never diverge.
+// computation the routing signal package formerly shared, exported so the
+// provider gate and any diagnostic derive from one source.
 func PaceOf(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
 	return computePace(snap, now)
+}
+
+// computePace calculates the projection pace for a provider from its anchor
+// window — the longest window with Period + ResetAt + a usable remaining that
+// clears the minimum-period floor. Returns the pace and true when computable;
+// 0 and false when no qualifying window exists.
+//
+//	usedFrac    = 1 - remainingFraction
+//	elapsedFrac = ceilToDay(clamp01(1 - (ResetAt - now) / Period))
+//	pace        = usedFrac / max(elapsedFrac, eps)
+//
+// Elapsed time is rounded up to whole days before normalization. This avoids
+// transient pace spikes immediately after a reset while retaining a small
+// epsilon for a window that has not reached its first day. Pace < 1.0 →
+// under-utilized; pace > 1.0 → over-utilized.
+//
+// This is deliberately NOT the ranking package's use-it-or-lose-it gap signal:
+// the signal answers "will quota reach reset unused" (positive = prefer) and
+// mixes forfeiture into its terms, while the gate answers the operator's
+// approved question "is this provider burning faster than the projection
+// window allows" (pace >= 1.0). The two share window eligibility (Period >=
+// minProjectionPeriod, a ResetAt, a usable remaining) so neither can see a
+// window the other cannot.
+func computePace(snap *quota.QuotaSnapshot, now time.Time) (pace float64, ok bool) {
+	if snap == nil {
+		return 0, false
+	}
+	var anchor *quota.QuotaWindow
+	for i := range snap.Windows {
+		w := &snap.Windows[i]
+		if w.Period == nil || *w.Period < minProjectionPeriod {
+			continue
+		}
+		if w.ResetAt == nil {
+			continue
+		}
+		if w.Remaining() == nil {
+			continue
+		}
+		if anchor == nil || *w.Period > *anchor.Period {
+			anchor = w
+		}
+	}
+	if anchor == nil {
+		return 0, false
+	}
+	rem := anchor.Remaining()
+	usedFrac := 1.0 - *rem
+	timeToReset := anchor.ResetAt.Sub(now)
+	elapsed := *anchor.Period - timeToReset
+	if elapsed < 0 {
+		elapsed = 0
+	} else if elapsed > *anchor.Period {
+		elapsed = *anchor.Period
+	}
+	// Quantize elapsed time upward so a newly reset quota is measured against
+	// one day, not a few minutes or seconds. This makes pace stable enough for
+	// periodic reconciliation while preserving the full-period endpoint.
+	elapsed = ((elapsed + 24*time.Hour - 1) / (24 * time.Hour)) * (24 * time.Hour)
+	elapsedFrac := float64(elapsed) / float64(*anchor.Period)
+	eps := float64(5*time.Minute) / float64(*anchor.Period)
+	if elapsedFrac < eps {
+		elapsedFrac = eps
+	}
+	return usedFrac / elapsedFrac, true
 }
 
 // PacePercent renders a pace fraction as a rounded integer percentage for
