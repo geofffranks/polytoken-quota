@@ -15,6 +15,7 @@ package service
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
@@ -70,6 +71,67 @@ func gateNoticeReason(g ProviderGateSummary) string {
 		threshold = *g.Threshold
 	}
 	return fmt.Sprintf("pace-gated (%d%% >= %d%%)", routing.PacePercent(*g.Pace), routing.PacePercent(threshold))
+}
+
+// appendPaceGateEvents records the durable pace_gated / pace_recovered
+// transitions a committed gate pass produced, derived by comparing the
+// published ownership claims against the observed ones: a pace claim appearing
+// where none was held is a gating transition; an observed pace claim that is
+// gone (or no longer pace-held) in the published map is a recovery. Refused
+// and dry-run passes never call this: no bytes, no events. Events carry the
+// sanitized reason from the pass's gate summary when one exists.
+func appendPaceGateEvents(next state.State, observed state.State, plan providerGatePlan, revision uint64, now time.Time) state.State {
+	wasHeld := make(map[string]bool, len(observed.ProviderOwnership))
+	for id, record := range observed.ProviderOwnership {
+		if record.PaceHeld() {
+			wasHeld[id] = true
+		}
+	}
+	reasons := make(map[string]string, len(plan.GateSummary))
+	for _, g := range plan.GateSummary {
+		if g.Detail != "" {
+			reasons[g.Provider] = g.Detail
+		}
+	}
+	ids := make([]string, 0, len(plan.PublishedOwnership)+len(wasHeld))
+	for id := range plan.PublishedOwnership {
+		ids = append(ids, id)
+	}
+	for id := range wasHeld {
+		if _, ok := plan.PublishedOwnership[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		nowHeld := false
+		if claim, ok := plan.PublishedOwnership[id]; ok && claim.PaceHeld() {
+			nowHeld = true
+		}
+		var action string
+		switch {
+		case nowHeld && !wasHeld[id]:
+			action = "pace_gated"
+		case !nowHeld && wasHeld[id]:
+			action = "pace_recovered"
+		default:
+			continue
+		}
+		e := state.EventRecord{
+			Sequence:   nextEventSequence(&next),
+			Revision:   revision,
+			Ordinal:    len(next.EventHistory.Events),
+			At:         now.UTC(),
+			RecordedAt: now.UTC(),
+			Category:   state.EventRoutingChange,
+			Action:     action,
+			MappingID:  id,
+			Result:     state.EventChanged,
+			Reason:     reasons[id],
+		}
+		next.EventHistory, _ = state.AppendEvent(next.EventHistory, e)
+	}
+	return next
 }
 
 // paceBalanceGroup resolves a mapping's effective balance group. A mapping

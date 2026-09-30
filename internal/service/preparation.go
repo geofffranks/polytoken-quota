@@ -72,11 +72,18 @@ func ProjectProviders(desired policy.Desired, observed state.State) []state.Prov
 		m := desired.Providers[id]
 		mode := reconcile.MappingMode(desired, observed, id)
 		reason := providerModeReason(idStr, m, mode, observed)
-		out = append(out, state.ProviderDetail{
-			MappingID: idStr,
-			Mode:      mode,
-			Reason:    reason,
-		})
+		detail := state.ProviderDetail{MappingID: idStr, Mode: mode, Reason: reason}
+		// Gate attribution rides the provider projection so a record shows
+		// which axis held the provider off at record time (pace claims also
+		// carry threshold and engaged revision).
+		if record, ok := observed.OwnershipOf(idStr); ok && record.Owned && record.Axis != "" {
+			detail.GateAxis = record.Axis
+			if record.Axis == state.OwnershipAxisPace {
+				detail.GateThreshold = record.Threshold
+				detail.GateEngagedRevision = record.EngagedRevision
+			}
+		}
+		out = append(out, detail)
 	}
 	return out
 }

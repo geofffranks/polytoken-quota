@@ -467,3 +467,82 @@ func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
 // private).
 func tptr64(t time.Time) *time.Time           { return &t }
 func durptr64(d time.Duration) *time.Duration { return &d }
+
+// TestAppendPaceGateEventsRecordsTransitions proves the durable event timeline
+// records pace_gated where a pace claim appears and pace_recovered where it
+// disappears, with the pass's sanitized reason, and records nothing when no
+// pace claim changed.
+func TestAppendPaceGateEventsRecordsTransitions(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	paceClaim := state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.0, EngagedRevision: 8}
+	observed := state.State{Revision: 8, ProviderOwnership: map[string]state.ProviderOwnership{"gp": paceClaim}}
+	plan := providerGatePlan{
+		PublishedOwnership: map[string]state.ProviderOwnership{}, // gp released this pass
+		GateSummary: []ProviderGateSummary{
+			{Provider: "gp", Action: GateActionRestored, Detail: "pace 40% under threshold 100%"},
+		},
+	}
+	next := appendPaceGateEvents(observed, observed, plan, 9, now)
+	if len(next.EventHistory.Events) != 1 {
+		t.Fatalf("events = %+v, want one pace_recovered", next.EventHistory.Events)
+	}
+	e := next.EventHistory.Events[0]
+	if e.Action != "pace_recovered" || e.MappingID != "gp" || e.Revision != 9 || e.Result != state.EventChanged {
+		t.Fatalf("event = %+v, want a pace_recovered transition for gp at revision 9", e)
+	}
+	if e.Reason != "pace 40% under threshold 100%" {
+		t.Fatalf("event reason = %q, want the recovery reason", e.Reason)
+	}
+
+	// Engage: the claim appears where none was held. The published map always
+	// carries every claim kept this pass, so gp's claim rides along unchanged.
+	plan2 := providerGatePlan{
+		PublishedOwnership: map[string]state.ProviderOwnership{"gp": paceClaim, "pp": paceClaim},
+		GateSummary: []ProviderGateSummary{
+			{Provider: "pp", Action: GateActionDisabled, Axis: state.OwnershipAxisPace, Detail: "pace 136% >= threshold 100%"},
+		},
+	}
+	applied2 := observed
+	applied2.ProviderOwnership = plan2.PublishedOwnership
+	next2 := appendPaceGateEvents(applied2, observed, plan2, 9, now)
+	if len(next2.EventHistory.Events) != 1 {
+		t.Fatalf("events = %+v, want one pace_gated", next2.EventHistory.Events)
+	}
+	e2 := next2.EventHistory.Events[0]
+	if e2.Action != "pace_gated" || e2.MappingID != "pp" || e2.Reason != "pace 136% >= threshold 100%" {
+		t.Fatalf("event = %+v, want a pace_gated transition for pp with its reason", e2)
+	}
+
+	// Unchanged claims record nothing.
+	plan3 := providerGatePlan{PublishedOwnership: map[string]state.ProviderOwnership{"gp": paceClaim}}
+	applied3 := observed
+	applied3.ProviderOwnership = plan3.PublishedOwnership
+	next3 := appendPaceGateEvents(applied3, observed, plan3, 9, now)
+	if len(next3.EventHistory.Events) != 0 {
+		t.Fatalf("events = %+v, want none for an unchanged claim", next3.EventHistory.Events)
+	}
+}
+
+// TestHistoryProviderDetailGateAttributionSanitized proves the record
+// projection carries the gate axis through sanitization, and an unknown axis
+// degrades to the legacy axis with its attribution cleared.
+func TestHistoryProviderDetailGateAttributionSanitized(t *testing.T) {
+	tpl := state.RecordTemplate{Revision: 3, Providers: []state.ProviderDetail{
+		{MappingID: "gp", Mode: state.ModeNormal, GateAxis: state.OwnershipAxisPace, GateThreshold: 1.25, GateEngagedRevision: 7},
+		{MappingID: "pp", Mode: state.ModeReserve, GateAxis: state.OwnershipAxisReserve},
+		{MappingID: "zz", Mode: state.ModeNormal, GateAxis: "bogus", GateThreshold: 9, GateEngagedRevision: 12},
+	}}
+	out := state.SanitizeRecordTemplate(tpl)
+	if len(out.Providers) != 3 {
+		t.Fatalf("providers = %d, want 3", len(out.Providers))
+	}
+	if got := out.Providers[0]; got.GateAxis != state.OwnershipAxisPace || got.GateThreshold != 1.25 || got.GateEngagedRevision != 7 {
+		t.Fatalf("gp = %+v, want pace attribution preserved", got)
+	}
+	if got := out.Providers[1]; got.GateAxis != state.OwnershipAxisReserve || got.GateThreshold != 0 || got.GateEngagedRevision != 0 {
+		t.Fatalf("pp = %+v, want reserve attribution without pace fields", got)
+	}
+	if got := out.Providers[2]; got.GateAxis != state.OwnershipAxisLegacy || got.GateThreshold != 0 || got.GateEngagedRevision != 0 {
+		t.Fatalf("zz = %+v, want unknown axis degraded to legacy", got)
+	}
+}

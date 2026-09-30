@@ -145,6 +145,9 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 	next.Revision = revision
 	if res.Refusal == nil {
 		next.ProviderOwnership = res.Plan.PublishedOwnership
+		// The pace gate's durable transitions ride the same commit as the
+		// bytes they describe; a refused pass records nothing.
+		next = appendPaceGateEvents(next, observed, res.Plan, revision, c.now())
 	} else {
 		next.ProviderOwnership = res.Plan.RefusalOwnership
 	}
@@ -673,6 +676,11 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			}
 			plan.Changed = true
 			summary.Action = GateActionDisabled
+			// The pace reason rides the summary so the durable pace_gated
+			// event (and any notice) carries why the gate engaged.
+			if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
+			}
 			appendSummary()
 			continue
 		}
@@ -702,6 +710,8 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			summary.Action = GateActionRestored
 			if pool.SkipPace[id] {
 				summary.Detail = poolSkipDetail
+			} else if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
 			}
 			appendSummary()
 			continue
@@ -718,6 +728,8 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			summary.Action = GateActionReleased
 			if pool.SkipPace[id] {
 				summary.Detail = poolSkipDetail
+			} else if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
 			}
 			appendSummary()
 			continue
