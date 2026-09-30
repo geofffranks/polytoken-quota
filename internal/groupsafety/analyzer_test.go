@@ -529,6 +529,24 @@ modelgroups:
 		equal(t, "GroupsAfter[g]", r.GroupsAfter["g"], []string{"gp/g1"})
 	})
 
+	t.Run("inferred provider without a providers entry fails closed", func(t *testing.T) {
+		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  gp:
+    enabled: true
+models:
+  ghost/x:
+    enabled: true
+modelgroups:
+  g:
+    - ghost/x
+  polytoken:default_model_full: ghost/x
+`)}
+		r := analyze("gp", global)
+		wantVerdict(t, r, PendingUnknown)
+		wantReason(t, r, "has no providers entry")
+	})
+
 	t.Run("malformed names fail closed", func(t *testing.T) {
 		for _, name := range []string{"noslash", "/g1", "gp/"} {
 			global := Layer{ID: "global", Global: true, Config: []byte(fmt.Sprintf(`version: 4
