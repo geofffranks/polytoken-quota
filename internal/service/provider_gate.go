@@ -213,7 +213,7 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 	// The signal verdicts are a pure function of the observed state at now,
 	// computed once per pass from the coordinator's clock so the gate and the
 	// rank can never disagree about freshness.
-	now := c.Clock.Now()
+	now := c.now()
 	verdicts := routing.SignalGateVerdicts(signalGateInputs(desired, observed), now)
 
 	c.step("plan-provider-gate")
