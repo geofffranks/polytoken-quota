@@ -38,6 +38,12 @@ type TargetOutcome struct {
 	// modelgroups). It is populated whenever a plan rendered; rendering is
 	// decided by the CLI.
 	Skipped []reconcile.SkippedEdit
+	// ProviderGates carries the sanitized per-provider gate summary of a
+	// provider-only pass (pace verdicts, pool skips, axis attribution). It is
+	// populated whenever a gate plan rendered, including dry runs (which
+	// report the same rows without publishing); rendering is decided by the
+	// CLI.
+	ProviderGates []ProviderGateSummary
 }
 
 // Outcome is the result of a mutation operation. Accepted is false when the

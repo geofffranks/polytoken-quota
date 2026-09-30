@@ -81,7 +81,7 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 				outcomes = []TargetOutcome{pending}
 			} else {
 				c.step("provider-gate")
-				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false)
+				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false, in.Verbose)
 				outcomes = res.Outcomes
 				gateRefusal = res.Refusal
 				if res.Refusal == nil {

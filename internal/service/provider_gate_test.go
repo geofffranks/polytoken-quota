@@ -304,10 +304,10 @@ func TestPlanProviderGateDecisionTable(t *testing.T) {
 		claim                      *state.ProviderOwnership // expected new/released claim on publish
 		claimReleased              bool
 	}{
-		{"reserve absent key gates off and claims absent baseline", reserve, configAbsent, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: false, Owned: true}, false},
-		{"reserve true gates off and claims true baseline", reserve, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true}, false},
+		{"reserve absent key gates off and claims absent baseline", reserve, configAbsent, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3}, false},
+		{"reserve true gates off and claims true baseline", reserve, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3}, false},
 		{"reserve explicit false edits nothing and claims nothing", reserve, configFalse, nil, false, false, false, nil, false},
-		{"disabled true gates off", disabled, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true}, false},
+		{"disabled true gates off", disabled, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 3}, false},
 		{"normal owned claim restores absent baseline by removing key", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true}}, false, true, false, nil, true},
 		{"normal owned claim restores explicit false baseline by writing false", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: false, Owned: true}}, false, true, false, nil, true},
 		{"normal owned claim restores true baseline", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true}}, false, true, false, nil, true},
@@ -321,7 +321,7 @@ func TestPlanProviderGateDecisionTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			observed := state.State{Revision: 3, Providers: tc.ps, ProviderOwnership: tc.own}
-			plan, err := planProviderGate(desired, observed, tc.cfg)
+			plan, err := planProviderGate(desired, observed, tc.cfg, time.Time{}, nil, 3)
 			if err != nil {
 				t.Fatalf("planProviderGate: %v", err)
 			}
@@ -389,7 +389,7 @@ func TestProviderGateReserveDisabledAndNormalBaseline(t *testing.T) {
 			wantConfig: func(before string) string {
 				return strings.Replace(before, "    # operator-set value\n    enabled: true", "    # operator-set value\n    enabled: false", 1)
 			},
-			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true}},
+			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 8}},
 			wantHistoryCount: 1,
 			wantProviders:    []notice.ProviderState{{ID: "gp", Enabled: false}},
 		},
@@ -401,7 +401,7 @@ func TestProviderGateReserveDisabledAndNormalBaseline(t *testing.T) {
 				// The key is inserted into the gp block; assert the block shape.
 				return before
 			},
-			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true}},
+			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 8}},
 			wantHistoryCount: 1,
 			wantProviders:    []notice.ProviderState{{ID: "gp", Enabled: false}},
 		},
@@ -627,8 +627,8 @@ func TestProviderGateCombinedMultiProviderSingleTransaction(t *testing.T) {
 	}
 	st := f.loadState()
 	for id, wantOwn := range map[string]state.ProviderOwnership{
-		"gp": {BaselinePresent: true, BaselineValue: true, Owned: true},
-		"pp": {BaselinePresent: true, BaselineValue: true, Owned: true},
+		"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 3},
+		"pp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3},
 	} {
 		if got := st.ProviderOwnership[id]; got != wantOwn {
 			t.Fatalf("ownership[%s]=%+v want %+v", id, got, wantOwn)

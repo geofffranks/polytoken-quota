@@ -43,6 +43,9 @@ type ReconcileTrace struct {
 	Ranking       []RankEntryReport     `json:"ranking,omitempty"`
 	Chains        []ChainSurvivorReport `json:"chains,omitempty"`
 	Edits         []EditReport          `json:"edits,omitempty"`
+	// ProviderGates carries the provider-only gate summaries (pace verdicts,
+	// pool skips, axis attribution); nil for legacy targets.
+	ProviderGates []ProviderGateSummary `json:"provider_gates,omitempty"`
 	// Skipped carries the sanitized tier-default skip diagnostics (the
 	// composed config surface uses modelgroups); nil when nothing was skipped.
 	Skipped []reconcile.SkippedEdit `json:"skipped,omitempty"`

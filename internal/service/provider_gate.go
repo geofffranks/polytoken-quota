@@ -37,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -44,6 +45,7 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/groupsafety"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -82,6 +84,12 @@ type providerGatePlan struct {
 	// matches the live field because of an operator edit. They are reported
 	// pending and never overwritten.
 	Conflicts []string
+	// PoolSkips lists the balance groups whose pace axis was skipped this
+	// pass by the all-hot pool rule, sorted.
+	PoolSkips []string
+	// GateSummary is the sanitized per-provider gate decision channel, one
+	// row per enrolled provider, for outcome and verbose-trace surfacing.
+	GateSummary []ProviderGateSummary
 	// Changed reports whether the plan would edit any managed byte or mutate
 	// any ownership record.
 	Changed bool
@@ -129,7 +137,7 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 		revision = observed.Revision + 1
 	}
 	c.step("provider-gate")
-	res := c.runProviderGate(ctx, desired, observed, targets, revision, !in.DryRun, in.KeepStaging)
+	res := c.runProviderGate(ctx, desired, observed, targets, revision, !in.DryRun, in.KeepStaging, in.Verbose)
 	if in.DryRun {
 		return Outcome{Accepted: true, Revision: observed.Revision, Targets: res.Outcomes}
 	}
@@ -166,8 +174,8 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 // true and every gate passes — commits the single global journal transaction
 // carrying the next ownership state. It never acquires the lock and never
 // saves state: the caller owns both.
-func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desired, observed state.State, targets []RegisteredTarget, revision uint64, publish, keepStaging bool) providerGateResult {
-	res := providerGateResult{Plan: providerGatePlan{
+func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desired, observed state.State, targets []RegisteredTarget, revision uint64, publish, keepStaging, verbose bool) (res providerGateResult) {
+	res = providerGateResult{Plan: providerGatePlan{
 		PublishedOwnership: state.CloneProviderOwnership(observed.ProviderOwnership),
 		RefusalOwnership:   state.CloneProviderOwnership(observed.ProviderOwnership),
 	}}
@@ -198,14 +206,36 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 		snapshots = grown
 	}
 
+	c.step("pace-verdicts")
+	// The pace verdicts are a pure function of the observed state at now,
+	// computed once per pass from the coordinator's clock so the gate and the
+	// rank can never disagree about freshness.
+	now := c.Clock.Now()
+	verdicts := routing.PaceGateVerdicts(paceGateInputs(desired, observed), now)
+
 	c.step("plan-provider-gate")
-	plan, planErr := planProviderGate(desired, observed, layers[0].Config)
+	plan, planErr := planProviderGate(desired, observed, layers[0].Config, now, verdicts, revision)
 	if planErr != nil {
 		res.Plan = plan
 		globalPending("render", planErr)
 		return res
 	}
 	res.Plan = plan
+	// Whatever this evaluation produces — applied, pending, or a dry-run
+	// report — every outcome carries the sanitized per-provider gate summary,
+	// and --verbose adds the decision trace. Dry runs report the same rows
+	// without publishing anything.
+	defer func() {
+		for i := range res.Outcomes {
+			res.Outcomes[i].ProviderGates = plan.GateSummary
+			if verbose {
+				res.Outcomes[i].Trace = &ReconcileTrace{
+					ProviderModes: providerDetailsToReports(ProjectProviders(desired, observed)),
+					ProviderGates: plan.GateSummary,
+				}
+			}
+		}
+	}()
 
 	if len(plan.Conflicts) > 0 {
 		// An operator edit diverged from a held claim: report pending and
@@ -417,16 +447,24 @@ func (c *Coordinator) publishProviderGate(ctx context.Context, desired policy.De
 }
 
 // planProviderGate derives the per-provider actions from the enrolled set, the
-// observed quota state, the durable ownership records, and the live global
-// config bytes. It is a pure decision function: it reads bytes handed to it
-// and never touches the filesystem.
+// observed quota state, the durable ownership records, the live global config
+// bytes, the pace verdicts, and the evaluation time. It is a pure decision
+// function: it reads bytes handed to it and never touches the filesystem.
+// now is the time the verdicts were computed at, threaded per the documented
+// signature; the verdicts have already folded it in.
 //
-// reserve/disabled gate the provider off; normal restores only a quota-owned
-// baseline. An operator edit that diverges from a held claim is a conflict:
-// reported pending, never overwritten, no forced value. When the live field
-// already equals the recorded baseline exactly, the claim is released without
-// an edit — the operator restored it themselves.
-func planProviderGate(desired policy.Desired, observed state.State, globalConfig []byte) (providerGatePlan, error) {
+// Precedence per provider: the durable reserve/disabled axes gate first
+// (unchanged); then the pace axis — fresh over-threshold pace evidence that
+// survived the all-hot pool rule — gates with a pace-attributed claim; then
+// the normal branch restores only a quota-owned baseline. An operator edit
+// that diverges from a held claim is a conflict: reported pending, never
+// overwritten, no forced value. When the live field already equals the
+// recorded baseline exactly, the claim is released without an edit — the
+// operator restored it themselves. Because a pace gate holds only while its
+// evidence stays fresh and over threshold, every degraded-evidence case
+// (under threshold, stale snapshot, uncomputable pace) falls to the normal
+// branch and releases a held pace gate automatically.
+func planProviderGate(desired policy.Desired, observed state.State, globalConfig []byte, now time.Time, verdicts map[string]routing.PaceGateVerdict, revision uint64) (providerGatePlan, error) {
 	plan := providerGatePlan{
 		PublishedOwnership: state.CloneProviderOwnership(observed.ProviderOwnership),
 		RefusalOwnership:   state.CloneProviderOwnership(observed.ProviderOwnership),
@@ -451,26 +489,72 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 	if len(ids) == 0 {
 		return plan, nil
 	}
+	// Read every enrolled provider's live enabled field before any per-provider
+	// decision: the pool rule must see whole pools, and a partial snapshot is
+	// never authoritative for debt retirement.
+	type liveField struct{ present, value bool }
+	live := make(map[string]liveField, len(ids))
 	for _, id := range ids {
 		present, value, known, err := providerEnabledField(globalConfig, id)
 		if err != nil {
-			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
+			plan.Enabled = nil
 			return plan, err
 		}
 		if !known {
-			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
+			plan.Enabled = nil
 			return plan, fmt.Errorf("service: enrolled provider %q is absent from the registered global configuration", sanitizeFailure(id))
 		}
+		live[id] = liveField{present: present, value: value}
 		plan.Enabled[id] = !present || value
+	}
+	// Effective modes drive both the durable axes and the pool rule.
+	modes := make(map[string]state.Mode, len(ids))
+	paceHeld := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		modes[id] = reconcile.MappingMode(desired, observed, policy.MappingID(id))
+		if record, ok := observed.OwnershipOf(id); ok && record.PaceHeld() {
+			paceHeld[id] = true
+		}
+	}
+	pool := pacePoolRule(desired, verdicts, plan.Enabled, modes, paceHeld)
+	plan.PoolSkips = pool.Pools
+	poolSkipDetail := "pool fully over pace this pass; pace gate skipped"
+	operatorHeldDetail := "operator holds the provider off"
+
+	for _, id := range ids {
+		lf := live[id]
 		record, hasRecord := observed.OwnershipOf(id)
 		owned := hasRecord && record.Owned
+		mode := modes[id]
+		verdict := verdicts[id] // zero value: no verdict means never gate
+		gateEnabled, gateThreshold := paceGateConfigOf(desired, id)
+		// The pace axis engages only on fresh over-threshold evidence that the
+		// pool rule did not suppress this pass.
+		gated := gateEnabled && verdict.Gated && !pool.SkipPace[id]
+
+		summary := ProviderGateSummary{Provider: id}
+		if verdict.Pace != nil {
+			p := *verdict.Pace
+			summary.Pace = &p
+		}
+		thresholdCopy := gateThreshold
+		summary.Threshold = &thresholdCopy
+		appendSummary := func() {
+			plan.GateSummary = append(plan.GateSummary, summary)
+		}
+
 		// The gate consumes the reconciler's single mode derivation: the
 		// durable axes via EffectiveMode plus the fail-closed snapshot
 		// boundary. Reserve remains the existing low-quota axis state; a poll
 		// snapshot only forces disabled, never its own write rule.
-		mode := reconcile.MappingMode(desired, observed, policy.MappingID(id))
 		if mode == state.ModeReserve || mode == state.ModeDisabled {
-			if owned && !(present && !value) {
+			axis := state.OwnershipAxisReserve
+			summary.Axis = string(axis)
+			if mode == state.ModeDisabled {
+				axis = state.OwnershipAxisDisabled
+				summary.Axis = string(axis)
+			}
+			if owned && !(lf.present && !lf.value) {
 				// Quota holds an expected-off claim but the live field moved
 				// (enabled true, or the key was removed — absence enables).
 				// Report pending; never re-disable, never overwrite.
@@ -479,6 +563,9 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 				record.Conflict = true
 				claimTarget(false)[id] = record
 				claimTarget(true)[id] = record
+				summary.Action = GateActionConflict
+				summary.Detail = "operator edit diverges from the held claim"
+				appendSummary()
 				continue
 			}
 			if owned {
@@ -490,10 +577,15 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 					claimTarget(true)[id] = record
 					plan.Changed = true
 				}
+				summary.Action = GateActionHeld
+				appendSummary()
 				continue
 			}
-			if present && !value {
+			if lf.present && !lf.value {
 				// The operator already holds it off; quota claims nothing.
+				summary.Action = GateActionUnchanged
+				summary.Detail = operatorHeldDetail
+				appendSummary()
 				continue
 			}
 			// Write the disable and claim the operator baseline.
@@ -501,18 +593,101 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			off := false
 			plan.Edits = append(plan.Edits, providerFieldEdit(id, &off, false))
 			claimTarget(false)[id] = state.ProviderOwnership{
-				BaselinePresent: present,
-				BaselineValue:   value,
+				BaselinePresent: lf.present,
+				BaselineValue:   lf.value,
 				Owned:           true,
+				Axis:            axis,
+				EngagedRevision: revision,
 			}
 			plan.Changed = true
+			summary.Action = GateActionDisabled
+			appendSummary()
 			continue
 		}
-		// normal mode
+
+		// normal mode: the pace axis takes precedence over baseline restore.
+		if gated {
+			summary.Axis = state.OwnershipAxisPace
+			if owned && !(lf.present && !lf.value) {
+				// The operator re-enabled a provider a pace claim holds off:
+				// identical conflict handling to the durable axes.
+				plan.Conflicts = append(plan.Conflicts, id)
+				plan.Changed = plan.Changed || !record.Conflict
+				record.Conflict = true
+				claimTarget(false)[id] = record
+				claimTarget(true)[id] = record
+				summary.Action = GateActionConflict
+				summary.Detail = "operator edit diverges from the held claim"
+				appendSummary()
+				continue
+			}
+			if owned {
+				if record.PaceHeld() && record.Threshold == gateThreshold {
+					// Pace claim intact with the same threshold: nothing to
+					// write. Refresh a stale conflict marker like the durable
+					// axes do.
+					if record.Conflict {
+						record.Conflict = false
+						claimTarget(false)[id] = record
+						claimTarget(true)[id] = record
+						plan.Changed = true
+					}
+					summary.Action = GateActionHeld
+					appendSummary()
+					continue
+				}
+				// Transfer attribution to the pace axis in place: the field is
+				// already exactly as quota wrote it, so no byte changes and
+				// the recorded operator baseline is preserved verbatim.
+				changed := !record.PaceHeld() || record.Threshold != gateThreshold
+				record.Axis = state.OwnershipAxisPace
+				record.Threshold = gateThreshold
+				record.EngagedRevision = revision
+				claimTarget(false)[id] = record
+				claimTarget(true)[id] = record
+				plan.Changed = plan.Changed || changed
+				summary.Action = GateActionHeld
+				if changed {
+					summary.Detail = "gate attribution moved to the pace axis"
+				}
+				appendSummary()
+				continue
+			}
+			if lf.present && !lf.value {
+				summary.Action = GateActionUnchanged
+				summary.Detail = operatorHeldDetail
+				appendSummary()
+				continue
+			}
+			// Write the disable and claim the operator baseline for pace.
+			plan.Disables = append(plan.Disables, id)
+			off := false
+			plan.Edits = append(plan.Edits, providerFieldEdit(id, &off, false))
+			claimTarget(false)[id] = state.ProviderOwnership{
+				BaselinePresent: lf.present,
+				BaselineValue:   lf.value,
+				Owned:           true,
+				Axis:            state.OwnershipAxisPace,
+				Threshold:       gateThreshold,
+				EngagedRevision: revision,
+			}
+			plan.Changed = true
+			summary.Action = GateActionDisabled
+			appendSummary()
+			continue
+		}
+
+		// normal branch: pace did not gate this pass.
 		if !owned {
+			summary.Action = GateActionUnchanged
+			if pool.SkipPace[id] {
+				summary.Action = GateActionPoolSkip
+				summary.Detail = poolSkipDetail
+			}
+			appendSummary()
 			continue
 		}
-		if present && !value {
+		if lf.present && !lf.value {
 			// Still exactly as quota wrote it: restore the recorded operator
 			// baseline in its original shape.
 			if record.BaselinePresent {
@@ -524,9 +699,14 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			plan.Restores = append(plan.Restores, providerRestore{ID: id, RestorePresent: record.BaselinePresent, RestoreValue: record.BaselineValue})
 			delete(plan.PublishedOwnership, id)
 			plan.Changed = true
+			summary.Action = GateActionRestored
+			if pool.SkipPace[id] {
+				summary.Detail = poolSkipDetail
+			}
+			appendSummary()
 			continue
 		}
-		if present == record.BaselinePresent && (!present || value == record.BaselineValue) {
+		if lf.present == record.BaselinePresent && (!lf.present || lf.value == record.BaselineValue) {
 			// The operator already restored the exact baseline themselves:
 			// release the claim without editing.
 			delete(plan.PublishedOwnership, id)
@@ -535,6 +715,11 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 				claimTarget(true)[id] = record
 				plan.Changed = true
 			}
+			summary.Action = GateActionReleased
+			if pool.SkipPace[id] {
+				summary.Detail = poolSkipDetail
+			}
+			appendSummary()
 			continue
 		}
 		// Operator moved the field somewhere the recorded baseline does not
@@ -544,8 +729,22 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		record.Conflict = true
 		claimTarget(false)[id] = record
 		claimTarget(true)[id] = record
+		summary.Action = GateActionConflict
+		summary.Detail = "operator edit diverges from the held claim"
+		appendSummary()
 	}
 	return plan, nil
+}
+
+// paceGateConfigOf resolves a provider's pace-gate configuration from the
+// desired policy: an absent quota section (or pace_gate block) means the
+// documented defaults — gating on at DefaultPaceGateThreshold.
+func paceGateConfigOf(desired policy.Desired, id string) (enabled bool, threshold float64) {
+	pg := policy.DefaultPaceGate()
+	if m, ok := desired.Providers[policy.MappingID(id)]; ok && m.Quota != nil {
+		pg = m.Quota.PaceGate.Resolved()
+	}
+	return pg.Enabled, pg.Threshold
 }
 
 // providerFieldEdit addresses one exact-span providers.<id>.enabled edit in
