@@ -379,7 +379,7 @@ modelgroups:
 		wantReason(t, r, "ghost/nope")
 	})
 
-	t.Run("model without provider attribution is refused", func(t *testing.T) {
+	t.Run("name-only model that is the sole leaf is unsafe to disable", func(t *testing.T) {
 		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
 providers:
   gp:
@@ -394,8 +394,8 @@ modelgroups:
   polytoken:default_model_full: gp/g1
 `)}
 		r := analyze("gp", global)
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "no provider field")
+		wantVerdict(t, r, Unsafe)
+		wantReason(t, r, "leaves group \"g\" without")
 	})
 
 	t.Run("model attributing to an unknown provider is refused", func(t *testing.T) {
@@ -442,6 +442,112 @@ modelgroups:
 		r := analyze("gp", global)
 		wantVerdict(t, r, PendingUnknown)
 		wantReason(t, r, "mg:nowhere")
+	})
+}
+
+// TestModelProviderInference proves the user's contract: a valid model entry
+// needs no provider field — the provider is the text before the first slash of
+// the model name, in the observed <provider>/<model>(<effort>) shape. An
+// explicit provider field keeps precedence over the name prefix, malformed
+// names fail closed, and the effort suffix never affects ownership.
+func TestModelProviderInference(t *testing.T) {
+	t.Run("name-only mapping attributes to the name's provider", func(t *testing.T) {
+		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  gp:
+    url: http://127.0.0.1:9
+    enabled: true
+  pp:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  gp/g1:
+    enabled: true
+  pp/p2:
+    enabled: true
+modelgroups:
+  failover:
+    - gp/g1
+    - pp/p2
+  polytoken:default_model_full: pp/p2
+`)}
+		r := analyze("gp", global)
+		wantVerdict(t, r, Safe)
+		equal(t, "GroupsAfter[failover]", r.GroupsAfter["failover"], []string{"pp/p2"})
+	})
+
+	t.Run("effort suffix does not affect provider inference", func(t *testing.T) {
+		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  gp:
+    url: http://127.0.0.1:9
+    enabled: true
+  pp:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  gp/g1(high):
+    enabled: true
+  pp/p2:
+    enabled: true
+modelgroups:
+  failover:
+    - gp/g1(high)
+    - pp/p2
+  polytoken:default_model_full: pp/p2
+`)}
+		r := analyze("gp", global)
+		wantVerdict(t, r, Safe)
+		equal(t, "GroupsAfter[failover]", r.GroupsAfter["failover"], []string{"pp/p2"})
+	})
+
+	t.Run("explicit provider field takes precedence over the name prefix", func(t *testing.T) {
+		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
+providers:
+  gp:
+    url: http://127.0.0.1:9
+    enabled: true
+  pp:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  gp/g1:
+    provider: pp
+    enabled: true
+  pp/p2:
+    provider: pp
+    enabled: true
+modelgroups:
+  g:
+    - gp/g1
+  polytoken:default_model_full: pp/p2
+`)}
+		// gp/g1 names a gp prefix but explicitly attributes to pp, so
+		// disabling gp leaves every consumer with a usable route.
+		r := analyze("gp", global)
+		wantVerdict(t, r, Safe)
+		equal(t, "GroupsAfter[g]", r.GroupsAfter["g"], []string{"gp/g1"})
+	})
+
+	t.Run("malformed names fail closed", func(t *testing.T) {
+		for _, name := range []string{"noslash", "/g1", "gp/"} {
+			global := Layer{ID: "global", Global: true, Config: []byte(fmt.Sprintf(`version: 4
+providers:
+  gp:
+    url: http://127.0.0.1:9
+    enabled: true
+models:
+  %s:
+    enabled: true
+modelgroups:
+  g:
+    - %s
+  polytoken:default_model_full: g
+`, name, name))}
+			r := analyze("gp", global)
+			wantVerdict(t, r, PendingUnknown)
+			wantReason(t, r, "models."+name)
+		}
 	})
 }
 
@@ -590,7 +696,9 @@ modelgroups:
 			proj:   "version: 4\ndefaults:\n  full: gp/g1\n",
 			reason: "sets defaults",
 		},
-		{name: "model without provider", global: strings.Replace(valid, "provider: gp\n    enabled: true", "enabled: true", 1), reason: "no provider field"},
+		{name: "model without provider and unparseable name",
+			global: strings.Replace(strings.Replace(valid, "  gp/g1:\n    provider: gp\n    enabled: true", "  noslash:\n    enabled: true", 1), "    - gp/g1\n", "    - noslash\n", 1),
+			reason: "not <provider>/<model>"},
 		{name: "group leaf not a string", global: strings.Replace(valid, "    - gp/g1\n", "    - 7\n", 1), reason: "non-empty strings"},
 		{name: "group valued as mapping", global: strings.Replace(valid, "  g:\n    - gp/g1\n    - pp/p2\n", "  g:\n    x: 1\n", 1), reason: "leaf sequence"},
 		{name: "not a mapping", global: "- a\n- b\n", reason: "not a mapping"},

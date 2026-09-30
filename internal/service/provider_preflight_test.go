@@ -260,6 +260,57 @@ projects:
 // target registry, assesses the global layer plus each project layer, stages
 // every registered root for validation, and adopts nothing that is not
 // explicitly registered.
+// TestProviderPreflightNameOnlyModelsReadyWhenAlternativeRemains proves the
+// service-level path accepts a name-only model catalog (no provider fields):
+// disabling gp is analyzer-safe because the pp alternative keeps every group
+// and tier default usable, and the planned edit still targets exactly
+// providers.gp.enabled.
+func TestProviderPreflightNameOnlyModelsReadyWhenAlternativeRemains(t *testing.T) {
+	base := t.TempDir()
+	globalRoot := filepath.Join(base, "global")
+	if err := os.MkdirAll(globalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := `version: 4
+providers:
+  gp:
+    kind: {type: custom_open_ai_compatible}
+    url: http://127.0.0.1:9
+    auth: {type: no_auth}
+    enabled: true
+  pp:
+    kind: {type: custom_open_ai_compatible}
+    url: http://127.0.0.1:9
+    auth: {type: no_auth}
+    enabled: true
+models:
+  gp/g1: {enabled: true}
+  pp/p1: {enabled: true}
+modelgroups:
+  failover: [gp/g1, pp/p1]
+  polytoken:default_model_full: pp/p1
+`
+	if err := os.WriteFile(filepath.Join(globalRoot, "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	desired := policy.Desired{Version: 1, Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{"gp": {}, "pp": {}}, Global: policy.Target{ID: "global", Root: globalRoot, Global: true}}
+	coord := &Coordinator{
+		Lock:     preflightLocker{},
+		Policy:   preflightPolicy{desired},
+		State:    &preflightState{},
+		Targets:  preflightTargets{{Policy: desired.Global, Resolved: target.Resolved{ID: "global", CanonicalRoot: globalRoot, Global: true}}},
+		Stage:    &preflightStager{},
+		Validate: &preflightValidator{},
+	}
+	result, err := coord.PreflightProviderDisables(context.Background(), []string{"gp"})
+	if err != nil || !result.Ready {
+		t.Fatalf("result=%+v err=%v; want ready preflight with name-only model mappings", result, err)
+	}
+	if report := result.Reports["gp"]; report.Verdict != groupsafety.Safe {
+		t.Fatalf("gp report verdict=%q reasons=%v; want safe", report.Verdict, report.Reasons)
+	}
+}
+
 func TestProviderPreflightProductionPolicyLoadAssessesEveryRegisteredRoot(t *testing.T) {
 	base := t.TempDir()
 	globalRoot := writePreflightRoot(t, filepath.Join(base, "global"), preflightRootConfig)

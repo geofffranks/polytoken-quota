@@ -431,6 +431,20 @@ func (r *resolver) available(global *parsedLayer, name string, disabled bool) (u
 	return enabledNow, true
 }
 
+// modelProviderFromName infers a model's owning provider from its catalog
+// name, which the observed Polytoken config shapes as
+// <provider>/<model>(<effort>): everything before the first slash names the
+// provider. It fails closed when the name has no slash, an empty provider, or
+// an empty model part. The effort suffix follows the model name and never
+// changes the split.
+func modelProviderFromName(name string) (string, bool) {
+	provider, model, ok := strings.Cut(name, "/")
+	if !ok || provider == "" || model == "" {
+		return "", false
+	}
+	return provider, true
+}
+
 // reservedAliasTarget maps the observed derived reserved group names to their
 // tier default. Unknown reserved names stay unaliased and surface as unknown
 // references.
@@ -776,7 +790,15 @@ func parseLayer(l Layer) (*parsedLayer, string) {
 					}
 				}
 				if !haveProvider {
-					return out, fmt.Sprintf("%s models.%s has no provider field; ownership is unprovable", what, name)
+					// The provider field is optional: the observed model-name
+					// shape <provider>/<model>(<effort>) names its owner
+					// before the first slash, and the effort suffix never
+					// affects it.
+					provider, ok := modelProviderFromName(name)
+					if !ok {
+						return out, fmt.Sprintf("%s models.%s has no provider field and its name is not <provider>/<model>; ownership is unprovable", what, name)
+					}
+					def.provider = provider
 				}
 				out.models[name] = def
 			}
