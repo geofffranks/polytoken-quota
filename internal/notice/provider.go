@@ -12,6 +12,9 @@ import (
 type ProviderState struct {
 	ID      string `json:"id"`
 	Enabled bool   `json:"enabled"`
+	// Reason is an optional sanitized attribution (currently only pace gating
+	// carries one); omitted when empty.
+	Reason string `json:"reason,omitempty"`
 }
 
 type providerDocument struct {

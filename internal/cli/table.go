@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 	"github.com/mattn/go-runewidth"
@@ -275,27 +276,61 @@ func writeMutationText(w io.Writer, o service.Outcome, label string, s styler) {
 		return
 	}
 	fmt.Fprintf(w, "%s: %s revision=%d\n", label, s.green("accepted"), o.Revision)
-	if label != "check" || len(o.ProviderAttempts) == 0 {
+	gates := mutationGateRows(o)
+	if label != "check" || (len(o.ProviderAttempts) == 0 && len(gates) == 0) {
 		return
 	}
-	fmt.Fprintln(w)
-	rows := [][]tableCell{{
-		{text: "mapping", style: s.dim},
-		{text: "status", style: s.dim},
-		{text: "error", style: s.dim},
-	}}
-	for _, attempt := range o.ProviderAttempts {
-		statusStyle := s.green
-		if attempt.Status != "fresh" && attempt.Status != "partial" {
-			statusStyle = s.red
+	if len(o.ProviderAttempts) > 0 {
+		fmt.Fprintln(w)
+		rows := [][]tableCell{{
+			{text: "mapping", style: s.dim},
+			{text: "status", style: s.dim},
+			{text: "error", style: s.dim},
+		}}
+		for _, attempt := range o.ProviderAttempts {
+			statusStyle := s.green
+			if attempt.Status != "fresh" && attempt.Status != "partial" {
+				statusStyle = s.red
+			}
+			rows = append(rows, []tableCell{
+				{text: attempt.MappingID},
+				{text: attempt.Status, style: statusStyle},
+				{text: attempt.Error},
+			})
 		}
-		rows = append(rows, []tableCell{
-			{text: attempt.MappingID},
-			{text: attempt.Status, style: statusStyle},
-			{text: attempt.Error},
-		})
+		writeTable(w, rows)
 	}
-	writeTable(w, rows)
+	// Provider-only gate summaries render after the attempt table: what the
+	// pass did (or deliberately did not do) per provider. They appear only
+	// when a pass ran the provider gate (check --reconcile).
+	for _, line := range gates {
+		fmt.Fprintln(w, line)
+	}
+}
+
+// mutationGateRows renders one sanitized line per provider gate summary in the
+// outcome, or nil when the outcome carries none.
+func mutationGateRows(o service.Outcome) []string {
+	var lines []string
+	for _, t := range o.Targets {
+		for _, g := range t.ProviderGates {
+			line := "gate: " + validate.DefaultSanitize([]byte(g.Provider)) + " " + validate.DefaultSanitize([]byte(g.Action))
+			if g.Axis != "" {
+				line += " axis=" + validate.DefaultSanitize([]byte(g.Axis))
+			}
+			if g.Pace != nil {
+				line += fmt.Sprintf(" pace=%d%%", routing.PacePercent(*g.Pace))
+			}
+			if g.Threshold != nil {
+				line += fmt.Sprintf(" threshold=%d%%", routing.PacePercent(*g.Threshold))
+			}
+			if g.Detail != "" {
+				line += " (" + validate.DefaultSanitize([]byte(g.Detail)) + ")"
+			}
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 // writeInitText prints the post-init guidance after a successful create or

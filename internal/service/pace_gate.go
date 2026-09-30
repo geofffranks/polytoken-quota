@@ -13,6 +13,7 @@ package service
 // "otherwise enabled", and members held under those axes stay gated by them.
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
@@ -45,6 +46,30 @@ type ProviderGateSummary struct {
 	// Detail carries a sanitized reason for non-obvious rows (pool skips,
 	// conflicts, degraded pace evidence). It never echoes document values.
 	Detail string `json:"detail,omitempty"`
+}
+
+// paceGateReason renders the sanitized status REASON prefix for a pace-held
+// gate: the observed pace and engaged threshold when both are known, the bare
+// attribution otherwise.
+func paceGateReason(g *GateReport) string {
+	if g.Pace != nil && g.Threshold != nil {
+		return fmt.Sprintf("pace-gated (%d%% >= %d%%)", routing.PacePercent(*g.Pace), routing.PacePercent(*g.Threshold))
+	}
+	return "pace-gated"
+}
+
+// gateNoticeReason renders the sanitized reason carried by a provider notice
+// for a pace-gated provider; empty for every other axis (the notice schema
+// gains a reason only where pace gating explains the committed state).
+func gateNoticeReason(g ProviderGateSummary) string {
+	if g.Axis != state.OwnershipAxisPace || g.Pace == nil {
+		return ""
+	}
+	threshold := policy.DefaultPaceGateThreshold
+	if g.Threshold != nil {
+		threshold = *g.Threshold
+	}
+	return fmt.Sprintf("pace-gated (%d%% >= %d%%)", routing.PacePercent(*g.Pace), routing.PacePercent(threshold))
 }
 
 // paceBalanceGroup resolves a mapping's effective balance group. A mapping

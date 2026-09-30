@@ -429,7 +429,7 @@ func (c *Coordinator) publishProviderGate(ctx context.Context, desired policy.De
 	// outcome. Recovery must not roll forward bytes without also preserving
 	// the notice state when the caller's subsequent state save fails.
 	next.PendingProviderNotice = reconcileProviderNoticeDebt(
-		observed.PendingProviderNotice, plan.Enabled, revision, providerPlanNoticeEdits(plan.Edits),
+		observed.PendingProviderNotice, plan.Enabled, revision, providerPlanNoticeEdits(plan),
 	)
 	tx, err := c.buildTransaction(observed, next, global, txPlan, candidate, prep)
 	tx.ProviderNoticeSet = true

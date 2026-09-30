@@ -6,10 +6,13 @@ package service
 // values; no filesystem, state store, or clock is involved in the pure table.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -354,3 +357,113 @@ func TestPlanProviderGatePaceDecisionTable(t *testing.T) {
 // fptr64 is a local float pointer helper (routing's fptr is test-package
 // private).
 func fptr64(v float64) *float64 { return &v }
+
+// TestProviderProjectionCarriesGateAttribution proves the diagnostic provider
+// projection surfaces the gate record: a pace claim carries axis, observed
+// pace, threshold, and engaged revision; a legacy claim (no axis) keeps
+// today's presentation with no gate field.
+func TestProviderProjectionCarriesGateAttribution(t *testing.T) {
+	asOf := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	snapshot := &quota.QuotaSnapshot{
+		CheckedAt: asOf.Add(-time.Minute),
+		Windows: []quota.QuotaWindow{{
+			Used: fptr64(68), Limit: fptr64(100),
+			ResetAt: tptr64(asOf.Add(24 * time.Hour)), Period: durptr64(48 * time.Hour),
+		}},
+	}
+	desired := policy.Desired{Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{"gp": {}}}
+	observed := state.State{
+		Providers: map[string]state.ProviderState{"gp": {QuotaSnapshot: snapshot}},
+		ProviderOwnership: map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisPace, Threshold: 1.25, EngagedRevision: 7},
+		},
+	}
+	providers, errs := projectProviders(desired, observed, asOf)
+	if len(errs) != 0 {
+		t.Fatalf("projection errors: %v", errs)
+	}
+	gate := providers[0].Gate
+	if gate == nil || gate.Axis != state.OwnershipAxisPace || gate.EngagedRevision != 7 {
+		t.Fatalf("gate = %+v, want pace attribution at revision 7", gate)
+	}
+	if gate.Pace == nil || routing.PacePercent(*gate.Pace) != 136 {
+		t.Fatalf("gate pace = %+v, want 136%%", gate.Pace)
+	}
+	if gate.Threshold == nil || *gate.Threshold != 1.25 {
+		t.Fatalf("gate threshold = %+v, want 1.25", gate.Threshold)
+	}
+
+	// Legacy claim: no axis, no gate field.
+	observed.ProviderOwnership["gp"] = state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true}
+	providers, _ = projectProviders(desired, observed, asOf)
+	if providers[0].Gate != nil {
+		t.Fatalf("legacy claim must not carry a gate field: %+v", providers[0].Gate)
+	}
+}
+
+// TestMergedStatusPaceReasonLeads proves a pace-held gate names itself ahead
+// of the ranking explanation in the merged status REASON, and the gate
+// attribution rides the row for status --json.
+func TestMergedStatusPaceReasonLeads(t *testing.T) {
+	snap := DiagnosticSnapshot{
+		providers: []ProviderProjection{{
+			MappingID: "gp",
+			Gate: &GateReport{
+				Axis: state.OwnershipAxisPace, Pace: fptr64(1.36), Threshold: fptr64(1.0), EngagedRevision: 7,
+			},
+		}},
+		ranks: []RankEntryReport{{MappingID: "gp", Rank: 0, Eligible: true, Explanation: "peak, pace 136%"}},
+	}
+	report := snap.MergedStatusView()
+	if len(report.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(report.Providers))
+	}
+	row := report.Providers[0]
+	if !strings.HasPrefix(row.Reason, "pace-gated (136% >= 100%); ") {
+		t.Fatalf("reason = %q, want the pace attribution to lead", row.Reason)
+	}
+	if !strings.HasSuffix(row.Reason, "peak, pace 136%") {
+		t.Fatalf("reason = %q, want the ranking explanation to follow", row.Reason)
+	}
+	if row.Gate == nil || row.Gate.Axis != state.OwnershipAxisPace || row.Gate.EngagedRevision != 7 {
+		t.Fatalf("gate = %+v, want the pace attribution carried", row.Gate)
+	}
+}
+
+// TestProviderEditsCarryPaceNoticeReason proves a committed pace disable's
+// edit carries the sanitized pace reason for the notice, and reserve edits
+// carry none.
+func TestProviderEditsCarryPaceNoticeReason(t *testing.T) {
+	off := false
+	outcomes := []TargetOutcome{{
+		Prepare: &PrepareResult{ChangedEdits: []reconcile.FieldEdit{
+			{File: "config.yaml", Path: []string{"providers", "gp", "enabled"}, Enabled: &off},
+			{File: "config.yaml", Path: []string{"providers", "pp", "enabled"}, Enabled: &off},
+		}},
+		ProviderGates: []ProviderGateSummary{
+			{Provider: "gp", Action: GateActionDisabled, Axis: state.OwnershipAxisPace, Pace: fptr64(1.36), Threshold: fptr64(1.0)},
+			{Provider: "pp", Action: GateActionDisabled, Axis: state.OwnershipAxisReserve},
+		},
+	}}
+	edits := providerEdits(outcomes)
+	if len(edits) != 2 {
+		t.Fatalf("edits = %d, want 2", len(edits))
+	}
+	for _, e := range edits {
+		switch e.id {
+		case "gp":
+			if e.reason != "pace-gated (136% >= 100%)" {
+				t.Fatalf("gp reason = %q, want the pace attribution", e.reason)
+			}
+		case "pp":
+			if e.reason != "" {
+				t.Fatalf("pp reason = %q, want none for the reserve axis", e.reason)
+			}
+		}
+	}
+}
+
+// tptr64/durptr64 are local pointer helpers (routing's are test-package
+// private).
+func tptr64(t time.Time) *time.Time           { return &t }
+func durptr64(d time.Duration) *time.Duration { return &d }

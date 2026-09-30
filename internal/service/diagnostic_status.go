@@ -24,7 +24,8 @@ const (
 )
 
 // MergedStatusProvider is one provider row: consolidated status, ranking
-// metadata, raw quota window numbers, and the earliest upcoming reset.
+// metadata, raw quota window numbers, the earliest upcoming reset, and the
+// gate attribution when quota holds the provider's enabled field off.
 type MergedStatusProvider struct {
 	Provider    string              `json:"provider"`
 	Status      string              `json:"status"`
@@ -34,6 +35,9 @@ type MergedStatusProvider struct {
 	Reason      string              `json:"reason"`
 	Windows     []QuotaWindowReport `json:"windows,omitempty"`
 	NextResetAt *time.Time          `json:"next_reset_at,omitempty"`
+	// Gate carries the provider-only gate attribution (axis, observed pace,
+	// threshold, engaged revision); nil when quota holds no attributed claim.
+	Gate *GateReport `json:"gate,omitempty"`
 }
 
 // MergedStatusRoute is one route with target/source provenance and its
@@ -95,13 +99,21 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	}
 	for _, provider := range s.providers {
 		rank := ranks[provider.MappingID]
+		reason := rank.Explanation
+		// A pace-held gate names itself ahead of the ranking explanation: the
+		// reason a provider is OFF must lead the row, and the ranking
+		// explanation (why it ranks where it does) follows.
+		if gate := provider.Gate; gate != nil && gate.Axis == state.OwnershipAxisPace {
+			reason = paceGateReason(gate) + "; " + reason
+		}
 		row := MergedStatusProvider{
 			Provider: provider.MappingID,
 			Status:   mergedProviderStatus(provider),
 			Rank:     rank.Rank,
 			OffPeak:  rank.OffPeak,
 			Eligible: rank.Eligible,
-			Reason:   rank.Explanation,
+			Reason:   reason,
+			Gate:     cloneGateReport(provider.Gate),
 		}
 		if provider.CheckedAt.After(report.LastChecked) {
 			report.LastChecked = provider.CheckedAt

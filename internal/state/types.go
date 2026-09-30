@@ -229,10 +229,13 @@ type State struct {
 }
 
 // ProviderNoticeState is one provider's committed enabled state as carried by
-// the provider-only notice and the republication debt.
+// the provider-only notice and the republication debt. Reason is an optional
+// sanitized attribution string (currently only pace gating explains a
+// committed state); empty means the state carries no reason text.
 type ProviderNoticeState struct {
 	ID      string
 	Enabled bool
+	Reason  string
 }
 
 // PendingProviderNotice records the provider states awaiting confirmed

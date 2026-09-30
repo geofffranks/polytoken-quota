@@ -209,6 +209,9 @@ type targetJSON struct {
 	TargetID string `json:"target_id"`
 	Pending  bool   `json:"pending"`
 	Stage    string `json:"stage,omitempty"`
+	// ProviderGates carries the provider-only gate summary when the pass ran
+	// the provider gate; omitted otherwise (legacy targets never set it).
+	ProviderGates []service.ProviderGateSummary `json:"provider_gates,omitempty"`
 }
 
 // mutationJSON is the normative top-level check/mutation shape:
@@ -235,7 +238,7 @@ func mutationEnvelope(o service.Outcome) mutationJSON {
 		out.Attempts = []attemptJSON{}
 	}
 	for _, t := range o.Targets {
-		tj := targetJSON{TargetID: t.TargetID, Pending: t.Pending != nil}
+		tj := targetJSON{TargetID: t.TargetID, Pending: t.Pending != nil, ProviderGates: t.ProviderGates}
 		if t.Pending != nil {
 			tj.Stage = t.Pending.Stage
 		}
