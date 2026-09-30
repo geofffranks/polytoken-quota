@@ -721,6 +721,18 @@ type outQuota struct {
 	Weight           int     `yaml:"weight,omitempty"`
 	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd,omitempty"`
 	Mode             string  `yaml:"mode,omitempty"`
+	// PaceGate round-trips the resolved pace-gating configuration; omitted
+	// entirely when it equals the documented default (which loads back
+	// identically). Serialization keeps import parity: a forced provider-only
+	// re-init can never silently drop a non-default pace_gate setting.
+	PaceGate *outPaceGate `yaml:"pace_gate,omitempty"`
+}
+
+// outPaceGate is the rendered pace_gate block. It always carries both keys so
+// the rendered form is self-describing.
+type outPaceGate struct {
+	Enabled   bool    `yaml:"enabled"`
+	Threshold float64 `yaml:"threshold"`
 }
 
 // quotaOut renders the resolved quota adapter configuration. quota.mode is
@@ -731,13 +743,17 @@ func quotaOut(q *QuotaConfig) *outQuota {
 	if q == nil {
 		return nil
 	}
-	return &outQuota{
+	out := &outQuota{
 		Adapter:          q.Adapter,
 		FreshnessTTL:     q.FreshnessTTL.String(),
 		BalanceGroup:     q.BalanceGroup,
 		Weight:           q.Weight,
 		MonthlyBudgetUSD: q.MonthlyBudgetUSD,
 	}
+	if pg := q.PaceGate.Resolved(); !pg.IsDefault() {
+		out.PaceGate = &outPaceGate{Enabled: pg.Enabled, Threshold: pg.Threshold}
+	}
+	return out
 }
 
 type outTarget struct {

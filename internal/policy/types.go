@@ -9,6 +9,7 @@
 package policy
 
 import (
+	"math"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -119,6 +120,53 @@ type Operational struct {
 	OnChange []OnChangeAction
 }
 
+// DefaultPaceGateThreshold is the pace fraction (1.0 = 100% of the projection
+// window) at which pace gating engages when a quota block omits
+// pace_gate.threshold. It is the documented default of that key, not a magic
+// number: Load applies it here and the gate surfaces it in diagnostics, so one
+// documented value governs every threshold decision.
+const DefaultPaceGateThreshold = 1.0
+
+// PaceGateConfig is the resolved pace-gating configuration for one provider
+// mapping (provider-only mode). Gating engages when the provider's observed
+// projection pace reaches Threshold on a fresh quota snapshot. Enabled
+// defaults to true and Threshold to DefaultPaceGateThreshold: Load resolves an
+// absent pace_gate block (or any omitted key within it) to those defaults, and
+// Resolved applies the same defaults to a hand-constructed config, so every
+// consumer sees the effective values.
+type PaceGateConfig struct {
+	Enabled   bool
+	Threshold float64
+}
+
+// DefaultPaceGate returns the documented default pace-gating configuration:
+// gating on at DefaultPaceGateThreshold.
+func DefaultPaceGate() PaceGateConfig {
+	return PaceGateConfig{Enabled: true, Threshold: DefaultPaceGateThreshold}
+}
+
+// Resolved returns p with the documented defaults applied: the zero value
+// (an absent pace_gate block, or a hand-constructed config) resolves to
+// DefaultPaceGate, and a set threshold that is not finite and positive falls
+// back to the default. Load rejects out-of-range explicit thresholds before
+// this point; the fallback exists for hand-built configs, never to launder
+// invalid input.
+func (p PaceGateConfig) Resolved() PaceGateConfig {
+	if p == (PaceGateConfig{}) {
+		return DefaultPaceGate()
+	}
+	if p.Threshold <= 0 || math.IsNaN(p.Threshold) || math.IsInf(p.Threshold, 0) {
+		p.Threshold = DefaultPaceGateThreshold
+	}
+	return p
+}
+
+// IsDefault reports whether p is exactly the documented default configuration
+// (the only shape the rendered policy omits).
+func (p PaceGateConfig) IsDefault() bool {
+	return p == DefaultPaceGate()
+}
+
 // QuotaConfig holds per-provider quota/routing configuration (additive on
 // Mapping). When a mapping omits its quota section, the mapping's Quota pointer
 // is nil and routing treats it as unrankable (it keeps its position, never
@@ -141,6 +189,12 @@ type QuotaConfig struct {
 	// the quota. Neuralwatt reads its provider-reported balance directly.
 	MonthlyBudgetUSD float64
 	Schedule         *routing.Schedule // nil = never off-peak
+	// PaceGate is the resolved pace-gating configuration (additive). It is
+	// consumed only by the provider-only gate; legacy mode keeps
+	// rank-demotion-only pace semantics. Load resolves an absent pace_gate
+	// block to DefaultPaceGate, so the in-memory config always carries the
+	// effective values.
+	PaceGate PaceGateConfig
 }
 
 // RoutingConfig holds the top-level routing enablement (additive on Desired).
