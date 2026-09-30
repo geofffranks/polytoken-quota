@@ -20,15 +20,50 @@ const OwnershipKeyBytes = 128
 //     value when present. Absent keys and explicit false are distinct so
 //     normal mode can restore the exact original shape.
 //   - Owned records that the reconciler wrote the field off and still expects
-//     it to be off (reserve/disabled gating).
+//     it to be off (reserve/disabled/pace gating).
 //   - Conflict records a detected mismatch between the owned expectation and
 //     the live field (e.g. an operator edit) that must be reported, never
 //     overwritten, while the claim is held.
+//   - Axis names the gating axis that engaged the claim: one of the
+//     OwnershipAxis constants, or the empty string for a legacy claim (a
+//     record written before axis attribution). Threshold and EngagedRevision
+//     carry the pace threshold and the revision at which a pace claim was
+//     engaged; they are inert on non-pace claims.
 type ProviderOwnership struct {
 	BaselinePresent bool
 	BaselineValue   bool
 	Owned           bool
 	Conflict        bool
+	Axis            string
+	Threshold       float64
+	EngagedRevision uint64
+}
+
+// Ownership gate axes. The empty string is the legacy-claim axis: a claim
+// recorded before attribution, owned expected-off with no axis semantics
+// (never pace-held in the pool rule, never blocks recovery).
+const (
+	OwnershipAxisLegacy   = ""
+	OwnershipAxisPace     = "pace"
+	OwnershipAxisReserve  = "reserve"
+	OwnershipAxisDisabled = "disabled"
+)
+
+// ValidOwnershipAxis reports whether axis is a representable ownership axis.
+// Load maps any other value to the legacy axis, so a hand-edited state file
+// can never smuggle an unbounded string into gate decisions.
+func ValidOwnershipAxis(axis string) bool {
+	switch axis {
+	case OwnershipAxisLegacy, OwnershipAxisPace, OwnershipAxisReserve, OwnershipAxisDisabled:
+		return true
+	}
+	return false
+}
+
+// PaceHeld reports whether the record is a claim currently held by the pace
+// axis (as opposed to reserve/disabled gating or a legacy claim).
+func (o ProviderOwnership) PaceHeld() bool {
+	return o.Owned && o.Axis == OwnershipAxisPace
 }
 
 // OwnershipOf returns the ownership record for provider id and whether one
@@ -65,11 +100,47 @@ func CloneProviderOwnership(m map[string]ProviderOwnership) map[string]ProviderO
 	return out
 }
 
+// normalizeProviderOwnershipAxes maps every ownership record's axis to a
+// representable value immediately after load and immediately before persist:
+// an unknown or out-of-enum axis value falls back to the legacy axis (with its
+// inert attribution fields cleared), so a hand-edited state file can never
+// carry an unbounded axis string into gate decisions and every persisted
+// record carries canonical axis values. It never mutates the input state.
+func normalizeProviderOwnershipAxes(s State) State {
+	if len(s.ProviderOwnership) == 0 {
+		return s
+	}
+	changed := false
+	out := make(map[string]ProviderOwnership, len(s.ProviderOwnership))
+	for k, v := range s.ProviderOwnership {
+		if ValidOwnershipAxis(v.Axis) {
+			out[k] = v
+			continue
+		}
+		// Unknown axis: legacy-claim semantics. The record still means
+		// "owned expected-off" (recovery unaffected), but it is never
+		// pace-held and carries no pace attribution.
+		v.Axis = OwnershipAxisLegacy
+		v.Threshold = 0
+		v.EngagedRevision = 0
+		out[k] = v
+		changed = true
+	}
+	if !changed {
+		return s
+	}
+	next := s
+	next.ProviderOwnership = out
+	return next
+}
+
 // sanitizeProviderOwnership re-sanitizes the ownership map's provider-ID keys
 // immediately before persisting: control characters are stripped and keys are
 // bounded so a stale or hand-edited state file cannot carry hostile key bytes
-// into the next process lifetime. Values are plain booleans and need no
-// sanitization. It never mutates the input state.
+// into the next process lifetime. Values need no byte sanitization: their
+// fields are booleans, bounded numbers, and an axis enum that
+// normalizeProviderOwnershipAxes constrains to known values. Neither helper
+// ever mutates the input state.
 func sanitizeProviderOwnership(s State) State {
 	if len(s.ProviderOwnership) == 0 {
 		return s
