@@ -93,6 +93,9 @@ func TestProviderGateReconcileWithoutClock(t *testing.T) {
 		if f.journalExists() {
 			t.Fatal("dry-run wrote a journal")
 		}
+		if _, noticeErr := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(noticeErr) {
+			t.Fatalf("dry-run published a provider notice (stat err=%v)", noticeErr)
+		}
 		st := f.loadState()
 		if st.Revision != 9 || len(st.ReconcileHistory.Records) != 0 {
 			t.Fatalf("dry-run mutated state: revision=%d history=%d", st.Revision, len(st.ReconcileHistory.Records))
@@ -107,7 +110,7 @@ func TestProviderGateReconcileWithoutClock(t *testing.T) {
 		}
 	})
 
-	t.Run("gate did not consult the injected clock interface for time", func(t *testing.T) {
+	t.Run("normal path applies exactly one locked transaction without a clock", func(t *testing.T) {
 		// Publication adapter sanity: the nil-clock normal path must delegate to
 		// the real publisher exactly once per accepted transaction.
 		f := newGateFixture(t, []string{"gp"}, nil)
