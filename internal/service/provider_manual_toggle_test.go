@@ -181,6 +181,82 @@ func TestProviderOnlyManualEnableRestoresAndReenables(t *testing.T) {
 	if st3 := f3.loadState(); len(st3.ProviderOwnership) != 0 {
 		t.Fatalf("enable invented a claim: %+v", st3.ProviderOwnership)
 	}
+
+	// A signal-axis claim held by the automatic gate is released by a manual
+	// enable: the recorded baseline is restored, the claim is deleted, and
+	// neither the ownership map nor the notice debt is corrupted.
+	f4 := newGateFixture(t, []string{"gp", "pp"}, nil)
+	f4.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+	f4.seedState(6, map[string]state.ProviderState{
+		"gp": {Quota: state.QuotaNormal, Availability: state.Available},
+	}, map[string]state.ProviderOwnership{
+		"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.5, EngagedRevision: 6},
+	})
+	out4 := f4.coordinator().Enable(context.Background(), "gp")
+	if !out4.Accepted || out4.Error != nil {
+		t.Fatalf("signal-claim enable out=%+v err=%v", out4, out4.Error)
+	}
+	want4 := globalConfigWith(nil)
+	if got := f4.readGlobalConfig(); got != want4 {
+		t.Fatalf("signal-claim enable wrote the wrong bytes:\n--- got ---\n%s\n--- want ---\n%s", got, want4)
+	}
+	st4 := f4.loadState()
+	if _, held := st4.ProviderOwnership["gp"]; held {
+		t.Fatalf("signal claim not released: %+v", st4.ProviderOwnership)
+	}
+	if st4.PendingProviderNotice != nil {
+		t.Fatalf("signal-claim enable left notice debt: %+v", st4.PendingProviderNotice)
+	}
+	doc4 := readGateNotice(t, f4.desired.Operational.NoticePath)
+	if len(doc4.Providers) != 1 || doc4.Providers[0].ID != "gp" || !doc4.Providers[0].Enabled {
+		t.Fatalf("signal-claim enable notice = %+v want gp enabled=true", doc4.Providers)
+	}
+}
+
+// TestProviderOnlyManualToggleOverOperatorHeldOffField pins the notice truth
+// for the gate's own restore semantics: when quota's disable claimed an
+// operator-held-off (enabled: false) baseline, a later manual enable restores
+// that baseline — the provider stays disabled — and both the disable and the
+// enable must record enabled=false in the published notice, never the toggle
+// direction.
+func TestProviderOnlyManualToggleOverOperatorHeldOffField(t *testing.T) {
+	f := newGateFixture(t, []string{"gp", "pp"}, nil)
+	f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+	f.seedState(7, nil, nil)
+
+	out := f.coordinator().Disable(context.Background(), "gp")
+	if !out.Accepted || out.Error != nil {
+		t.Fatalf("disable out=%+v err=%v", out, out.Error)
+	}
+	if got := f.readGlobalConfig(); got != globalConfigWith(map[string]string{"gp": "false"}) {
+		t.Fatal("disable changed the operator-held-off field")
+	}
+	doc := readGateNotice(t, f.desired.Operational.NoticePath)
+	if len(doc.Providers) != 1 || doc.Providers[0].ID != "gp" || doc.Providers[0].Enabled {
+		t.Fatalf("disable notice = %+v want gp enabled=false", doc.Providers)
+	}
+	if st := f.loadState(); st.PendingProviderNotice != nil {
+		t.Fatalf("disable notice debt not cleared after publish: %+v", st.PendingProviderNotice)
+	}
+
+	ena := f.coordinator().Enable(context.Background(), "gp")
+	if !ena.Accepted || ena.Error != nil {
+		t.Fatalf("enable out=%+v err=%v", ena, ena.Error)
+	}
+	if got := f.readGlobalConfig(); got != globalConfigWith(map[string]string{"gp": "false"}) {
+		t.Fatal("enable did not restore the held-off baseline")
+	}
+	doc2 := readGateNotice(t, f.desired.Operational.NoticePath)
+	if len(doc2.Providers) != 1 || doc2.Providers[0].ID != "gp" || doc2.Providers[0].Enabled {
+		t.Fatalf("enable notice = %+v want gp enabled=false (the enable restored a held-off baseline)", doc2.Providers)
+	}
+	st2 := f.loadState()
+	if st2.PendingProviderNotice != nil {
+		t.Fatalf("enable notice debt not cleared after publish: %+v", st2.PendingProviderNotice)
+	}
+	if _, held := st2.ProviderOwnership["gp"]; held {
+		t.Fatalf("claim not released: %+v", st2.ProviderOwnership)
+	}
 }
 
 func TestProviderOnlyManualToggleRefusals(t *testing.T) {

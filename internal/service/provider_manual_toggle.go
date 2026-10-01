@@ -167,9 +167,10 @@ func (c *Coordinator) transactProviderManualToggle(ctx context.Context, observed
 			enabled[id] = !p || v
 		}
 	}
-	// A remove edit restores the absent key, which is default-enabled — so the
-	// committed value is exactly the toggle direction.
-	enabled[in.Provider] = kind == txEnable
+	// The committed value is the planned post-toggle field shape, not the
+	// toggle direction: an enable that restores a held-off baseline commits
+	// enabled=false, and a key removal commits default-enabled (true).
+	enabled[in.Provider] = !wantPresent || wantValue
 	reason := "manual routing disable"
 	if kind == txEnable {
 		reason = "manual routing enable"
