@@ -19,20 +19,6 @@ import (
 	"time"
 )
 
-func driveWaitHistory(t *testing.T, d *feasDaemon, wantReply string) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		_, hb := d.do(t, http.MethodGet, "/history", "")
-		if strings.Contains(string(hb), wantReply) {
-			return
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	t.Fatalf("history never contained %q within 30s", wantReply)
-}
-
-
 // --- fixture writing ---------------------------------------------------------
 
 // feasModelYAML renders one version-4 models entry.

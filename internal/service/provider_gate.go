@@ -41,7 +41,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/geofffranks/polytoken-quota/internal/document"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -98,7 +97,7 @@ type providerGatePlan struct {
 }
 
 // providerGateRefusal is a refused gate evaluation. Stage names the refusal
-// point (render, stage, safety, validate, publish), TargetID the registered
+// point (render, stage, validate, publish), TargetID the registered
 // root that caused it (empty for a whole-plan refusal), Err the sanitized
 // reason for the pending outcome, and Retained the dry-run keep-staging
 // diagnostic roots keyed by target ID.
@@ -121,7 +120,8 @@ type providerGateResult struct {
 
 // transactProviderGateReconcile implements the reconcile transaction for a
 // provider-only policy under the already-held lock. Dry-run evaluates the full
-// gate (analyzer, staging, validation) but publishes and saves nothing.
+// gate (staged validation through the real Polytoken binary, snapshot recheck)
+// but publishes and saves nothing.
 func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observed state.State, in transactionInput, desired policy.Desired) Outcome {
 	if in.KeepStaging && !in.DryRun {
 		return Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}
@@ -729,21 +729,6 @@ func providerFieldEdit(id string, value *bool, remove bool) reconcile.FieldEdit 
 		Enabled: value,
 		Remove:  remove,
 	}
-}
-
-// providerDocumentEdits converts gate plan edits into document edits for the
-// in-memory candidate compositions.
-func providerDocumentEdits(edits []reconcile.FieldEdit) []document.Edit {
-	out := make([]document.Edit, 0, len(edits))
-	for _, e := range edits {
-		out = append(out, document.Edit{
-			Path:   e.Path,
-			Kind:   document.Boolean,
-			Bool:   e.Enabled,
-			Remove: e.Remove,
-		})
-	}
-	return out
 }
 
 // providerEnabledField reads the live `providers.<id>.enabled` field from the

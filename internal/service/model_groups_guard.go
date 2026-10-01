@@ -11,8 +11,9 @@ package service
 // operator-owned and reports the skipped fields instead.
 //
 // Provider-only reconcile never runs this: its gate path derives edits from
-// the raw global layer and never writes tier defaults, and its analyzer
-// already pends a legacy `defaults:` key observed in a version-4 layer.
+// the raw global layer and never writes tier defaults, so whether the composed
+// candidate is valid is decided by staged validation through the real
+// Polytoken binary and the pre-publication snapshot recheck.
 
 import (
 	"os"
