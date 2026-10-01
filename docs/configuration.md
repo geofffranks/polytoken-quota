@@ -100,7 +100,8 @@ retained in their authored positions.
 | `check` | Polls enrolled, adapter-configured providers as usual. |
 | `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the safety analyzer and staged validation pass. |
 | `reconcile` | Apply provider-only gating without polling; provider state comes from the latest saved evidence. Supports `--dry-run`, `--keep-staging` (dry-run only), and `--verbose`. |
-| `routing enable/disable/reset` | Unsupported: chain-based routing is legacy behavior and a provider-only policy rejects the `routing` section. |
+| `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. |
+| `routing reset` | Unsupported: clearing every manual disable has no provider-only meaning; enable providers individually with `routing enable <provider>`. |
 | `doctor` | Maintained: policy schema, state, publication/journal, and quota findings work; no chain findings exist. |
 | `history` | Maintained: state history is independent of the policy mode. |
 | `select`, `select-eval` | Unsupported: model selection projects managed chains, which a provider-only policy does not define. |

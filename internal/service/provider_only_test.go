@@ -95,17 +95,25 @@ func TestProviderOnlyCommandCompatibilityMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("routing disable rejected", func(t *testing.T) {
+	t.Run("routing disable uses the provider toggle path", func(t *testing.T) {
 		out := withProviderOnlyPolicy(newCoordinatorSpy()).Coordinator.Disable(ctx, "codex")
-		if out.Accepted || !errors.Is(out.Error, ErrProviderOnlyUnsupported) {
-			t.Fatalf("out=%+v want unsupported", out)
+		if out.Accepted || errors.Is(out.Error, ErrProviderOnlyUnsupported) {
+			t.Fatalf("out=%+v want the provider toggle path, not the unsupported refusal", out)
+		}
+		// The spy registers no global target, so the toggle records a clear
+		// refusal instead of a silent no-op.
+		if !strings.Contains(out.Error.Error(), "registered global target") {
+			t.Fatalf("err=%v want the provider toggle target refusal", out.Error)
 		}
 	})
 
-	t.Run("routing enable rejected", func(t *testing.T) {
+	t.Run("routing enable uses the provider toggle path", func(t *testing.T) {
 		out := withProviderOnlyPolicy(newCoordinatorSpy()).Coordinator.Enable(ctx, "codex")
-		if out.Accepted || !errors.Is(out.Error, ErrProviderOnlyUnsupported) {
-			t.Fatalf("out=%+v want unsupported", out)
+		if out.Accepted || errors.Is(out.Error, ErrProviderOnlyUnsupported) {
+			t.Fatalf("out=%+v want the provider toggle path, not the unsupported refusal", out)
+		}
+		if !strings.Contains(out.Error.Error(), "registered global target") {
+			t.Fatalf("err=%v want the provider toggle target refusal", out.Error)
 		}
 	})
 

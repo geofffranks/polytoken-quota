@@ -474,22 +474,16 @@ func (c *Coordinator) transactReconcile(ctx context.Context, recovered state.Sta
 }
 
 // transactManual resolves exact mapping IDs, applies one manual transition, and
-// reconciles all targets with the Set/Clear coarse trace. The routing
-// transitions are chain-dependent: under a provider-only policy they return a
-// clear unsupported result, since a provider-only policy rejects the routing
-// section entirely and its state metadata would never be projected.
+// reconciles all targets with the Set/Clear coarse trace. Under a provider-only
+// policy, enable/disable ride the dedicated provider toggle transaction (the
+// exact providers.<id>.enabled managed field, staged, validated, and journaled
+// like the automatic provider gate), while reset keeps its unsupported result:
+// clearing every manual disable has no provider-only meaning.
 func (c *Coordinator) transactManual(ctx context.Context, recovered state.State, in transactionInput, kind transactionKind) Outcome {
 	c.step("load-policy")
 	desired, err := c.Policy.LoadPolicy()
 	if err != nil {
 		return Outcome{Accepted: false, Error: err}
-	}
-	if desired.ProviderOnly() {
-		switch kind {
-		case txDisable, txEnable, txReset:
-			return Outcome{Accepted: false, Error: providerOnlyUnsupported("routing enable/disable/reset",
-				"chain-based routing is a legacy-policy behavior; provider-only quota never reorders model chains")}
-		}
 	}
 	if kind != txReset {
 		if in.Provider == "" {
@@ -499,6 +493,13 @@ func (c *Coordinator) transactManual(ctx context.Context, recovered state.State,
 		if !ok {
 			return Outcome{Accepted: false, Error: fmt.Errorf("service: mapping %q is not configured", sanitizeFailure(in.Provider))}
 		}
+	}
+	if desired.ProviderOnly() {
+		if kind == txReset {
+			return Outcome{Accepted: false, Error: providerOnlyUnsupported("routing reset",
+				"clearing every manual provider disable has no provider-only meaning; enable providers individually with routing enable <provider>")}
+		}
+		return c.transactProviderManualToggle(ctx, recovered, in, desired, kind)
 	}
 	c.step("load-state")
 	observed := recovered
