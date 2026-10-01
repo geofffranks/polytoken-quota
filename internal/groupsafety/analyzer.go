@@ -697,8 +697,9 @@ func (r *resolver) checkReference(global *parsedLayer, ref, where, kind string) 
 }
 
 // parseLayer strictly parses the relevant subset of one layer's config.yaml:
-// an integer version exactly 4, providers enabled flags, the models catalog,
-// and modelgroups (scalar or sequence values). Duplicate keys anywhere in the
+// providers enabled flags, the models catalog, and modelgroups (scalar or
+// sequence values). The version key is not read: configs of any declared
+// version are analyzed with this same grammar. Duplicate keys anywhere in the
 // document are schema violations. Unrelated keys and provider entry fields
 // (url, kind, auth, ...) are never read. The returned string is a sanitized
 // reason for the pending-unknown verdict, empty on success.
@@ -722,15 +723,9 @@ func parseLayer(l Layer) (*parsedLayer, string) {
 	if reason := checkDuplicateKeys(root, what); reason != "" {
 		return out, reason
 	}
-	foundVersion := false
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		key, val := root.Content[i], root.Content[i+1]
 		switch key.Value {
-		case "version":
-			foundVersion = true
-			if val.Tag != "!!int" || val.Value != "4" {
-				return out, fmt.Sprintf("%s config version must be the integer 4; other versions have unproven semantics", what)
-			}
 		case "providers":
 			out.hasProviders = true
 			if val.Kind != yaml.MappingNode {
@@ -839,9 +834,6 @@ func parseLayer(l Layer) (*parsedLayer, string) {
 		case "defaults":
 			out.hasDefaults = true
 		}
-	}
-	if !foundVersion {
-		return out, fmt.Sprintf("%s config has no version key; only version 4 is analyzed", what)
 	}
 	return out, ""
 }

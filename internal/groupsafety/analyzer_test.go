@@ -649,10 +649,10 @@ modelgroups:
 	})
 }
 
-// TestAnalyzerStrictSchemaAndVersion proves the strict layer grammar: version
-// must be the integer 4, duplicate keys anywhere are ambiguous and refused,
-// project layers may carry modelgroups only, and malformed read fields fail
-// closed as pending-unknown.
+// TestAnalyzerStrictSchemaAndVersion proves the strict layer grammar: the
+// version key is not read and any config version is accepted, duplicate keys
+// anywhere are ambiguous and refused, project layers may carry modelgroups
+// only, and malformed read fields fail closed as pending-unknown.
 func TestAnalyzerStrictSchemaAndVersion(t *testing.T) {
 	valid := `version: 4
 providers:
@@ -682,9 +682,6 @@ modelgroups:
 		twoPro bool
 		reason string
 	}{
-		{name: "version 3", global: strings.Replace(valid, "version: 4", "version: 3", 1), reason: "must be the integer 4"},
-		{name: "version quoted", global: strings.Replace(valid, "version: 4", `version: "4"`, 1), reason: "must be the integer 4"},
-		{name: "version missing", global: strings.Replace(valid, "version: 4\n", "", 1), reason: "no version key"},
 		{
 			name: "duplicate group key",
 			global: strings.Replace(valid, "modelgroups:\n  g:\n    - gp/g1\n",
@@ -739,6 +736,24 @@ modelgroups:
 			wantReason(t, r, tc.reason)
 		})
 	}
+
+	t.Run("any config version is accepted", func(t *testing.T) {
+		baseline := Analyze(Input{Enrolled: []string{"gp"}, Global: Layer{ID: "global", Global: true, Config: []byte(valid)}}, "gp")
+		for _, variant := range []string{
+			strings.Replace(valid, "version: 4", "version: 5", 1),
+			strings.Replace(valid, "version: 4", `version: "4"`, 1),
+			strings.Replace(valid, "version: 4\n", "", 1),
+		} {
+			r := Analyze(Input{Enrolled: []string{"gp"}, Global: Layer{ID: "global", Global: true, Config: []byte(variant)}}, "gp")
+			wantVerdict(t, r, baseline.Verdict)
+			if len(r.GroupsAfter) != len(baseline.GroupsAfter) {
+				t.Fatalf("GroupsAfter=%v want %v", r.GroupsAfter, baseline.GroupsAfter)
+			}
+			for name, leaves := range baseline.GroupsAfter {
+				equal(t, "GroupsAfter["+name+"]", r.GroupsAfter[name], leaves)
+			}
+		}
+	})
 
 	t.Run("non-bool provider enabled flag is refused", func(t *testing.T) {
 		global := Layer{ID: "global", Global: true, Config: []byte(`version: 4
