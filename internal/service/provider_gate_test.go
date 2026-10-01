@@ -1312,3 +1312,45 @@ func fmtHash(d [32]byte) string {
 	}
 	return string(out)
 }
+
+// validationRefusalStub is a Validator that fails every candidate with a fixed
+// sanitized summary, isolating the refusal-message rendering from the runner.
+type validationRefusalStub struct{ result validate.Result }
+
+func (v validationRefusalStub) Validate(context.Context, staging.Candidate, time.Duration) validate.Result {
+	return v.result
+}
+
+func validationRefusalResult() validate.Result {
+	return validate.Result{StartupValid: false, Error: &validate.CommandError{
+		Stage:   validate.ConfigValidate,
+		Summary: "synthetic reason text",
+	}}
+}
+
+// TestProviderGateValidationRefusalCarriesSummary proves the provider-gate
+// validation refusal renders the sanitized CommandError summary, mirroring
+// pendingValidate's normal-path rendering — the operator sees WHY the stage
+// refused, not just which stage.
+func TestProviderGateValidationRefusalCarriesSummary(t *testing.T) {
+	f := newSignalFixture(t, []string{"gp", "pp"})
+	c := f.coordinator()
+	c.Validate = validationRefusalStub{result: validationRefusalResult()}
+	now := f.clock.t
+	f.seedState(7, map[string]state.ProviderState{
+		"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp overdrawn
+		"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+	}, nil)
+
+	out := c.Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.PendingCount() == 0 {
+		t.Fatalf("out=%+v want a pending refusal", out)
+	}
+	summary := out.Targets[0].Pending.Summary
+	if !strings.Contains(summary, "synthetic reason text") {
+		t.Fatalf("summary=%q want the sanitized validation summary", summary)
+	}
+	if !strings.Contains(summary, "at config_validate: synthetic reason text") {
+		t.Fatalf("summary=%q want the stage and summary in pendingValidate's shape", summary)
+	}
+}

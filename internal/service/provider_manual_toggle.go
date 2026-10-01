@@ -130,7 +130,9 @@ func (c *Coordinator) transactProviderManualToggle(ctx context.Context, observed
 		_ = candidate.Cleanup()
 		reason := fmt.Errorf("service: staged validation refused the provider %s toggle for target %s", toggleVerb(kind), sanitizeFailure(targetID(global)))
 		if validation.Error != nil {
-			reason = fmt.Errorf("service: staged validation refused the provider %s toggle for target %s at %s", toggleVerb(kind), sanitizeFailure(targetID(global)), validation.Error.Stage)
+			// Mirror pendingValidate: the sanitized CommandError summary
+			// is the operator's "why" — stage alone is not diagnosable.
+			reason = fmt.Errorf("service: staged validation refused the provider %s toggle for target %s at %s: %s", toggleVerb(kind), sanitizeFailure(targetID(global)), validation.Error.Stage, sanitizeFailure(validation.Error.Summary))
 		}
 		return Outcome{Accepted: false, Error: reason}
 	}

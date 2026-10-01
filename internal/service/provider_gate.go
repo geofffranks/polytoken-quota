@@ -340,7 +340,9 @@ func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.D
 		if !validation.StartupValid {
 			reason := fmt.Errorf("service: staged validation refused provider gating for target %s", sanitizeFailure(targetID(rt)))
 			if validation.Error != nil {
-				reason = fmt.Errorf("service: staged validation refused provider gating for target %s at %s", sanitizeFailure(targetID(rt)), validation.Error.Stage)
+				// Mirror pendingValidate: the sanitized CommandError summary
+				// is the operator's "why" — stage alone is not diagnosable.
+				reason = fmt.Errorf("service: staged validation refused provider gating for target %s at %s: %s", sanitizeFailure(targetID(rt)), validation.Error.Stage, sanitizeFailure(validation.Error.Summary))
 			}
 			retained := map[string]string{}
 			if keepStaging {

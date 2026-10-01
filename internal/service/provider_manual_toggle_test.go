@@ -433,3 +433,25 @@ func TestProviderToggleInputCurrentRejectsChangedField(t *testing.T) {
 		t.Fatalf("absent-key match refused: %v", err)
 	}
 }
+
+// TestProviderToggleValidationRefusalCarriesSummary proves the manual-toggle
+// validation refusal renders the sanitized CommandError summary, mirroring
+// pendingValidate's normal-path rendering.
+func TestProviderToggleValidationRefusalCarriesSummary(t *testing.T) {
+	f := newGateFixture(t, []string{"gp", "pp"}, nil)
+	f.seedState(7, nil, nil)
+	c := f.coordinator()
+	c.Validate = validationRefusalStub{result: validationRefusalResult()}
+
+	out := c.Disable(context.Background(), "gp")
+	if out.Accepted || out.Error == nil {
+		t.Fatalf("out=%+v want a refusal with an error", out)
+	}
+	msg := out.Error.Error()
+	if !strings.Contains(msg, "synthetic reason text") {
+		t.Fatalf("error=%q want the sanitized validation summary", msg)
+	}
+	if !strings.Contains(msg, "at config_validate: synthetic reason text") {
+		t.Fatalf("error=%q want the stage and summary in pendingValidate's shape", msg)
+	}
+}
