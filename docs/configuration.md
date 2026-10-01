@@ -77,9 +77,9 @@ retained in their authored positions.
   provider-only policy targets.
 - `projects` entries register additional roots with exactly `id` and `root` —
   the same registration grammar as legacy mode, and a first-class part of the
-  provider-only safety model: the gate's analyzer evaluates every registered
-  global+project root, and a project-layer modelgroup leaf can keep a group
-  usable when all global leaves for it are gated off. Legacy project FIELDS are
+  provider-only gate: every registered root's composed candidate is staged and
+  validated (config validate + doctor) before a disable publishes. Legacy
+  project FIELDS are
   rejected in provider-only mode: a project entry carrying anything beyond
   `id` and `root` (for example `full`/`mini`/`nano`/`classifier` chains or
   `definitions`) fails to load.
@@ -98,7 +98,7 @@ retained in their authored positions.
 | `init --provider-only --preview` | Read-only migration preview (see below). |
 | `status` | Provider-level status with `provider_only: true`; route/chain sections are empty by design and the text view says so. |
 | `check` | Polls enrolled, adapter-configured providers as usual. |
-| `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the safety analyzer and staged validation pass. |
+| `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the signal gate and staged validation pass. |
 | `reconcile` | Apply provider-only gating without polling; provider state comes from the latest saved evidence. Supports `--dry-run`, `--keep-staging` (dry-run only), and `--verbose`. |
 | `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. |
 | `routing reset` | Unsupported: clearing every manual disable has no provider-only meaning; enable providers individually with `routing enable <provider>`. |
@@ -260,10 +260,9 @@ projects:
     root: /home/user/src/cli-tool/.polytoken
 ```
 
-Each registered root gives the provider-only gate's safety analyzer the
-project-layer modelgroup leaves and facet/subagent references it needs to
-prove a disable safe; register every root whose project layers carry
-modelgroup or definition content.
+Each registered root's composed candidate is staged and validated (config
+validate + doctor) before a disable publishes; register every root whose
+configuration must be validated before the gate changes provider state.
 
 | Field | Set it | Meaning |
 |-------|-------|---------|

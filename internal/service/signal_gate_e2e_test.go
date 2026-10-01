@@ -206,74 +206,11 @@ func TestSignalPoolAllHotSkipReleasesSignalClaims(t *testing.T) {
 	}
 }
 
-// TestSignalGateAnalyzerRefusal proves AC.3: a signal-disable the analyzer
-// proves unsafe, or cannot prove either way (pending-unknown), refuses the
-// pass with no bytes and no persisted claim.
-func TestSignalGateAnalyzerRefusal(t *testing.T) {
-	t.Run("unsafe signal disable is refused", func(t *testing.T) {
-		f := newSignalFixture(t, []string{"gp", "pp"})
-		cfg := strings.Replace(globalConfigWith(nil), "polytoken:default_model_full: zz/z1", "polytoken:default_model_full: pp/p1", 1)
-		f.writeGlobalConfig(cfg)
-		now := f.clock.t
-		f.seedState(5, map[string]state.ProviderState{
-			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
-			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // pp overdrawn, owns the tier default
-		}, nil)
-
-		out := f.coordinator().Reconcile(context.Background(), false, false, false)
-		if !out.Accepted || out.PendingCount() != 1 {
-			t.Fatalf("out=%+v want one pending refusal", out)
-		}
-		if !strings.Contains(out.Targets[0].Pending.Summary, "unsafe") {
-			t.Fatalf("summary=%q want an unsafe verdict", out.Targets[0].Pending.Summary)
-		}
-		if got := f.readGlobalConfig(); got != cfg {
-			t.Fatal("unsafe signal candidate was published")
-		}
-		if len(f.runner.calls) != 0 {
-			t.Fatalf("staging ran despite the analyzer refusal: %v", f.runner.calls)
-		}
-		if f.journalExists() {
-			t.Fatal("journal written for a refused publication")
-		}
-		if _, err := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(err) {
-			t.Fatalf("refused pass emitted a notice: %v", err)
-		}
-		f.requireNoPendingEdit(t, f.loadState())
-	})
-
-	t.Run("pending-unknown signal disable is refused", func(t *testing.T) {
-		f := newSignalFixture(t, []string{"gp", "pp"})
-		// The failover group carries a ghost leaf: the analyzer cannot prove
-		// the group survives gp's disable, so the write is never authorized.
-		cfg := strings.Replace(globalConfigWith(nil), "failover: [gp/g1, pp/p1, zz/z1]", "failover: [gp/g1, ghost/undefined, zz/z1]", 1)
-		f.writeGlobalConfig(cfg)
-		now := f.clock.t
-		f.seedState(5, map[string]state.ProviderState{
-			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp overdrawn
-			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
-		}, nil)
-
-		out := f.coordinator().Reconcile(context.Background(), false, false, false)
-		if !out.Accepted || out.PendingCount() != 1 {
-			t.Fatalf("out=%+v want one pending refusal", out)
-		}
-		if !strings.Contains(out.Targets[0].Pending.Summary, "pending-unknown") {
-			t.Fatalf("summary=%q want a pending-unknown verdict", out.Targets[0].Pending.Summary)
-		}
-		if got := f.readGlobalConfig(); got != cfg {
-			t.Fatal("pending-unknown signal candidate was published")
-		}
-		f.requireNoPendingEdit(t, f.loadState())
-	})
-}
-
 // TestSignalGateUnresolvedDefinitionReferencesAreAdvisory mirrors the live
 // incident shape: a facet's primary model is a model_group polytoken-ref
 // naming a group no layer defines, and its fallback list names an undefined
-// model. Definition-reference uncertainty is advisory in the safety
-// analyzer, so the signal-gated disable proceeds and publishes instead of
-// being refused as pending-unknown.
+// model. Definition-reference uncertainty is no signal evidence and gates
+// nothing, so the signal-gated disable proceeds and publishes.
 func TestSignalGateUnresolvedDefinitionReferencesAreAdvisory(t *testing.T) {
 	f := newSignalFixture(t, []string{"gp", "pp"})
 	if err := os.MkdirAll(filepath.Join(f.globalRoot, "facets"), 0o700); err != nil {
@@ -305,6 +242,77 @@ func TestSignalGateUnresolvedDefinitionReferencesAreAdvisory(t *testing.T) {
 	if !ok || !claim.Owned {
 		t.Fatalf("gp ownership claim = %+v, want a signal claim", claim)
 	}
+}
+
+// TestSignalGatePublishesWithUnresolvableGroups mirrors the operator incident
+// that removed the offline safety analyzer: configured groups referencing
+// models no layer defines, plus an already-empty group. The signal gate
+// decides, the candidate is staged and validated through the real runner
+// shape, and the disable publishes with an ownership claim and a provider
+// notice. The dry-run variant of the same shape evaluates through staging and
+// validation but publishes and saves nothing.
+func TestSignalGatePublishesWithUnresolvableGroups(t *testing.T) {
+	unresolvable := strings.Replace(globalConfigWith(nil),
+		"modelgroups:\n",
+		"modelgroups:\n  ai_workflow: [ghost/undefined-model, gp/g1]\n  drained: []\n", 1)
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	seed := map[string]state.ProviderState{
+		"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp overdrawn
+		"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+	}
+
+	t.Run("signal disable publishes through staged validation", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		f.writeGlobalConfig(unresolvable)
+		f.seedState(7, seed, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v want the disable published", out)
+		}
+		want := strings.Replace(before, "    # operator-set value\n    enabled: true", "    # operator-set value\n    enabled: false", 1)
+		if got := f.readGlobalConfig(); got != want {
+			t.Fatalf("byte mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+		}
+		st := f.loadState()
+		claim, ok := st.ProviderOwnership["gp"]
+		if !ok || !claim.Owned {
+			t.Fatalf("gp ownership claim = %+v, want a signal claim", claim)
+		}
+		doc := readGateNotice(t, f.desired.Operational.NoticePath)
+		wantProviders := []notice.ProviderState{
+			{ID: "gp", Enabled: false, Reason: "signal-gated (-0.72 <= +0.00)"},
+		}
+		if len(doc.Providers) != len(wantProviders) || doc.Providers[0] != wantProviders[0] {
+			t.Fatalf("notice providers = %+v", doc.Providers)
+		}
+	})
+
+	t.Run("dry run stages and validates but publishes and saves nothing", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		f.writeGlobalConfig(unresolvable)
+		f.seedState(7, seed, nil)
+
+		out := f.coordinator().Reconcile(context.Background(), true, false, false)
+		if !out.Accepted || out.PendingCount() != 0 || out.Revision != 7 {
+			t.Fatalf("out=%+v want a clean evaluated dry run", out)
+		}
+		if got := f.readGlobalConfig(); got != unresolvable {
+			t.Fatal("dry run edited the live config")
+		}
+		if f.journalExists() {
+			t.Fatal("dry run wrote a journal")
+		}
+		st := f.loadState()
+		if st.Revision != 7 || len(st.ProviderOwnership) != 0 || len(st.ReconcileHistory.Records) != 0 {
+			t.Fatalf("dry run mutated state: revision=%d ownership=%+v history=%d", st.Revision, st.ProviderOwnership, len(st.ReconcileHistory.Records))
+		}
+		joined := strings.Join(f.runner.calls, "\n")
+		if !strings.Contains(joined, "quota-stage-global") {
+			t.Fatalf("dry run did not stage/validate the global root:\n%s", joined)
+		}
+	})
 }
 
 // TestSignalGateRecoveryRestoresBaseline proves AC.4 for both restore shapes:

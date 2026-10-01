@@ -11,38 +11,37 @@ package service
 // preserved by the document editor.
 //
 // Before any single global-file publication the COMBINED provider changes are
-// evaluated: the read-only safety analyzer classifies every proposed disable
-// against the global-alone layer and every registered global+project root, the
-// composed candidate is staged and validated (config validate + doctor) for the
-// global root and every registered project root — each project candidate sees
-// the composed global layer, never its live bytes — and the input snapshots are
-// re-verified immediately before publication. Publication is exactly one global
-// journal transaction whose Next state carries the intended provider-ownership
-// snapshot, so roll-forward adopts claims atomically with the live bytes they
-// describe.
+// evaluated: the composed candidate is staged and validated (config validate +
+// doctor) for the global root and every registered project root — each project
+// candidate sees the composed global layer, never its live bytes — and the
+// input snapshots are re-verified immediately before publication. Whether a
+// provider may be gated off is the signal/durable gate's decision alone: the
+// real Polytoken binary is the validator of the composed configuration, and a
+// rejected validation retains the stale active selection. Publication is exactly
+// one global journal transaction whose Next state carries the intended
+// provider-ownership snapshot, so roll-forward adopts claims atomically with
+// the live bytes they describe.
 //
-// On refusal (analyzer unsafe or pending-unknown, staging/validation failure,
-// snapshot change, publish error) no file is edited, no notice is published,
-// the target outcome records a sanitized pending reason, and quota
-// observations/history stay independent of the failed edit. New ownership
-// claims never persist without the bytes that back them: only refreshed
-// conflict markers persist on a refusal.
+// On refusal (staging/validation failure, snapshot change, publish error) no
+// file is edited, no notice is published, the target outcome records a
+// sanitized pending reason, and quota observations/history stay independent of
+// the failed edit. New ownership claims never persist without the bytes that
+// back them: only refreshed conflict markers persist on a refusal.
 //
-// This path runs entirely under the coordinator's transaction lock. It never
-// calls PreflightProviderDisables (which acquires the lock itself); both share
-// helpers instead, so the lock is never nested.
+// This path runs entirely under the coordinator's transaction lock.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/geofffranks/polytoken-quota/internal/document"
-	"github.com/geofffranks/polytoken-quota/internal/groupsafety"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -191,16 +190,20 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 		return res
 	}
 
-	c.step("read-layers")
-	layers := make([]groupsafety.Layer, len(targets))
+	c.step("read-sources")
+	// Snapshot every registered root's managed sources for the publish-time
+	// input recheck, and read the global config bytes the gate plans against.
 	var snapshots []ProviderSourceSnapshot
+	var globalConfig []byte
 	for i, rt := range targets {
-		layer, readErr := groupsafety.ReadLayer(rt.Resolved.ID, rt.Resolved.CanonicalRoot, rt.Resolved.Global)
-		if readErr != nil {
-			globalPending("stage", fmt.Errorf("service: read registered root %s: %w", sanitizeFailure(rt.Resolved.ID), readErr))
-			return res
+		if i == 0 {
+			cfg, readErr := os.ReadFile(filepath.Join(rt.Resolved.CanonicalRoot, "config.yaml"))
+			if readErr != nil {
+				globalPending("stage", fmt.Errorf("service: read registered root %s: %w", sanitizeFailure(rt.Resolved.ID), readErr))
+				return res
+			}
+			globalConfig = cfg
 		}
-		layers[i] = layer
 		grown, snapErr := appendProviderSnapshotsValue(snapshots, rt.Resolved.ID, rt.Resolved.CanonicalRoot)
 		if snapErr != nil {
 			globalPending("stage", snapErr)
@@ -217,7 +220,7 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 	verdicts := routing.SignalGateVerdicts(signalGateInputs(desired, observed), now)
 
 	c.step("plan-provider-gate")
-	plan, planErr := planProviderGate(desired, observed, layers[0].Config, now, verdicts, revision)
+	plan, planErr := planProviderGate(desired, observed, globalConfig, now, verdicts, revision)
 	if planErr != nil {
 		res.Plan = plan
 		globalPending("render", planErr)
@@ -254,7 +257,7 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 	}
 
 	c.step("evaluate-provider-gate")
-	candidate, evalRefusal := c.evaluateProviderGate(ctx, desired, targets, layers, snapshots, plan, revision, keepStaging)
+	candidate, evalRefusal := c.evaluateProviderGate(ctx, desired, targets, snapshots, plan, revision, keepStaging)
 	if evalRefusal != nil {
 		res.Refusal = evalRefusal
 		res.Outcomes = providerGateRefusalOutcomes(targets, evalRefusal, revision)
@@ -300,23 +303,15 @@ func appendProviderSnapshotsValue(snapshots []ProviderSourceSnapshot, id, root s
 	return holder.Snapshots, nil
 }
 
-// evaluateProviderGate runs the three write gates over the combined plan:
-// the analyzer for every proposed disable (global-alone plus every registered
-// global+project root, composed incrementally in provider order), staged
-// config-validate+doctor for the global root and every project root with the
-// composed global layer, and the input-snapshot recheck. On success it returns
-// the validated GLOBAL candidate (cleanup is the caller's responsibility); on
-// refusal the candidate is empty and every staged artifact has been removed
-// (except dry-run keep-staging retention, reported in the refusal).
-func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.Desired, targets []RegisteredTarget, layers []groupsafety.Layer, snapshots []ProviderSourceSnapshot, plan providerGatePlan, revision uint64, keepStaging bool) (staging.Candidate, *providerGateRefusal) {
-	// Gate 1: the read-only safety analyzer over the combined changes.
-	if len(plan.Disables) > 0 {
-		if err := c.analyzeProviderDisables(desired, layers, plan); err != nil {
-			return staging.Candidate{}, &providerGateRefusal{Stage: "safety", Err: err}
-		}
-	}
-
-	// Gate 2: staged validation of the composed candidate on every registered
+// evaluateProviderGate runs the two write gates over the combined plan:
+// staged config-validate+doctor for the global root and every project root
+// with the composed global layer, and the input-snapshot recheck. On success
+// it returns the validated GLOBAL candidate (cleanup is the caller's
+// responsibility); on refusal the candidate is empty and every staged
+// artifact has been removed (except dry-run keep-staging retention, reported
+// in the refusal).
+func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.Desired, targets []RegisteredTarget, snapshots []ProviderSourceSnapshot, plan providerGatePlan, revision uint64, keepStaging bool) (staging.Candidate, *providerGateRefusal) {
+	// Gate 1: staged validation of the composed candidate on every registered
 	// root. The global candidate is kept alive for publication; every project
 	// candidate is cleaned after its validation. Plans carry ProviderOnly so
 	// staging publishes the raw global bytes plus the exact edits.
@@ -367,49 +362,13 @@ func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.D
 		}
 	}
 
-	// Gate 3: the assessed input must still be the live input immediately
+	// Gate 2: the assessed input must still be the live input immediately
 	// before publication.
 	if err := RecheckProviderPreflight(ProviderPreflight{Snapshots: snapshots}); err != nil {
 		_ = globalCandidate.Cleanup()
 		return staging.Candidate{}, &providerGateRefusal{Stage: "publish", Err: err}
 	}
 	return globalCandidate, nil
-}
-
-// analyzeProviderDisables classifies every proposed disable against the
-// combined plan: each disable is analyzed against the composed candidate with
-// every OTHER planned edit applied (so a same-pass restore adds availability
-// and an earlier same-pass disable removes it), global-alone first and then
-// once per registered global+project root. Any unsafe or pending-unknown
-// verdict refuses the whole plan.
-func (c *Coordinator) analyzeProviderDisables(desired policy.Desired, layers []groupsafety.Layer, plan providerGatePlan) error {
-	enrolled := sortedProviderIDs(desired)
-	for _, id := range plan.Disables {
-		inputEdits := make([]reconcile.FieldEdit, 0, len(plan.Edits))
-		for _, e := range plan.Edits {
-			if len(e.Path) >= 2 && e.Path[1] == id {
-				continue
-			}
-			inputEdits = append(inputEdits, e)
-		}
-		inputConfig, err := document.EditYAML(layers[0].Config, providerDocumentEdits(inputEdits))
-		if err != nil {
-			return fmt.Errorf("service: compose provider gate candidate: %w", err)
-		}
-		globalLayer := layers[0]
-		globalLayer.Config = inputConfig
-		report := groupsafety.Report{Verdict: groupsafety.Safe, Reasons: []string{}}
-		input := groupsafety.Input{Enrolled: enrolled, Global: globalLayer}
-		report = mergeProviderReport(report, groupsafety.Analyze(input, id))
-		for _, project := range layers[1:] {
-			rootInput := groupsafety.Input{Enrolled: enrolled, Global: globalLayer, Projects: []groupsafety.Layer{project}}
-			report = mergeProviderReport(report, groupsafety.Analyze(rootInput, id))
-		}
-		if report.Verdict != groupsafety.Safe {
-			return fmt.Errorf("service: provider %q disable is %s: %s", sanitizeFailure(id), report.Verdict, summarizeSafetyReasons(report.Reasons))
-		}
-	}
-	return nil
 }
 
 // publishProviderGate commits the single global journal transaction. The
@@ -916,14 +875,4 @@ func providerGateAppliedOutcomes(targets []RegisteredTarget, revision uint64, pr
 		out = append(out, o)
 	}
 	return out
-}
-
-// summarizeSafetyReasons bounds analyzer reasons to a deterministic, sanitized
-// summary for the pending outcome.
-func summarizeSafetyReasons(reasons []string) string {
-	const maxReasons = 6
-	if len(reasons) > maxReasons {
-		return fmt.Sprintf("%s; and %d more", strings.Join(reasons[:maxReasons], "; "), len(reasons)-maxReasons)
-	}
-	return strings.Join(reasons, "; ")
 }

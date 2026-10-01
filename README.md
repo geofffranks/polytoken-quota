@@ -373,7 +373,7 @@ Offline repository tests verify protocol handling, selection, persistence bounda
 | `select-eval --policy PATH --fixtures PATH --live [--json]` | Operator-authorized rubric evaluation; never invoked by normal selection or tests. |
 | `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's status/reason, raw per-window quota numbers, next resets, compact target/source route rows with first desired/effective models, and a pending-config warning pointing at `doctor`. `--json` additionally retains ranking fields, route provenance, and complete desired/effective chains. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving (including provider-only gating), emit JSON, or suppress all output (for cron/launchd/systemd). |
-| `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed fields; in provider-only mode gates enrolled providers after safety analysis and staged validation. Quiet by default. `--keep-staging` is dry-run only; retained candidates may contain merged configuration. |
+| `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed fields; in provider-only mode gates enrolled providers after staged validation of the composed candidate. Quiet by default. `--keep-staging` is dry-run only; retained candidates may contain merged configuration. |
 | `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
 | `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |

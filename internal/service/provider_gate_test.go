@@ -64,8 +64,6 @@ type gateFixture struct {
 	clock                            fixedClock
 	projects                         []string
 	enrolled                         []string
-	// disabled tier default for the unsafe case: enrolling pp makes its
-	// disable provably unsafe because pp owns the tier default leaf.
 	globalConfig string
 }
 
@@ -641,38 +639,6 @@ func TestProviderGateCombinedMultiProviderSingleTransaction(t *testing.T) {
 	}
 }
 
-func TestProviderGateNoEditOnUnsafeCandidate(t *testing.T) {
-	// Enrolling pp makes its disable provably unsafe: pp owns the tier default
-	// leaf, and the observed binary rejects such reloads wholesale.
-	f := newGateFixture(t, []string{"pp"}, nil)
-	cfg := strings.Replace(globalConfigWith(nil), "polytoken:default_model_full: zz/z1", "polytoken:default_model_full: pp/p1", 1)
-	f.writeGlobalConfig(cfg)
-	f.seedState(5, map[string]state.ProviderState{"pp": {Quota: state.QuotaExhausted, Availability: state.Available}}, nil)
-	before := cfg
-
-	out := f.coordinator().Reconcile(context.Background(), false, false, false)
-	if !out.Accepted || out.PendingCount() != 1 {
-		t.Fatalf("out=%+v want one pending refusal", out)
-	}
-	summary := out.Targets[0].Pending.Summary
-	if !strings.Contains(summary, "unsafe") {
-		t.Fatalf("summary=%q want an unsafe safety verdict", summary)
-	}
-	if got := f.readGlobalConfig(); got != before {
-		t.Fatal("unsafe candidate was published")
-	}
-	if len(f.runner.calls) != 0 {
-		t.Fatalf("staging ran despite the analyzer refusal: %v", f.runner.calls)
-	}
-	if f.journalExists() {
-		t.Fatal("journal written for a refused publication")
-	}
-	if _, err := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(err) {
-		t.Fatalf("unsafe candidate emitted a provider notice: %v", err)
-	}
-	f.requireNoPendingEdit(t, f.loadState())
-}
-
 func TestProviderGateRegisteredProjectSafety(t *testing.T) {
 	t.Run("project roots are evaluated with the composed global layer", func(t *testing.T) {
 		f := newGateFixture(t, []string{"gp"}, []string{"project-a", "project-b"})
@@ -936,8 +902,9 @@ func TestProviderGateCheckReconcileQuotaHistoryIndependent(t *testing.T) {
 	t.Run("check --reconcile keeps the poll independent when the gate refuses", func(t *testing.T) {
 		f := newGateFixture(t, []string{"pp"}, nil)
 		f.desired.Providers[policy.MappingID("pp")] = policy.Mapping{Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: 30 * time.Minute, BalanceGroup: "default", Weight: 1}}
-		// Make the pp disable provably unsafe so the gate refuses.
-		cfg := strings.Replace(globalConfigWith(nil), "polytoken:default_model_full: zz/z1", "polytoken:default_model_full: pp/p1", 1)
+		// A staged-validation failure refuses the pp disable.
+		f.runner.failContains = "quota-stage-global"
+		cfg := globalConfigWith(nil)
 		f.writeGlobalConfig(cfg)
 		f.seedState(6, map[string]state.ProviderState{"pp": {Quota: state.QuotaExhausted, Availability: state.Available}}, nil)
 
