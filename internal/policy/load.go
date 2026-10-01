@@ -76,7 +76,8 @@ func loadBytes(data []byte) (Desired, error) {
 			return Desired{}, fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			Models: map[string]ModelBaseline{},
+			Models:     map[string]ModelBaseline{},
+			KeepEnabled: mw.KeepEnabled,
 		}
 		for _, entry := range mw.Models {
 			base := entry.name
@@ -428,7 +429,7 @@ func loadProviderOnly(w docWire) (Desired, error) {
 		if len(mw.Models) > 0 {
 			return Desired{}, fmt.Errorf("policy: provider-only mapping %q must not enumerate models (remove the legacy models field)", idStr)
 		}
-		m := Mapping{}
+		m := Mapping{KeepEnabled: mw.KeepEnabled}
 		if mw.Quota != nil {
 			if !mw.Quota.adapterSet || strings.TrimSpace(mw.Quota.Adapter) == "" {
 				names := adapterNames()
@@ -527,8 +528,9 @@ func providerOnlyProjectRoots(wire []projectWire) ([]Target, error) {
 }
 
 type mappingWire struct {
-	Models []modelWire `yaml:"models"`
-	Quota  *quotaWire  `yaml:"quota"`
+	Models      []modelWire `yaml:"models"`
+	Quota       *quotaWire  `yaml:"quota"`
+	KeepEnabled bool        `yaml:"keep_enabled"`
 }
 
 // modelWire is one entry in a mapping's models sequence. It accepts a bare name
@@ -628,6 +630,9 @@ type quotaWire struct {
 	MonthlyBudgetUSD float64       `yaml:"monthly_budget_usd"`
 	Mode             string        `yaml:"mode"`
 	Schedule         *scheduleWire `yaml:"schedule"`
+	// SignalGate is the strict sub-decode of the optional provider-only
+	// signal_gate block; nil when the key is absent.
+	SignalGate       *signalGateWire `yaml:"signal_gate"`
 	hasFields        bool
 	monthlyBudgetSet bool
 	adapterSet       bool
@@ -654,6 +659,67 @@ func (q *quotaWire) UnmarshalYAML(value *yaml.Node) error {
 
 func (q *quotaWire) hasAnyField() bool {
 	return q != nil && q.hasFields
+}
+
+// signalGateWire is the on-disk shape of a mapping's `quota.signal_gate`
+// section. Unlike the surrounding lenient quota block — plain decoding so
+// existing files never tighten — signal_gate is decoded strictly: unknown
+// keys, duplicate keys, non-mapping shapes, and explicit null values are all
+// rejected, mirroring the selection section's grammar. Decoding errors are
+// fixed strings that name the allowed grammar but never echo document-derived
+// values back into diagnostics.
+type signalGateWire struct {
+	Enabled   *bool
+	Threshold float64
+	// enabledSet/thresholdSet distinguish an explicit key (including an
+	// explicit empty value, which must be rejected) from an omitted one,
+	// which defaults.
+	enabledSet   bool
+	thresholdSet bool
+}
+
+func (p *signalGateWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Tag == "!!null" {
+		return nil // `signal_gate:` with no value: every key defaults
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("policy: signal_gate must be a mapping")
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "enabled":
+			if p.enabledSet {
+				return errors.New("policy: signal_gate: duplicate enabled key")
+			}
+			p.enabledSet = true
+			if value.Content[i+1].ShortTag() == "!!null" {
+				// An explicit `enabled: null` (also ~ and aliases to null) is
+				// not a boolean: yaml would silently decode it as the zero
+				// value. Reject it with the same fixed, non-echoing error as
+				// any other non-boolean value.
+				return errors.New("policy: signal_gate: enabled must be a boolean")
+			}
+			var b bool
+			if err := value.Content[i+1].Decode(&b); err != nil {
+				return errors.New("policy: signal_gate: enabled must be a boolean")
+			}
+			p.Enabled = &b
+		case "threshold":
+			if p.thresholdSet {
+				return errors.New("policy: signal_gate: duplicate threshold key")
+			}
+			p.thresholdSet = true
+			if value.Content[i+1].ShortTag() == "!!null" {
+				return errors.New("policy: signal_gate: threshold must be a non-positive number")
+			}
+			if err := value.Content[i+1].Decode(&p.Threshold); err != nil {
+				return errors.New("policy: signal_gate: threshold must be a non-positive number")
+			}
+		default:
+			return errors.New("policy: signal_gate: unknown key (want enabled or threshold)")
+		}
+	}
+	return nil
 }
 
 // scheduleWire is the on-disk shape of a peak schedule. Peak windows are
@@ -896,6 +962,14 @@ func quotaFromWire(mappingID, explicitAdapter string, w *quotaWire) (*QuotaConfi
 	if w == nil {
 		w = &quotaWire{}
 	}
+	// signal_gate is a provider-only gating concept. Legacy mode keeps
+	// rank-demotion-only semantics (approved plan non-goal), and a legacy
+	// file cannot carry the key today (it was never a recognized quota field),
+	// so accepting it there could only ever mean silently ignoring operator
+	// intent: reject it instead.
+	if explicitAdapter == "" && w.SignalGate != nil {
+		return nil, fmt.Errorf("policy: mapping %q: signal_gate is only valid in provider-only mode", mappingID)
+	}
 	// quota.mode selects the Anthropic source: "api" (default, the Admin
 	// cost-report adapter) or "subscription" (the experimental OAuth usage
 	// adapter). It is only meaningful for the anthropic adapters.
@@ -960,6 +1034,21 @@ func quotaFromWire(mappingID, explicitAdapter string, w *quotaWire) (*QuotaConfi
 			return nil, err
 		}
 		qc.Schedule = s
+	}
+	// Resolve signal gating so the in-memory config matches its struct docs:
+	// an absent block (or any omitted key within it) means gating on at the
+	// documented DefaultSignalGateThreshold (the projected-exhaustion line).
+	qc.SignalGate = DefaultSignalGate()
+	if w.SignalGate != nil {
+		if w.SignalGate.Enabled != nil && !*w.SignalGate.Enabled {
+			qc.SignalGate.Disabled = true
+		}
+		if w.SignalGate.thresholdSet {
+			if math.IsNaN(w.SignalGate.Threshold) || math.IsInf(w.SignalGate.Threshold, 0) || w.SignalGate.Threshold > 0 {
+				return nil, fmt.Errorf("policy: mapping %q: signal_gate threshold must be finite and non-positive", mappingID)
+			}
+			qc.SignalGate.Threshold = w.SignalGate.Threshold
+		}
 	}
 	return qc, nil
 }

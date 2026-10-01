@@ -124,6 +124,12 @@ type ProviderDetail struct {
 	MappingID string
 	Mode      Mode
 	Reason    string
+	// Additive gate attribution (provider-only pace gating): the axis holding
+	// the provider's enabled field off at record time, and for pace claims the
+	// engaged threshold and revision. Zero values mean no attributed gate.
+	GateAxis            string
+	GateThreshold       float64
+	GateEngagedRevision uint64
 }
 type RankDetail struct {
 	MappingID   string
@@ -425,6 +431,14 @@ func SanitizeRecordTemplate(in RecordTemplate) RecordTemplate {
 	for _, p := range providers {
 		p.MappingID = sanitizeIdentifier(p.MappingID)
 		p.Reason = sanitizeText(p.Reason)
+		// The gate axis is an enum, not free text: an unrecognized value
+		// degrades to the legacy axis with its attribution cleared, mirroring
+		// the state load's normalization.
+		if !ValidOwnershipAxis(p.GateAxis) {
+			p.GateAxis = OwnershipAxisLegacy
+			p.GateThreshold = 0
+			p.GateEngagedRevision = 0
+		}
 		out.Providers = append(out.Providers, p)
 	}
 	ranks := append([]RankDetail(nil), in.Ranks...)

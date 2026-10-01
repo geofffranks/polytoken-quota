@@ -98,13 +98,13 @@ var helpDocs = map[string]helpDoc{
 	},
 	"routing enable": {
 		short: "Enable routing for a provider",
-		long:  "Enable routing for the specified provider.",
+		long:  "Enable routing for the specified provider. Overrides keep_enabled (that flag constrains automatic gating only).",
 		usage: []string{"polytoken-quota routing enable <provider>"},
 		args:  []flagDoc{{"<provider>", "Provider mapping ID"}},
 	},
 	"routing disable": {
 		short: "Disable routing for a provider",
-		long:  "Disable routing for the specified provider.",
+		long:  "Disable routing for the specified provider. An explicit operator disable overrides keep_enabled.",
 		usage: []string{"polytoken-quota routing disable <provider>"},
 		args:  []flagDoc{{"<provider>", "Provider mapping ID"}},
 	},

@@ -255,6 +255,10 @@ func (st Store) Load() (State, error) {
 	if s.Targets == nil {
 		s.Targets = map[string]TargetState{}
 	}
+	// An unknown ownership axis degrades to legacy-claim semantics instead of
+	// failing the load: the claim's owned-expected-off meaning survives and
+	// recovery is never blocked by an unrecognized attribution value.
+	s = normalizeProviderOwnershipAxes(s)
 	if s.NextArrivalSequence == 0 {
 		maxArrival := uint64(0)
 		for _, ps := range s.Providers {
@@ -294,6 +298,7 @@ func (st Store) Save(s State) error {
 	s = sanitizeSnapshots(s)
 	s = sanitizeDiagnostics(s)
 	s = sanitizeProviderOwnership(s)
+	s = normalizeProviderOwnershipAxes(s)
 	var err error
 	s.EventHistory, err = BoundEventHistory(SanitizeEventHistory(s.EventHistory))
 	if err != nil {

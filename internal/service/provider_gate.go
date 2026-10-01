@@ -11,39 +11,39 @@ package service
 // preserved by the document editor.
 //
 // Before any single global-file publication the COMBINED provider changes are
-// evaluated: the read-only safety analyzer classifies every proposed disable
-// against the global-alone layer and every registered global+project root, the
-// composed candidate is staged and validated (config validate + doctor) for the
-// global root and every registered project root — each project candidate sees
-// the composed global layer, never its live bytes — and the input snapshots are
-// re-verified immediately before publication. Publication is exactly one global
-// journal transaction whose Next state carries the intended provider-ownership
-// snapshot, so roll-forward adopts claims atomically with the live bytes they
-// describe.
+// evaluated: the composed candidate is staged and validated (config validate +
+// doctor) for the global root and every registered project root — each project
+// candidate sees the composed global layer, never its live bytes — and the
+// input snapshots are re-verified immediately before publication. Whether a
+// provider may be gated off is the signal/durable gate's decision alone: the
+// real Polytoken binary is the validator of the composed configuration, and a
+// rejected validation retains the stale active selection. Publication is exactly
+// one global journal transaction whose Next state carries the intended
+// provider-ownership snapshot, so roll-forward adopts claims atomically with
+// the live bytes they describe.
 //
-// On refusal (analyzer unsafe or pending-unknown, staging/validation failure,
-// snapshot change, publish error) no file is edited, no notice is published,
-// the target outcome records a sanitized pending reason, and quota
-// observations/history stay independent of the failed edit. New ownership
-// claims never persist without the bytes that back them: only refreshed
-// conflict markers persist on a refusal.
+// On refusal (staging/validation failure, snapshot change, publish error) no
+// file is edited, no notice is published, the target outcome records a
+// sanitized pending reason, and quota observations/history stay independent of
+// the failed edit. New ownership claims never persist without the bytes that
+// back them: only refreshed conflict markers persist on a refusal.
 //
-// This path runs entirely under the coordinator's transaction lock. It never
-// calls PreflightProviderDisables (which acquires the lock itself); both share
-// helpers instead, so the lock is never nested.
+// This path runs entirely under the coordinator's transaction lock.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/geofffranks/polytoken-quota/internal/document"
-	"github.com/geofffranks/polytoken-quota/internal/groupsafety"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/staging"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -82,6 +82,12 @@ type providerGatePlan struct {
 	// matches the live field because of an operator edit. They are reported
 	// pending and never overwritten.
 	Conflicts []string
+	// PoolSkips lists the balance groups whose pace axis was skipped this
+	// pass by the all-hot pool rule, sorted.
+	PoolSkips []string
+	// GateSummary is the sanitized per-provider gate decision channel, one
+	// row per enrolled provider, for outcome and verbose-trace surfacing.
+	GateSummary []ProviderGateSummary
 	// Changed reports whether the plan would edit any managed byte or mutate
 	// any ownership record.
 	Changed bool
@@ -91,7 +97,7 @@ type providerGatePlan struct {
 }
 
 // providerGateRefusal is a refused gate evaluation. Stage names the refusal
-// point (render, stage, safety, validate, publish), TargetID the registered
+// point (render, stage, validate, publish), TargetID the registered
 // root that caused it (empty for a whole-plan refusal), Err the sanitized
 // reason for the pending outcome, and Retained the dry-run keep-staging
 // diagnostic roots keyed by target ID.
@@ -114,7 +120,8 @@ type providerGateResult struct {
 
 // transactProviderGateReconcile implements the reconcile transaction for a
 // provider-only policy under the already-held lock. Dry-run evaluates the full
-// gate (analyzer, staging, validation) but publishes and saves nothing.
+// gate (staged validation through the real Polytoken binary, snapshot recheck)
+// but publishes and saves nothing.
 func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observed state.State, in transactionInput, desired policy.Desired) Outcome {
 	if in.KeepStaging && !in.DryRun {
 		return Outcome{Accepted: false, Error: errors.New("service: --keep-staging requires --dry-run")}
@@ -129,7 +136,7 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 		revision = observed.Revision + 1
 	}
 	c.step("provider-gate")
-	res := c.runProviderGate(ctx, desired, observed, targets, revision, !in.DryRun, in.KeepStaging)
+	res := c.runProviderGate(ctx, desired, observed, targets, revision, !in.DryRun, in.KeepStaging, in.Verbose)
 	if in.DryRun {
 		return Outcome{Accepted: true, Revision: observed.Revision, Targets: res.Outcomes}
 	}
@@ -137,6 +144,9 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 	next.Revision = revision
 	if res.Refusal == nil {
 		next.ProviderOwnership = res.Plan.PublishedOwnership
+		// The pace gate's durable transitions ride the same commit as the
+		// bytes they describe; a refused pass records nothing.
+		next = appendSignalGateEvents(next, observed, res.Plan, revision, c.now())
 	} else {
 		next.ProviderOwnership = res.Plan.RefusalOwnership
 	}
@@ -166,8 +176,8 @@ func (c *Coordinator) transactProviderGateReconcile(ctx context.Context, observe
 // true and every gate passes — commits the single global journal transaction
 // carrying the next ownership state. It never acquires the lock and never
 // saves state: the caller owns both.
-func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desired, observed state.State, targets []RegisteredTarget, revision uint64, publish, keepStaging bool) providerGateResult {
-	res := providerGateResult{Plan: providerGatePlan{
+func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desired, observed state.State, targets []RegisteredTarget, revision uint64, publish, keepStaging, verbose bool) (res providerGateResult) {
+	res = providerGateResult{Plan: providerGatePlan{
 		PublishedOwnership: state.CloneProviderOwnership(observed.ProviderOwnership),
 		RefusalOwnership:   state.CloneProviderOwnership(observed.ProviderOwnership),
 	}}
@@ -180,16 +190,20 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 		return res
 	}
 
-	c.step("read-layers")
-	layers := make([]groupsafety.Layer, len(targets))
+	c.step("read-sources")
+	// Snapshot every registered root's managed sources for the publish-time
+	// input recheck, and read the global config bytes the gate plans against.
 	var snapshots []ProviderSourceSnapshot
+	var globalConfig []byte
 	for i, rt := range targets {
-		layer, readErr := groupsafety.ReadLayer(rt.Resolved.ID, rt.Resolved.CanonicalRoot, rt.Resolved.Global)
-		if readErr != nil {
-			globalPending("stage", fmt.Errorf("service: read registered root %s: %w", sanitizeFailure(rt.Resolved.ID), readErr))
-			return res
+		if i == 0 {
+			cfg, readErr := os.ReadFile(filepath.Join(rt.Resolved.CanonicalRoot, "config.yaml"))
+			if readErr != nil {
+				globalPending("stage", fmt.Errorf("service: read registered root %s: %w", sanitizeFailure(rt.Resolved.ID), readErr))
+				return res
+			}
+			globalConfig = cfg
 		}
-		layers[i] = layer
 		grown, snapErr := appendProviderSnapshotsValue(snapshots, rt.Resolved.ID, rt.Resolved.CanonicalRoot)
 		if snapErr != nil {
 			globalPending("stage", snapErr)
@@ -198,14 +212,36 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 		snapshots = grown
 	}
 
+	c.step("signal-verdicts")
+	// The signal verdicts are a pure function of the observed state at now,
+	// computed once per pass from the coordinator's clock so the gate and the
+	// rank can never disagree about freshness.
+	now := c.now()
+	verdicts := routing.SignalGateVerdicts(signalGateInputs(desired, observed), now)
+
 	c.step("plan-provider-gate")
-	plan, planErr := planProviderGate(desired, observed, layers[0].Config)
+	plan, planErr := planProviderGate(desired, observed, globalConfig, now, verdicts, revision)
 	if planErr != nil {
 		res.Plan = plan
 		globalPending("render", planErr)
 		return res
 	}
 	res.Plan = plan
+	// Whatever this evaluation produces — applied, pending, or a dry-run
+	// report — every outcome carries the sanitized per-provider gate summary,
+	// and --verbose adds the decision trace. Dry runs report the same rows
+	// without publishing anything.
+	defer func() {
+		for i := range res.Outcomes {
+			res.Outcomes[i].ProviderGates = plan.GateSummary
+			if verbose {
+				res.Outcomes[i].Trace = &ReconcileTrace{
+					ProviderModes: providerDetailsToReports(ProjectProviders(desired, observed)),
+					ProviderGates: plan.GateSummary,
+				}
+			}
+		}
+	}()
 
 	if len(plan.Conflicts) > 0 {
 		// An operator edit diverged from a held claim: report pending and
@@ -221,7 +257,7 @@ func (c *Coordinator) runProviderGate(ctx context.Context, desired policy.Desire
 	}
 
 	c.step("evaluate-provider-gate")
-	candidate, evalRefusal := c.evaluateProviderGate(ctx, desired, targets, layers, snapshots, plan, revision, keepStaging)
+	candidate, evalRefusal := c.evaluateProviderGate(ctx, desired, targets, snapshots, plan, revision, keepStaging)
 	if evalRefusal != nil {
 		res.Refusal = evalRefusal
 		res.Outcomes = providerGateRefusalOutcomes(targets, evalRefusal, revision)
@@ -267,23 +303,15 @@ func appendProviderSnapshotsValue(snapshots []ProviderSourceSnapshot, id, root s
 	return holder.Snapshots, nil
 }
 
-// evaluateProviderGate runs the three write gates over the combined plan:
-// the analyzer for every proposed disable (global-alone plus every registered
-// global+project root, composed incrementally in provider order), staged
-// config-validate+doctor for the global root and every project root with the
-// composed global layer, and the input-snapshot recheck. On success it returns
-// the validated GLOBAL candidate (cleanup is the caller's responsibility); on
-// refusal the candidate is empty and every staged artifact has been removed
-// (except dry-run keep-staging retention, reported in the refusal).
-func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.Desired, targets []RegisteredTarget, layers []groupsafety.Layer, snapshots []ProviderSourceSnapshot, plan providerGatePlan, revision uint64, keepStaging bool) (staging.Candidate, *providerGateRefusal) {
-	// Gate 1: the read-only safety analyzer over the combined changes.
-	if len(plan.Disables) > 0 {
-		if err := c.analyzeProviderDisables(desired, layers, plan); err != nil {
-			return staging.Candidate{}, &providerGateRefusal{Stage: "safety", Err: err}
-		}
-	}
-
-	// Gate 2: staged validation of the composed candidate on every registered
+// evaluateProviderGate runs the two write gates over the combined plan:
+// staged config-validate+doctor for the global root and every project root
+// with the composed global layer, and the input-snapshot recheck. On success
+// it returns the validated GLOBAL candidate (cleanup is the caller's
+// responsibility); on refusal the candidate is empty and every staged
+// artifact has been removed (except dry-run keep-staging retention, reported
+// in the refusal).
+func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.Desired, targets []RegisteredTarget, snapshots []ProviderSourceSnapshot, plan providerGatePlan, revision uint64, keepStaging bool) (staging.Candidate, *providerGateRefusal) {
+	// Gate 1: staged validation of the composed candidate on every registered
 	// root. The global candidate is kept alive for publication; every project
 	// candidate is cleaned after its validation. Plans carry ProviderOnly so
 	// staging publishes the raw global bytes plus the exact edits.
@@ -312,7 +340,9 @@ func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.D
 		if !validation.StartupValid {
 			reason := fmt.Errorf("service: staged validation refused provider gating for target %s", sanitizeFailure(targetID(rt)))
 			if validation.Error != nil {
-				reason = fmt.Errorf("service: staged validation refused provider gating for target %s at %s", sanitizeFailure(targetID(rt)), validation.Error.Stage)
+				// Mirror pendingValidate: the sanitized CommandError summary
+				// is the operator's "why" — stage alone is not diagnosable.
+				reason = fmt.Errorf("service: staged validation refused provider gating for target %s at %s: %s", sanitizeFailure(targetID(rt)), validation.Error.Stage, sanitizeFailure(validation.Error.Summary))
 			}
 			retained := map[string]string{}
 			if keepStaging {
@@ -334,49 +364,13 @@ func (c *Coordinator) evaluateProviderGate(ctx context.Context, desired policy.D
 		}
 	}
 
-	// Gate 3: the assessed input must still be the live input immediately
+	// Gate 2: the assessed input must still be the live input immediately
 	// before publication.
 	if err := RecheckProviderPreflight(ProviderPreflight{Snapshots: snapshots}); err != nil {
 		_ = globalCandidate.Cleanup()
 		return staging.Candidate{}, &providerGateRefusal{Stage: "publish", Err: err}
 	}
 	return globalCandidate, nil
-}
-
-// analyzeProviderDisables classifies every proposed disable against the
-// combined plan: each disable is analyzed against the composed candidate with
-// every OTHER planned edit applied (so a same-pass restore adds availability
-// and an earlier same-pass disable removes it), global-alone first and then
-// once per registered global+project root. Any unsafe or pending-unknown
-// verdict refuses the whole plan.
-func (c *Coordinator) analyzeProviderDisables(desired policy.Desired, layers []groupsafety.Layer, plan providerGatePlan) error {
-	enrolled := sortedProviderIDs(desired)
-	for _, id := range plan.Disables {
-		inputEdits := make([]reconcile.FieldEdit, 0, len(plan.Edits))
-		for _, e := range plan.Edits {
-			if len(e.Path) >= 2 && e.Path[1] == id {
-				continue
-			}
-			inputEdits = append(inputEdits, e)
-		}
-		inputConfig, err := document.EditYAML(layers[0].Config, providerDocumentEdits(inputEdits))
-		if err != nil {
-			return fmt.Errorf("service: compose provider gate candidate: %w", err)
-		}
-		globalLayer := layers[0]
-		globalLayer.Config = inputConfig
-		report := groupsafety.Report{Verdict: groupsafety.Safe, Reasons: []string{}}
-		input := groupsafety.Input{Enrolled: enrolled, Global: globalLayer}
-		report = mergeProviderReport(report, groupsafety.Analyze(input, id))
-		for _, project := range layers[1:] {
-			rootInput := groupsafety.Input{Enrolled: enrolled, Global: globalLayer, Projects: []groupsafety.Layer{project}}
-			report = mergeProviderReport(report, groupsafety.Analyze(rootInput, id))
-		}
-		if report.Verdict != groupsafety.Safe {
-			return fmt.Errorf("service: provider %q disable is %s: %s", sanitizeFailure(id), report.Verdict, summarizeSafetyReasons(report.Reasons))
-		}
-	}
-	return nil
 }
 
 // publishProviderGate commits the single global journal transaction. The
@@ -399,7 +393,7 @@ func (c *Coordinator) publishProviderGate(ctx context.Context, desired policy.De
 	// outcome. Recovery must not roll forward bytes without also preserving
 	// the notice state when the caller's subsequent state save fails.
 	next.PendingProviderNotice = reconcileProviderNoticeDebt(
-		observed.PendingProviderNotice, plan.Enabled, revision, providerPlanNoticeEdits(plan.Edits),
+		observed.PendingProviderNotice, plan.Enabled, revision, providerPlanNoticeEdits(plan),
 	)
 	tx, err := c.buildTransaction(observed, next, global, txPlan, candidate, prep)
 	tx.ProviderNoticeSet = true
@@ -417,16 +411,25 @@ func (c *Coordinator) publishProviderGate(ctx context.Context, desired policy.De
 }
 
 // planProviderGate derives the per-provider actions from the enrolled set, the
-// observed quota state, the durable ownership records, and the live global
-// config bytes. It is a pure decision function: it reads bytes handed to it
-// and never touches the filesystem.
+// observed quota state, the durable ownership records, the live global config
+// bytes, the signal verdicts, and the evaluation time. It is a pure decision
+// function: it reads bytes handed to it and never touches the filesystem.
+// now is the time the verdicts were computed at, threaded per the documented
+// signature; the verdicts have already folded it in.
 //
-// reserve/disabled gate the provider off; normal restores only a quota-owned
-// baseline. An operator edit that diverges from a held claim is a conflict:
-// reported pending, never overwritten, no forced value. When the live field
-// already equals the recorded baseline exactly, the claim is released without
-// an edit — the operator restored it themselves.
-func planProviderGate(desired policy.Desired, observed state.State, globalConfig []byte) (providerGatePlan, error) {
+// Precedence per provider: the durable reserve/disabled axes gate first
+// (unchanged); then the signal axis — fresh use-it-or-lose-it evidence at or
+// below the configured threshold that survived the all-hot pool rule — gates
+// with a signal-attributed claim; then the normal branch restores only a
+// quota-owned baseline. An operator edit that diverges from a held claim is a
+// conflict: reported pending, never overwritten, no forced value. When the
+// live field already equals the recorded baseline exactly, the claim is
+// released without an edit — the operator restored it themselves. Because a
+// signal gate holds only while its evidence stays fresh and at/below
+// threshold, every degraded-evidence case (surplus signal, stale snapshot,
+// uncomputable signal) falls to the normal branch and releases a held signal
+// gate automatically.
+func planProviderGate(desired policy.Desired, observed state.State, globalConfig []byte, now time.Time, verdicts map[string]routing.SignalGateVerdict, revision uint64) (providerGatePlan, error) {
 	plan := providerGatePlan{
 		PublishedOwnership: state.CloneProviderOwnership(observed.ProviderOwnership),
 		RefusalOwnership:   state.CloneProviderOwnership(observed.ProviderOwnership),
@@ -451,26 +454,74 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 	if len(ids) == 0 {
 		return plan, nil
 	}
+	// Read every enrolled provider's live enabled field before any per-provider
+	// decision: the pool rule must see whole pools, and a partial snapshot is
+	// never authoritative for debt retirement.
+	type liveField struct{ present, value bool }
+	live := make(map[string]liveField, len(ids))
 	for _, id := range ids {
 		present, value, known, err := providerEnabledField(globalConfig, id)
 		if err != nil {
-			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
+			plan.Enabled = nil
 			return plan, err
 		}
 		if !known {
-			plan.Enabled = nil // A partial snapshot is not authoritative for debt retirement.
+			plan.Enabled = nil
 			return plan, fmt.Errorf("service: enrolled provider %q is absent from the registered global configuration", sanitizeFailure(id))
 		}
+		live[id] = liveField{present: present, value: value}
 		plan.Enabled[id] = !present || value
+	}
+	// Effective modes drive both the durable axes and the pool rule.
+	modes := make(map[string]state.Mode, len(ids))
+	signalHeld := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		modes[id] = reconcile.MappingMode(desired, observed, policy.MappingID(id))
+		if record, ok := observed.OwnershipOf(id); ok && record.SignalHeld() {
+			signalHeld[id] = true
+		}
+	}
+	pool := signalPoolRule(desired, verdicts, plan.Enabled, modes, signalHeld)
+	plan.PoolSkips = pool.Pools
+	poolSkipDetail := "pool fully overdrawn this pass; signal gate skipped"
+	operatorHeldDetail := "operator holds the provider off"
+
+	for _, id := range ids {
+		lf := live[id]
 		record, hasRecord := observed.OwnershipOf(id)
 		owned := hasRecord && record.Owned
+		mode := modes[id]
+		verdict := verdicts[id] // zero value: no verdict means never gate
+		gateEnabled, gateThreshold := signalGateConfigOf(desired, id)
+		// The signal axis engages only on fresh at-or-below-threshold evidence
+		// that the pool rule did not suppress this pass, and never on a
+		// keep_enabled provider: the operator has marked it spared from
+		// automatic disabling (its recovery enable path is unaffected).
+		gated := gateEnabled && verdict.Gated && !pool.SkipSignal[id] && !desired.Providers[policy.MappingID(id)].KeepEnabled
+
+		summary := ProviderGateSummary{Provider: id}
+		if verdict.Signal != nil {
+			s := *verdict.Signal
+			summary.Signal = &s
+		}
+		thresholdCopy := gateThreshold
+		summary.Threshold = &thresholdCopy
+		appendSummary := func() {
+			plan.GateSummary = append(plan.GateSummary, summary)
+		}
+
 		// The gate consumes the reconciler's single mode derivation: the
 		// durable axes via EffectiveMode plus the fail-closed snapshot
 		// boundary. Reserve remains the existing low-quota axis state; a poll
 		// snapshot only forces disabled, never its own write rule.
-		mode := reconcile.MappingMode(desired, observed, policy.MappingID(id))
 		if mode == state.ModeReserve || mode == state.ModeDisabled {
-			if owned && !(present && !value) {
+			axis := state.OwnershipAxisReserve
+			summary.Axis = string(axis)
+			if mode == state.ModeDisabled {
+				axis = state.OwnershipAxisDisabled
+				summary.Axis = string(axis)
+			}
+			if owned && !(lf.present && !lf.value) {
 				// Quota holds an expected-off claim but the live field moved
 				// (enabled true, or the key was removed — absence enables).
 				// Report pending; never re-disable, never overwrite.
@@ -479,6 +530,9 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 				record.Conflict = true
 				claimTarget(false)[id] = record
 				claimTarget(true)[id] = record
+				summary.Action = GateActionConflict
+				summary.Detail = "operator edit diverges from the held claim"
+				appendSummary()
 				continue
 			}
 			if owned {
@@ -490,10 +544,15 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 					claimTarget(true)[id] = record
 					plan.Changed = true
 				}
+				summary.Action = GateActionHeld
+				appendSummary()
 				continue
 			}
-			if present && !value {
+			if lf.present && !lf.value {
 				// The operator already holds it off; quota claims nothing.
+				summary.Action = GateActionUnchanged
+				summary.Detail = operatorHeldDetail
+				appendSummary()
 				continue
 			}
 			// Write the disable and claim the operator baseline.
@@ -501,18 +560,106 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			off := false
 			plan.Edits = append(plan.Edits, providerFieldEdit(id, &off, false))
 			claimTarget(false)[id] = state.ProviderOwnership{
-				BaselinePresent: present,
-				BaselineValue:   value,
+				BaselinePresent: lf.present,
+				BaselineValue:   lf.value,
 				Owned:           true,
+				Axis:            axis,
+				EngagedRevision: revision,
 			}
 			plan.Changed = true
+			summary.Action = GateActionDisabled
+			appendSummary()
 			continue
 		}
-		// normal mode
+
+		// normal mode: the signal axis takes precedence over baseline restore.
+		if gated {
+			summary.Axis = state.OwnershipAxisSignal
+			if owned && !(lf.present && !lf.value) {
+				// The operator re-enabled a provider a signal claim holds off:
+				// identical conflict handling to the durable axes.
+				plan.Conflicts = append(plan.Conflicts, id)
+				plan.Changed = plan.Changed || !record.Conflict
+				record.Conflict = true
+				claimTarget(false)[id] = record
+				claimTarget(true)[id] = record
+				summary.Action = GateActionConflict
+				summary.Detail = "operator edit diverges from the held claim"
+				appendSummary()
+				continue
+			}
+			if owned {
+				if record.SignalHeld() && record.Threshold == gateThreshold {
+					// Signal claim intact with the same threshold: nothing to
+					// write. Refresh a stale conflict marker like the durable
+					// axes do.
+					if record.Conflict {
+						record.Conflict = false
+						claimTarget(false)[id] = record
+						claimTarget(true)[id] = record
+						plan.Changed = true
+					}
+					summary.Action = GateActionHeld
+					appendSummary()
+					continue
+				}
+				// Transfer attribution to the signal axis in place: the field
+				// is already exactly as quota wrote it, so no byte changes and
+				// the recorded operator baseline is preserved verbatim.
+				changed := !record.SignalHeld() || record.Threshold != gateThreshold
+				record.Axis = state.OwnershipAxisSignal
+				record.Threshold = gateThreshold
+				record.EngagedRevision = revision
+				claimTarget(false)[id] = record
+				claimTarget(true)[id] = record
+				plan.Changed = plan.Changed || changed
+				summary.Action = GateActionHeld
+				if changed {
+					summary.Detail = "gate attribution moved to the signal axis"
+				}
+				appendSummary()
+				continue
+			}
+			if lf.present && !lf.value {
+				summary.Action = GateActionUnchanged
+				summary.Detail = operatorHeldDetail
+				appendSummary()
+				continue
+			}
+			// Write the disable and claim the operator baseline for signal.
+			plan.Disables = append(plan.Disables, id)
+			off := false
+			plan.Edits = append(plan.Edits, providerFieldEdit(id, &off, false))
+			claimTarget(false)[id] = state.ProviderOwnership{
+				BaselinePresent: lf.present,
+				BaselineValue:   lf.value,
+				Owned:           true,
+				Axis:            state.OwnershipAxisSignal,
+				Threshold:       gateThreshold,
+				EngagedRevision: revision,
+			}
+			plan.Changed = true
+			summary.Action = GateActionDisabled
+			// The signal reason rides the summary so the durable signal_gated
+			// event (and any notice) carries why the gate engaged.
+			if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
+			}
+			appendSummary()
+			continue
+		}
+
+		// normal branch: the signal axis did not gate this pass.
 		if !owned {
+			summary.Action = GateActionUnchanged
+			if pool.SkipSignal[id] {
+				summary.Action = GateActionPoolSkip
+				summary.Detail = poolSkipDetail
+			}
+			appendSummary()
 			continue
 		}
-		if present && !value {
+		if lf.present && !lf.value {
 			// Still exactly as quota wrote it: restore the recorded operator
 			// baseline in its original shape.
 			if record.BaselinePresent {
@@ -524,9 +671,16 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 			plan.Restores = append(plan.Restores, providerRestore{ID: id, RestorePresent: record.BaselinePresent, RestoreValue: record.BaselineValue})
 			delete(plan.PublishedOwnership, id)
 			plan.Changed = true
+			summary.Action = GateActionRestored
+			if pool.SkipSignal[id] {
+				summary.Detail = poolSkipDetail
+			} else if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
+			}
+			appendSummary()
 			continue
 		}
-		if present == record.BaselinePresent && (!present || value == record.BaselineValue) {
+		if lf.present == record.BaselinePresent && (!lf.present || lf.value == record.BaselineValue) {
 			// The operator already restored the exact baseline themselves:
 			// release the claim without editing.
 			delete(plan.PublishedOwnership, id)
@@ -535,6 +689,13 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 				claimTarget(true)[id] = record
 				plan.Changed = true
 			}
+			summary.Action = GateActionReleased
+			if pool.SkipSignal[id] {
+				summary.Detail = poolSkipDetail
+			} else if verdict.Reason != "" {
+				summary.Detail = verdict.Reason
+			}
+			appendSummary()
 			continue
 		}
 		// Operator moved the field somewhere the recorded baseline does not
@@ -544,8 +705,22 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		record.Conflict = true
 		claimTarget(false)[id] = record
 		claimTarget(true)[id] = record
+		summary.Action = GateActionConflict
+		summary.Detail = "operator edit diverges from the held claim"
+		appendSummary()
 	}
 	return plan, nil
+}
+
+// signalGateConfigOf resolves a provider's signal-gate configuration from the
+// desired policy: an absent quota section (or signal_gate block) means the
+// documented defaults — gating on at DefaultSignalGateThreshold.
+func signalGateConfigOf(desired policy.Desired, id string) (enabled bool, threshold float64) {
+	sg := policy.DefaultSignalGate()
+	if m, ok := desired.Providers[policy.MappingID(id)]; ok && m.Quota != nil {
+		sg = m.Quota.SignalGate.Resolved()
+	}
+	return !sg.Disabled, sg.Threshold
 }
 
 // providerFieldEdit addresses one exact-span providers.<id>.enabled edit in
@@ -558,21 +733,6 @@ func providerFieldEdit(id string, value *bool, remove bool) reconcile.FieldEdit 
 		Enabled: value,
 		Remove:  remove,
 	}
-}
-
-// providerDocumentEdits converts gate plan edits into document edits for the
-// in-memory candidate compositions.
-func providerDocumentEdits(edits []reconcile.FieldEdit) []document.Edit {
-	out := make([]document.Edit, 0, len(edits))
-	for _, e := range edits {
-		out = append(out, document.Edit{
-			Path:   e.Path,
-			Kind:   document.Boolean,
-			Bool:   e.Enabled,
-			Remove: e.Remove,
-		})
-	}
-	return out
 }
 
 // providerEnabledField reads the live `providers.<id>.enabled` field from the
@@ -704,14 +864,4 @@ func providerGateAppliedOutcomes(targets []RegisteredTarget, revision uint64, pr
 		out = append(out, o)
 	}
 	return out
-}
-
-// summarizeSafetyReasons bounds analyzer reasons to a deterministic, sanitized
-// summary for the pending outcome.
-func summarizeSafetyReasons(reasons []string) string {
-	const maxReasons = 6
-	if len(reasons) > maxReasons {
-		return fmt.Sprintf("%s; and %d more", strings.Join(reasons[:maxReasons], "; "), len(reasons)-maxReasons)
-	}
-	return strings.Join(reasons, "; ")
 }

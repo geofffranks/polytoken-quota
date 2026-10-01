@@ -64,8 +64,6 @@ type gateFixture struct {
 	clock                            fixedClock
 	projects                         []string
 	enrolled                         []string
-	// disabled tier default for the unsafe case: enrolling pp makes its
-	// disable provably unsafe because pp owns the tier default leaf.
 	globalConfig string
 }
 
@@ -304,10 +302,10 @@ func TestPlanProviderGateDecisionTable(t *testing.T) {
 		claim                      *state.ProviderOwnership // expected new/released claim on publish
 		claimReleased              bool
 	}{
-		{"reserve absent key gates off and claims absent baseline", reserve, configAbsent, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: false, Owned: true}, false},
-		{"reserve true gates off and claims true baseline", reserve, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true}, false},
+		{"reserve absent key gates off and claims absent baseline", reserve, configAbsent, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3}, false},
+		{"reserve true gates off and claims true baseline", reserve, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3}, false},
 		{"reserve explicit false edits nothing and claims nothing", reserve, configFalse, nil, false, false, false, nil, false},
-		{"disabled true gates off", disabled, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true}, false},
+		{"disabled true gates off", disabled, configTrue, nil, true, false, false, &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 3}, false},
 		{"normal owned claim restores absent baseline by removing key", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true}}, false, true, false, nil, true},
 		{"normal owned claim restores explicit false baseline by writing false", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: false, Owned: true}}, false, true, false, nil, true},
 		{"normal owned claim restores true baseline", normal, configFalse, map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true}}, false, true, false, nil, true},
@@ -321,7 +319,7 @@ func TestPlanProviderGateDecisionTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			observed := state.State{Revision: 3, Providers: tc.ps, ProviderOwnership: tc.own}
-			plan, err := planProviderGate(desired, observed, tc.cfg)
+			plan, err := planProviderGate(desired, observed, tc.cfg, time.Time{}, nil, 3)
 			if err != nil {
 				t.Fatalf("planProviderGate: %v", err)
 			}
@@ -389,7 +387,7 @@ func TestProviderGateReserveDisabledAndNormalBaseline(t *testing.T) {
 			wantConfig: func(before string) string {
 				return strings.Replace(before, "    # operator-set value\n    enabled: true", "    # operator-set value\n    enabled: false", 1)
 			},
-			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true}},
+			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 8}},
 			wantHistoryCount: 1,
 			wantProviders:    []notice.ProviderState{{ID: "gp", Enabled: false}},
 		},
@@ -401,7 +399,7 @@ func TestProviderGateReserveDisabledAndNormalBaseline(t *testing.T) {
 				// The key is inserted into the gp block; assert the block shape.
 				return before
 			},
-			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true}},
+			wantOwnership:    map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 8}},
 			wantHistoryCount: 1,
 			wantProviders:    []notice.ProviderState{{ID: "gp", Enabled: false}},
 		},
@@ -627,8 +625,8 @@ func TestProviderGateCombinedMultiProviderSingleTransaction(t *testing.T) {
 	}
 	st := f.loadState()
 	for id, wantOwn := range map[string]state.ProviderOwnership{
-		"gp": {BaselinePresent: true, BaselineValue: true, Owned: true},
-		"pp": {BaselinePresent: true, BaselineValue: true, Owned: true},
+		"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisDisabled, EngagedRevision: 3},
+		"pp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 3},
 	} {
 		if got := st.ProviderOwnership[id]; got != wantOwn {
 			t.Fatalf("ownership[%s]=%+v want %+v", id, got, wantOwn)
@@ -639,38 +637,6 @@ func TestProviderGateCombinedMultiProviderSingleTransaction(t *testing.T) {
 	if !strings.Contains(joined, "quota-stage-project-a") {
 		t.Fatalf("project root not staged/validated: %v", f.runner.calls)
 	}
-}
-
-func TestProviderGateNoEditOnUnsafeCandidate(t *testing.T) {
-	// Enrolling pp makes its disable provably unsafe: pp owns the tier default
-	// leaf, and the observed binary rejects such reloads wholesale.
-	f := newGateFixture(t, []string{"pp"}, nil)
-	cfg := strings.Replace(globalConfigWith(nil), "polytoken:default_model_full: zz/z1", "polytoken:default_model_full: pp/p1", 1)
-	f.writeGlobalConfig(cfg)
-	f.seedState(5, map[string]state.ProviderState{"pp": {Quota: state.QuotaExhausted, Availability: state.Available}}, nil)
-	before := cfg
-
-	out := f.coordinator().Reconcile(context.Background(), false, false, false)
-	if !out.Accepted || out.PendingCount() != 1 {
-		t.Fatalf("out=%+v want one pending refusal", out)
-	}
-	summary := out.Targets[0].Pending.Summary
-	if !strings.Contains(summary, "unsafe") {
-		t.Fatalf("summary=%q want an unsafe safety verdict", summary)
-	}
-	if got := f.readGlobalConfig(); got != before {
-		t.Fatal("unsafe candidate was published")
-	}
-	if len(f.runner.calls) != 0 {
-		t.Fatalf("staging ran despite the analyzer refusal: %v", f.runner.calls)
-	}
-	if f.journalExists() {
-		t.Fatal("journal written for a refused publication")
-	}
-	if _, err := os.Stat(f.desired.Operational.NoticePath); !os.IsNotExist(err) {
-		t.Fatalf("unsafe candidate emitted a provider notice: %v", err)
-	}
-	f.requireNoPendingEdit(t, f.loadState())
 }
 
 func TestProviderGateRegisteredProjectSafety(t *testing.T) {
@@ -936,8 +902,9 @@ func TestProviderGateCheckReconcileQuotaHistoryIndependent(t *testing.T) {
 	t.Run("check --reconcile keeps the poll independent when the gate refuses", func(t *testing.T) {
 		f := newGateFixture(t, []string{"pp"}, nil)
 		f.desired.Providers[policy.MappingID("pp")] = policy.Mapping{Quota: &policy.QuotaConfig{Adapter: "codex", FreshnessTTL: 30 * time.Minute, BalanceGroup: "default", Weight: 1}}
-		// Make the pp disable provably unsafe so the gate refuses.
-		cfg := strings.Replace(globalConfigWith(nil), "polytoken:default_model_full: zz/z1", "polytoken:default_model_full: pp/p1", 1)
+		// A staged-validation failure refuses the pp disable.
+		f.runner.failContains = "quota-stage-global"
+		cfg := globalConfigWith(nil)
 		f.writeGlobalConfig(cfg)
 		f.seedState(6, map[string]state.ProviderState{"pp": {Quota: state.QuotaExhausted, Availability: state.Available}}, nil)
 
@@ -1335,6 +1302,130 @@ func TestProviderGateRefusesDuplicateProviderConfig(t *testing.T) {
 	})
 }
 
+// TestProviderGateKeepEnabledSparesSignalDisable proves the keep_enabled
+// desired.yaml contract: a keep_enabled provider is never a signal-disable
+// candidate (no edit, no claim, gate row unchanged) while other eligible
+// providers still gate normally in the same pass; and a keep_enabled provider
+// with recovered signal is still re-enabled (the enable path is untouched).
+func TestProviderGateKeepEnabledSparesSignalDisable(t *testing.T) {
+	t.Run("gated signal spares the keep_enabled provider and still gates others", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp", "zz"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		now := f.clock.t
+		f.seedState(7, map[string]state.ProviderState{
+			// gp and pp both carry gating (overdrawn) signals; zz keeps the
+			// pool from being fully overdrawn so signal gating engages at all.
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp signal -0.72
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // pp signal -0.72
+			"zz": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)}, // zz signal +1.60
+		}, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		// pp gates off normally; gp is untouched.
+		after := f.readGlobalConfig()
+		if after == before {
+			t.Fatal("pp was not gated off")
+		}
+		gp := strings.Split(strings.Split(after, "  gp:\n")[1], "  pp:")[0]
+		if !strings.Contains(gp, "enabled: true") {
+			t.Fatalf("keep_enabled provider was gated off:\n%s", gp)
+		}
+		st := f.loadState()
+		if _, held := st.ProviderOwnership["gp"]; held {
+			t.Fatalf("keep_enabled provider claimed: %+v", st.ProviderOwnership["gp"])
+		}
+		if claim, ok := st.ProviderOwnership["pp"]; !ok || !claim.Owned {
+			t.Fatalf("pp claim = %+v, want the normal signal claim", claim)
+		}
+		// The gate summary still observes gp's signal, but proposes no disable.
+		var gpRow, ppRow ProviderGateSummary
+		for _, g := range out.Targets[0].ProviderGates {
+			switch g.Provider {
+			case "gp":
+				gpRow = g
+			case "pp":
+				ppRow = g
+			}
+		}
+		if gpRow.Action != GateActionUnchanged {
+			t.Fatalf("gp gate row = %+v, want unchanged (no disable proposal)", gpRow)
+		}
+		if ppRow.Action != GateActionDisabled {
+			t.Fatalf("pp gate row = %+v, want disabled", ppRow)
+		}
+	})
+
+	t.Run("recovered signal still re-enables a keep_enabled provider", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+		now := f.clock.t
+		// gp currently held by a signal claim (operator baseline true).
+		f.seedState(8, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)}, // recovered: +1.60
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+		}, map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+		})
+		before := f.readGlobalConfig()
+		if !strings.Contains(before, "enabled: false") {
+			t.Fatal("fixture must start with gp gated off")
+		}
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		if got := f.readGlobalConfig(); !strings.Contains(got, "enabled: true") || got == before {
+			t.Fatalf("keep_enabled provider was not re-enabled:\n%s", got)
+		}
+		if st := f.loadState(); len(st.ProviderOwnership) != 0 {
+			t.Fatalf("claims = %+v, want the restored claim released", st.ProviderOwnership)
+		}
+	})
+
+	t.Run("still-gated signal claim is restored once keep_enabled is set", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+		now := f.clock.t
+		// gp holds a signal claim from BEFORE the keep_enabled flip, and its
+		// signal is STILL at/below threshold — no recovery. The next pass
+		// restores the baseline anyway.
+		f.seedState(8, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // still gated: -0.72
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+		}, map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+		})
+		before := f.readGlobalConfig()
+		if !strings.Contains(before, "enabled: false") {
+			t.Fatal("fixture must start with gp gated off")
+		}
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		if got := f.readGlobalConfig(); !strings.Contains(got, "enabled: true") || got == before {
+			t.Fatalf("still-gated keep_enabled provider was not restored:\n%s", got)
+		}
+		if st := f.loadState(); len(st.ProviderOwnership) != 0 {
+			t.Fatalf("claims = %+v, want the stale signal claim released", st.ProviderOwnership)
+		}
+	})
+}
+
 // fmtHash renders a sha256 digest as the journal's hex form.
 func fmtHash(d [32]byte) string {
 	const hex = "0123456789abcdef"
@@ -1344,4 +1435,46 @@ func fmtHash(d [32]byte) string {
 		out[i*2+1] = hex[b&0x0f]
 	}
 	return string(out)
+}
+
+// validationRefusalStub is a Validator that fails every candidate with a fixed
+// sanitized summary, isolating the refusal-message rendering from the runner.
+type validationRefusalStub struct{ result validate.Result }
+
+func (v validationRefusalStub) Validate(context.Context, staging.Candidate, time.Duration) validate.Result {
+	return v.result
+}
+
+func validationRefusalResult() validate.Result {
+	return validate.Result{StartupValid: false, Error: &validate.CommandError{
+		Stage:   validate.ConfigValidate,
+		Summary: "synthetic reason text",
+	}}
+}
+
+// TestProviderGateValidationRefusalCarriesSummary proves the provider-gate
+// validation refusal renders the sanitized CommandError summary, mirroring
+// pendingValidate's normal-path rendering — the operator sees WHY the stage
+// refused, not just which stage.
+func TestProviderGateValidationRefusalCarriesSummary(t *testing.T) {
+	f := newSignalFixture(t, []string{"gp", "pp"})
+	c := f.coordinator()
+	c.Validate = validationRefusalStub{result: validationRefusalResult()}
+	now := f.clock.t
+	f.seedState(7, map[string]state.ProviderState{
+		"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp overdrawn
+		"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+	}, nil)
+
+	out := c.Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.PendingCount() == 0 {
+		t.Fatalf("out=%+v want a pending refusal", out)
+	}
+	summary := out.Targets[0].Pending.Summary
+	if !strings.Contains(summary, "synthetic reason text") {
+		t.Fatalf("summary=%q want the sanitized validation summary", summary)
+	}
+	if !strings.Contains(summary, "at config_validate: synthetic reason text") {
+		t.Fatalf("summary=%q want the stage and summary in pendingValidate's shape", summary)
+	}
 }

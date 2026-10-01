@@ -7,6 +7,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -89,6 +90,18 @@ type ResetCreditReport struct {
 	SkippedCount         int                         `json:"skipped_count"`
 }
 
+// GateReport is the sanitized gate attribution for one provider mapping: the
+// gating axis that holds its `enabled` field off, and — for signal claims —
+// the observed use-it-or-lose-it signal, the engaged threshold, and the
+// revision that engaged the claim. It is diagnostic surfacing only; it never
+// changes the snapshot's fail-closed aggregation semantics.
+type GateReport struct {
+	Axis            string   `json:"axis"`
+	Signal          *float64 `json:"signal,omitempty"`
+	Threshold       *float64 `json:"threshold,omitempty"`
+	EngagedRevision uint64   `json:"engaged_revision,omitempty"`
+}
+
 // ProviderProjection is one exact mapping-level diagnostic projection. Every
 // configured mapping is projected; mappings without a pollable quota config use
 // their observed state and remain visible without fabricated quota data.
@@ -107,6 +120,10 @@ type ProviderProjection struct {
 	LatestAttempt  *QuotaAttemptReport `json:"latest_attempt,omitempty"`
 	Usage          *UsageSummaryReport `json:"usage,omitempty"`
 	ResetCredits   *ResetCreditReport  `json:"reset_credits,omitempty"`
+	// Gate carries the provider-only gate attribution; nil when quota holds
+	// no claim over this provider's enabled field (including legacy claims
+	// recorded before axis attribution, which keep today's presentation).
+	Gate *GateReport `json:"gate,omitempty"`
 }
 
 // StatusViewReport is the provider-only status selector.
@@ -153,6 +170,20 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 		}
 		entry.Usage = usageSummaryReport(ps.ResetCredits.UsageSummary)
 		entry.ResetCredits = resetCreditReport(ps.ResetCredits, asOf)
+		if record, ok := observed.OwnershipOf(id); ok && record.Owned && record.Axis != "" {
+			g := &GateReport{Axis: record.Axis, EngagedRevision: record.EngagedRevision}
+			if record.Axis == state.OwnershipAxisSignal {
+				if ps.QuotaSnapshot != nil {
+					if signal, ok := routing.ComputeSignal(ps.QuotaSnapshot, asOf); ok {
+						s := signal
+						g.Signal = &s
+					}
+				}
+				t := record.Threshold
+				g.Threshold = &t
+			}
+			entry.Gate = g
+		}
 		providers = append(providers, entry)
 	}
 	return providers, projectionErrors
@@ -287,8 +318,20 @@ func cloneProviders(in []ProviderProjection) []ProviderProjection {
 		}
 		out[i].Usage = cloneUsage(in[i].Usage)
 		out[i].ResetCredits = cloneResetCredits(in[i].ResetCredits)
+		out[i].Gate = cloneGateReport(in[i].Gate)
 	}
 	return out
+}
+
+// cloneGateReport deep-copies a gate attribution report (nil stays nil).
+func cloneGateReport(in *GateReport) *GateReport {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Signal = cloneFloat(in.Signal)
+	out.Threshold = cloneFloat(in.Threshold)
+	return &out
 }
 
 func cloneWindows(in []QuotaWindowReport) []QuotaWindowReport {

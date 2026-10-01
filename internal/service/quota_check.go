@@ -81,11 +81,12 @@ func (c *Coordinator) transactQuotaCheck(ctx context.Context, recovered state.St
 				outcomes = []TargetOutcome{pending}
 			} else {
 				c.step("provider-gate")
-				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false)
+				res := c.runProviderGate(ctx, desired, observed, targets, next.Revision, true, false, in.Verbose)
 				outcomes = res.Outcomes
 				gateRefusal = res.Refusal
 				if res.Refusal == nil {
 					next.ProviderOwnership = res.Plan.PublishedOwnership
+					next = appendSignalGateEvents(next, observed, res.Plan, next.Revision, c.now())
 					next = c.retireSyntheticPendings(next)
 				} else {
 					next.ProviderOwnership = res.Plan.RefusalOwnership

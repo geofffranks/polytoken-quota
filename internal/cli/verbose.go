@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -34,6 +35,26 @@ func writeVerboseTrace(w io.Writer, o service.Outcome) {
 			fmt.Fprintf(w, "outcome: pending (stage=%s)\n", validate.DefaultSanitize([]byte(tgt.Pending.Stage)))
 		} else {
 			fmt.Fprintln(w, "outcome: applied")
+		}
+		// Provider-only gate summaries report what the pass did (or
+		// deliberately did not do) per provider: signal verdicts, pool skips,
+		// and axis attribution. Legacy targets carry none, so their output is
+		// unchanged.
+		for _, g := range tgt.ProviderGates {
+			line := "gate: " + validate.DefaultSanitize([]byte(g.Provider)) + " " + validate.DefaultSanitize([]byte(g.Action))
+			if g.Axis != "" {
+				line += " axis=" + validate.DefaultSanitize([]byte(g.Axis))
+			}
+			if g.Signal != nil {
+				line += " signal=" + routing.SignalFormat(*g.Signal)
+			}
+			if g.Threshold != nil {
+				line += " threshold=" + routing.SignalFormat(*g.Threshold)
+			}
+			if g.Detail != "" {
+				line += " (" + validate.DefaultSanitize([]byte(g.Detail)) + ")"
+			}
+			fmt.Fprintln(w, line)
 		}
 		// Skipped tier-default diagnostics are deliberate, operator-actionable
 		// information: they explain why the legacy tier selections were left

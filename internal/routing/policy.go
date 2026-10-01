@@ -450,6 +450,13 @@ func computeSignal(snap *quota.QuotaSnapshot, now time.Time) (signal float64, ok
 	return math.Max(-signalClamp, math.Min(signalClamp, weighted/totalPeriod)), true
 }
 
+// ComputeSignal exports the use-it-or-lose-it signal computation so the
+// provider gate derives from the same source as the rank and the two can
+// never disagree about a window's signal.
+func ComputeSignal(snap *quota.QuotaSnapshot, now time.Time) (signal float64, ok bool) {
+	return computeSignal(snap, now)
+}
+
 // assignSignalClusters assigns signal cluster indices to entries within a
 // balance group. If any member lacks a signal, the signal is cleared for the
 // whole group so sorting remains transitive and no comparison is invented

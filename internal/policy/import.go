@@ -721,6 +721,19 @@ type outQuota struct {
 	Weight           int     `yaml:"weight,omitempty"`
 	MonthlyBudgetUSD float64 `yaml:"monthly_budget_usd,omitempty"`
 	Mode             string  `yaml:"mode,omitempty"`
+	// SignalGate round-trips the resolved signal-gating configuration;
+	// omitted entirely when it equals the documented default (which loads
+	// back identically). Serialization keeps import parity: a forced
+	// provider-only re-init can never silently drop a non-default signal_gate
+	// setting.
+	SignalGate *outSignalGate `yaml:"signal_gate,omitempty"`
+}
+
+// outSignalGate is the rendered signal_gate block. It always carries both
+// keys so the rendered form is self-describing.
+type outSignalGate struct {
+	Enabled   bool    `yaml:"enabled"`
+	Threshold float64 `yaml:"threshold"`
 }
 
 // quotaOut renders the resolved quota adapter configuration. quota.mode is
@@ -731,13 +744,17 @@ func quotaOut(q *QuotaConfig) *outQuota {
 	if q == nil {
 		return nil
 	}
-	return &outQuota{
+	out := &outQuota{
 		Adapter:          q.Adapter,
 		FreshnessTTL:     q.FreshnessTTL.String(),
 		BalanceGroup:     q.BalanceGroup,
 		Weight:           q.Weight,
 		MonthlyBudgetUSD: q.MonthlyBudgetUSD,
 	}
+	if sg := q.SignalGate.Resolved(); !sg.IsDefault() {
+		out.SignalGate = &outSignalGate{Enabled: !sg.Disabled, Threshold: sg.Threshold}
+	}
+	return out
 }
 
 type outTarget struct {

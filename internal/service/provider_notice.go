@@ -5,7 +5,6 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/notice"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
-	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -64,7 +63,7 @@ func (c *Coordinator) recordProviderNoticeFailure(s *state.State, revision uint6
 // reconcileProviderNoticeDebt keeps pending provider states that still match
 // the registered global config, then overlays states committed by fresh edits.
 func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled map[string]bool, revision uint64, edits []policyProviderEdit) *state.PendingProviderNotice {
-	states := make(map[string]bool)
+	states := make(map[string]state.ProviderNoticeState)
 	if previous != nil {
 		for _, p := range previous.Providers {
 			// A nil map means evaluation could not establish the enrolled
@@ -72,16 +71,16 @@ func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled 
 			// case. A non-nil map is authoritative, so de-enrolled IDs are
 			// unverifiable and must not survive a successful evaluation.
 			if enabled == nil {
-				states[p.ID] = p.Enabled
+				states[p.ID] = p
 				continue
 			}
 			if current, ok := enabled[p.ID]; ok && current == p.Enabled {
-				states[p.ID] = p.Enabled
+				states[p.ID] = p
 			}
 		}
 	}
 	for _, edit := range edits {
-		states[edit.id] = edit.enabled
+		states[edit.id] = state.ProviderNoticeState{ID: edit.id, Enabled: edit.enabled, Reason: edit.reason}
 	}
 	if len(states) == 0 {
 		return nil
@@ -96,7 +95,7 @@ func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled 
 	sort.Strings(ids)
 	debt := &state.PendingProviderNotice{Revision: revision, Providers: make([]state.ProviderNoticeState, 0, len(ids))}
 	for _, id := range ids {
-		debt.Providers = append(debt.Providers, state.ProviderNoticeState{ID: id, Enabled: states[id]})
+		debt.Providers = append(debt.Providers, states[id])
 	}
 	return debt
 }
@@ -105,7 +104,7 @@ func reconcileProviderNoticeDebt(previous *state.PendingProviderNotice, enabled 
 // for a provider takes precedence. When enabled is non-nil, stale debt is
 // omitted unless it still matches the committed value.
 func providerNoticeStates(debt *state.PendingProviderNotice, edits []policyProviderEdit, enabled map[string]bool) []notice.ProviderState {
-	states := make(map[string]bool)
+	states := make(map[string]notice.ProviderState)
 	if debt != nil {
 		for _, p := range debt.Providers {
 			if enabled != nil {
@@ -114,11 +113,11 @@ func providerNoticeStates(debt *state.PendingProviderNotice, edits []policyProvi
 					continue
 				}
 			}
-			states[p.ID] = p.Enabled
+			states[p.ID] = notice.ProviderState{ID: p.ID, Enabled: p.Enabled, Reason: p.Reason}
 		}
 	}
 	for _, edit := range edits {
-		states[edit.id] = edit.enabled
+		states[edit.id] = notice.ProviderState{ID: edit.id, Enabled: edit.enabled, Reason: edit.reason}
 	}
 	ids := make([]string, 0, len(states))
 	for id := range states {
@@ -127,16 +126,24 @@ func providerNoticeStates(debt *state.PendingProviderNotice, edits []policyProvi
 	sort.Strings(ids)
 	providers := make([]notice.ProviderState, 0, len(ids))
 	for _, id := range ids {
-		providers = append(providers, notice.ProviderState{ID: id, Enabled: states[id]})
+		providers = append(providers, states[id])
 	}
 	return providers
 }
 
 // providerPlanNoticeEdits extracts only provider enabled-field edits from a
 // gate plan, in the same sanitized provider-state shape used for notices.
-func providerPlanNoticeEdits(edits []reconcile.FieldEdit) []policyProviderEdit {
-	out := make([]policyProviderEdit, 0, len(edits))
-	for _, edit := range edits {
+// Pace-gated providers carry their sanitized pace reason from the plan's gate
+// summary so the notice explains the committed state.
+func providerPlanNoticeEdits(plan providerGatePlan) []policyProviderEdit {
+	gateReasons := make(map[string]string, len(plan.GateSummary))
+	for _, g := range plan.GateSummary {
+		if r := gateNoticeReason(g); r != "" {
+			gateReasons[g.Provider] = r
+		}
+	}
+	out := make([]policyProviderEdit, 0, len(plan.Edits))
+	for _, edit := range plan.Edits {
 		if edit.File != "config.yaml" || len(edit.Path) != 3 || edit.Path[0] != "providers" || edit.Path[2] != "enabled" {
 			continue
 		}
@@ -144,7 +151,7 @@ func providerPlanNoticeEdits(edits []reconcile.FieldEdit) []policyProviderEdit {
 		if edit.Enabled != nil {
 			enabled = *edit.Enabled
 		}
-		out = append(out, policyProviderEdit{id: edit.Path[1], enabled: enabled})
+		out = append(out, policyProviderEdit{id: edit.Path[1], enabled: enabled, reason: gateReasons[edit.Path[1]]})
 	}
 	return out
 }
@@ -153,7 +160,7 @@ func providerPlanNoticeEdits(edits []reconcile.FieldEdit) []policyProviderEdit {
 func pendingNoticeDebt(revision uint64, edits []policyProviderEdit) *state.PendingProviderNotice {
 	debt := &state.PendingProviderNotice{Revision: revision, Providers: make([]state.ProviderNoticeState, 0, len(edits))}
 	for _, e := range edits {
-		debt.Providers = append(debt.Providers, state.ProviderNoticeState{ID: e.id, Enabled: e.enabled})
+		debt.Providers = append(debt.Providers, state.ProviderNoticeState{ID: e.id, Enabled: e.enabled, Reason: e.reason})
 	}
 	return debt
 }
@@ -163,7 +170,7 @@ func pendingNoticeDebt(revision uint64, edits []policyProviderEdit) *state.Pendi
 func providerStatesToEdits(providers []notice.ProviderState) []policyProviderEdit {
 	out := make([]policyProviderEdit, 0, len(providers))
 	for _, p := range providers {
-		out = append(out, policyProviderEdit{id: p.ID, enabled: p.Enabled})
+		out = append(out, policyProviderEdit{id: p.ID, enabled: p.Enabled, reason: p.Reason})
 	}
 	return out
 }
@@ -186,18 +193,29 @@ func ownershipMapsEqual(a, b map[string]state.ProviderOwnership) bool {
 type policyProviderEdit struct {
 	id      string
 	enabled bool
+	// reason is the optional sanitized attribution carried into the notice
+	// (currently only pace gating explains a committed state).
+	reason string
 }
 
 // providerEdits extracts only proven provider enabled-field changes from the
 // committed global prepare result. Removal restores the operator's absent-key
 // baseline, and an absent `providers.<id>.enabled` key means the provider is
 // default-enabled — so a remove edit reports enabled=true, matching the
-// committed effect.
+// committed effect. A signal-gated provider's edit carries its sanitized
+// signal
+// reason so the notice explains the committed state.
 func providerEdits(outcomes []TargetOutcome) []policyProviderEdit {
 	var edits []policyProviderEdit
 	for _, outcome := range outcomes {
 		if outcome.Prepare == nil {
 			continue
+		}
+		gateReasons := make(map[string]string, len(outcome.ProviderGates))
+		for _, g := range outcome.ProviderGates {
+			if r := gateNoticeReason(g); r != "" {
+				gateReasons[g.Provider] = r
+			}
 		}
 		for _, edit := range outcome.Prepare.ChangedEdits {
 			if edit.File != "config.yaml" || len(edit.Path) != 3 || edit.Path[0] != "providers" || edit.Path[2] != "enabled" {
@@ -207,7 +225,7 @@ func providerEdits(outcomes []TargetOutcome) []policyProviderEdit {
 			if edit.Enabled != nil {
 				enabled = *edit.Enabled
 			}
-			edits = append(edits, policyProviderEdit{id: edit.Path[1], enabled: enabled})
+			edits = append(edits, policyProviderEdit{id: edit.Path[1], enabled: enabled, reason: gateReasons[edit.Path[1]]})
 		}
 	}
 	return edits

@@ -9,6 +9,7 @@
 package policy
 
 import (
+	"math"
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/routing"
@@ -36,6 +37,13 @@ type ModelBaseline struct {
 // Desired.Providers key.
 type Mapping struct {
 	Models map[string]ModelBaseline
+
+	// KeepEnabled spares the provider from automatic signal gating: the gate
+	// never plans a disable for it, whatever its signal shows. It constrains
+	// disabling only — a keep_enabled provider that is currently gated off is
+	// re-enabled on the next reconcile pass, regardless of signal recovery,
+	// and an explicit operator `routing disable`/`enable` overrides it.
+	KeepEnabled bool
 
 	// Quota is the optional per-provider quota/routing configuration. It is nil
 	// when the mapping's desired.yaml entry omits a quota section (routing
@@ -119,6 +127,55 @@ type Operational struct {
 	OnChange []OnChangeAction
 }
 
+// DefaultSignalGateThreshold is the use-it-or-lose-it signal value at which
+// signal gating engages when a quota block omits signal_gate.threshold. Zero
+// is the projected-exhaustion line ("this provider runs out before reset");
+// negative thresholds demand overdraw margin. It is the documented default of
+// that key, not a magic number: Load applies it here and the gate surfaces it
+// in diagnostics, so one documented value governs every threshold decision.
+const DefaultSignalGateThreshold = 0.0
+
+// SignalGateConfig is the resolved signal-gating configuration for one
+// provider mapping (provider-only mode). Gating engages when the provider's
+// observed use-it-or-lose-it routing signal falls to or below Threshold on a
+// fresh quota snapshot. The zero value IS the documented default (gating on
+// at DefaultSignalGateThreshold): Disabled is false and Threshold is zero,
+// the projected-exhaustion line. This makes an explicitly disabled gate
+// ({Disabled: true}) representable next to an absent signal_gate block,
+// which Load resolves to the zero value.
+type SignalGateConfig struct {
+	// Disabled records an explicit `signal_gate: {enabled: false}`. The wire
+	// grammar stays positive ("enabled"); the resolved form is inverted so
+	// the struct's zero value means "as documented" with no ambiguity
+	// between "absent" and "explicitly off".
+	Disabled  bool
+	Threshold float64
+}
+
+// DefaultSignalGate returns the documented default signal-gating
+// configuration: gating on at DefaultSignalGateThreshold. It is the zero
+// value of SignalGateConfig.
+func DefaultSignalGate() SignalGateConfig {
+	return SignalGateConfig{}
+}
+
+// Resolved returns p with the documented defaults applied: a threshold that
+// is not finite and non-positive falls back to the default. Load rejects
+// out-of-range explicit thresholds before this point; the fallback exists for
+// hand-built configs, never to launder invalid input.
+func (p SignalGateConfig) Resolved() SignalGateConfig {
+	if p.Threshold > 0 || math.IsNaN(p.Threshold) || math.IsInf(p.Threshold, 0) {
+		p.Threshold = DefaultSignalGateThreshold
+	}
+	return p
+}
+
+// IsDefault reports whether p is exactly the documented default configuration
+// (the only shape the rendered policy omits).
+func (p SignalGateConfig) IsDefault() bool {
+	return !p.Disabled && p.Threshold == DefaultSignalGateThreshold
+}
+
 // QuotaConfig holds per-provider quota/routing configuration (additive on
 // Mapping). When a mapping omits its quota section, the mapping's Quota pointer
 // is nil and routing treats it as unrankable (it keeps its position, never
@@ -141,6 +198,12 @@ type QuotaConfig struct {
 	// the quota. Neuralwatt reads its provider-reported balance directly.
 	MonthlyBudgetUSD float64
 	Schedule         *routing.Schedule // nil = never off-peak
+	// SignalGate is the resolved signal-gating configuration (additive). It
+	// is consumed only by the provider-only gate; legacy mode keeps
+	// rank-demotion-only semantics. Load resolves an absent signal_gate
+	// block to DefaultSignalGate, so the in-memory config always carries the
+	// effective values.
+	SignalGate SignalGateConfig
 }
 
 // RoutingConfig holds the top-level routing enablement (additive on Desired).

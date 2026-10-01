@@ -23,6 +23,59 @@ global:
   root: /home/user/.config/polytoken
 `
 
+// TestLoadKeepEnabledParsesPerProvider proves the keep_enabled schema:
+// absent loads false, true parses, and a docs-shaped desired.yaml with the
+// key round-trips through the on-disk loader.
+func TestLoadKeepEnabledParsesPerProvider(t *testing.T) {
+	doc := `version: 1
+mode: provider-only
+providers:
+  codex:
+    keep_enabled: true
+    quota:
+      adapter: codex
+  team-llm: {}
+global:
+  root: /home/user/.config/polytoken
+`
+	path := filepath.Join(t.TempDir(), "desired.yaml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Providers["codex"].KeepEnabled {
+		t.Fatal("codex keep_enabled = false, want true")
+	}
+	if d.Providers["team-llm"].KeepEnabled {
+		t.Fatal("team-llm keep_enabled = true, want the absent-key default false")
+	}
+
+	// The legacy-mode grammar accepts the same per-provider key and parses it
+	// identically (the schema lives under providers.<id> for both modes).
+	legacy := `version: 1
+providers:
+  codex:
+    keep_enabled: true
+    models: [codex/gpt]
+global:
+  root: /home/user/.config/polytoken
+`
+	path = filepath.Join(t.TempDir(), "desired.yaml")
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Providers["codex"].KeepEnabled {
+		t.Fatal("legacy codex keep_enabled = false, want true")
+	}
+}
+
 // TestProviderOnlyRejectsLegacyChainsAndModels proves the opt-in provider-only
 // mode rejects every conflicting legacy target/model field: enumerated models
 // under a provider, desired chains on the global target, definition chains,
