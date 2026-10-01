@@ -909,6 +909,98 @@ modelgroups:
 	t.Run("polytoken-ref fallback is advisory", func(t *testing.T) {
 		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{`<polytoken-ref type="model_group" name="solo"/>`}})), Safe)
 	})
+
+	t.Run("definition-only orphan-provider model pin is advisory", func(t *testing.T) {
+		orphan := strings.Replace(base,
+			"  pp/p4:\n    provider: pp\n    enabled: false\n",
+			"  pp/p4:\n    provider: pp\n    enabled: false\n  xx/x1:\n    provider: xx\n    enabled: true\n", 1)
+		r := analyze("gp", Layer{ID: "global", Global: true, Config: []byte(orphan),
+			Definitions: []Definition{{Path: "facets/orphan.md", Model: "xx/x1"}}})
+		// Best-effort contract: the definition reference classifies silently.
+		// The orphan-provider evidence belongs to group-leaf resolution only.
+		wantVerdict(t, r, Safe)
+		if len(r.Reasons) != 0 {
+			t.Fatalf("advisory pin carried evidence: %v", r.Reasons)
+		}
+	})
+
+	t.Run("polytoken-ref with duplicate name attributes is unresolvable", func(t *testing.T) {
+		r := analyze("pp", defs(Definition{Path: "facets/dupe.md", Model: `<polytoken-ref type="model_group" name="failover" name="solo"/>`}))
+		// The ambiguous element must not resolve to a last-match guess: the
+		// disable still dies on the emptied "solo" group (group-level
+		// evidence), but the definition contributes no reason of its own.
+		wantVerdict(t, r, Unsafe)
+		for _, reason := range r.Reasons {
+			if strings.Contains(reason, "facets/dupe.md") || strings.Contains(reason, "primary reference") {
+				t.Fatalf("ambiguous element produced a definition reason: %q", reason)
+			}
+		}
+	})
+
+	t.Run("polytoken-ref with leftover element text is unresolvable", func(t *testing.T) {
+		r := analyze("pp", defs(Definition{Path: "facets/junk.md", Model: `<polytoken-ref type="model_group" name="solo" stale/>`}))
+		wantVerdict(t, r, Unsafe)
+		for _, reason := range r.Reasons {
+			if strings.Contains(reason, "facets/junk.md") || strings.Contains(reason, "primary reference") {
+				t.Fatalf("unrecognized element text produced a definition reason: %q", reason)
+			}
+		}
+	})
+
+	t.Run("polytoken-ref without a name is advisory", func(t *testing.T) {
+		r := analyze("gp", defs(Definition{Path: "facets/nameless.md", Model: `<polytoken-ref type="model_group"/>`}))
+		wantVerdict(t, r, Safe)
+		if len(r.Reasons) != 0 {
+			t.Fatalf("nameless element carried evidence: %v", r.Reasons)
+		}
+	})
+
+	t.Run("definition-death reason stays single-line and bounded", func(t *testing.T) {
+		long := strings.Repeat("x", 300)
+		ref := "<polytoken-ref\n  type=\"model_group\"\n  name=\"solo\"\n  note=\"" + long + "\"/>"
+		r := analyze("pp", defs(Definition{Path: "facets/wide.md", Model: ref}))
+		wantVerdict(t, r, Unsafe)
+		wantReason(t, r, "kills the primary reference")
+		for _, reason := range r.Reasons {
+			if strings.Contains(reason, "\n") {
+				t.Fatalf("multi-line reason: %q", reason)
+			}
+			if len(reason) > 300 {
+				t.Fatalf("unbounded reason (%d chars): %q", len(reason), reason)
+			}
+		}
+	})
+}
+
+// TestPolytokenRefGrouping pins the element classifier directly: only an
+// exactly well-formed <polytoken-ref type="model_group" name="X"/> body (one
+// type, one name, no leftover non-whitespace text) resolves to X; every
+// ambiguous or malformed shape is recognized but unresolvable, never a
+// last-match guess and never a literal model name.
+func TestPolytokenRefGrouping(t *testing.T) {
+	cases := []struct {
+		ref      string
+		wantName string
+		wantIs   bool
+	}{
+		{ref: `<polytoken-ref type="model_group" name="solo"/>`, wantName: "solo", wantIs: true},
+		{ref: `  <polytoken-ref type="model_group" name="solo"/>  `, wantName: "solo", wantIs: true},
+		{ref: "<polytoken-ref\n  type=\"model_group\"\n  name=\"solo\"/>", wantName: "solo", wantIs: true},
+		{ref: `<polytoken-ref name="solo" type="model_group"/>`, wantName: "solo", wantIs: true},
+		{ref: `<polytoken-ref type="model" name="solo"/>`, wantName: "", wantIs: true},
+		{ref: `<polytoken-ref type="model_group"/>`, wantName: "", wantIs: true},
+		{ref: `<polytoken-ref type="model_group" name="failover" name="solo"/>`, wantName: "", wantIs: true},
+		{ref: `<polytoken-ref type="model_group" type="model" name="solo"/>`, wantName: "", wantIs: true},
+		{ref: `<polytoken-ref type="model_group" name="solo" stale/>`, wantName: "", wantIs: true},
+		{ref: `<polytoken-ref type="model_group" name="solo">`, wantName: "", wantIs: false},
+		{ref: `mg:solo`, wantName: "", wantIs: false},
+	}
+	for _, tc := range cases {
+		name, isRef := polytokenRefGroup(tc.ref)
+		if isRef != tc.wantIs || name != tc.wantName {
+			t.Errorf("polytokenRefGroup(%q) = (%q, %v), want (%q, %v)", tc.ref, name, isRef, tc.wantName, tc.wantIs)
+		}
+	}
 }
 
 // TestAnalyzerModelingSemantics pins the remaining graph-modeling rules:

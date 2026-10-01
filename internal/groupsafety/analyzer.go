@@ -406,32 +406,46 @@ func isTierDefault(name string) bool {
 	return name == tierDefaultFull || name == tierDefaultMini || name == tierDefaultNano
 }
 
+// availability is the pure provider-state predicate behind available: usable
+// reports whether model resolves to an enabled leaf, known whether the model
+// exists in the parsed global catalog, and missingProvider names the catalog
+// entry's provider when no providers entry defines it. It records nothing,
+// so definition-reference classification stays silent; only the group-leaf
+// resolution path surfaces the orphan-provider evidence (available).
+func (r *resolver) availability(global *parsedLayer, name string, disabled bool) (usable, known bool, missingProvider string) {
+	if global == nil {
+		return false, false, ""
+	}
+	def, ok := global.models[name]
+	if !ok {
+		return false, false, ""
+	}
+	if !def.enabled {
+		return false, true, ""
+	}
+	enabledNow, hasProvider := global.providers[def.provider]
+	if !hasProvider {
+		return false, true, def.provider
+	}
+	if disabled && def.provider == r.disable {
+		return false, true, ""
+	}
+	return enabledNow, true, ""
+}
+
 // available reports whether model is usable under the current provider state
 // (disabled=false) or with the proposed disable applied (disabled=true).
 // known reports whether the model exists in the parsed global catalog; an
 // unknown model is statically skipped by the binary, but for the analyzer it
 // is pending-unknown evidence because a dynamically discovered model cannot
-// be distinguished from a typo offline.
+// be distinguished from a typo offline. Called only on the group-leaf
+// resolution path, where unresolved evidence must keep the graph fail-closed.
 func (r *resolver) available(global *parsedLayer, name string, disabled bool) (usable, known bool) {
-	if global == nil {
-		return false, false
+	usable, known, missingProvider := r.availability(global, name, disabled)
+	if missingProvider != "" {
+		r.pending(fmt.Sprintf("model %q attributes to provider %q which has no providers entry", name, missingProvider))
 	}
-	def, ok := global.models[name]
-	if !ok {
-		return false, false
-	}
-	if !def.enabled {
-		return false, true
-	}
-	enabledNow, hasProvider := global.providers[def.provider]
-	if !hasProvider {
-		r.pending(fmt.Sprintf("model %q attributes to provider %q which has no providers entry", name, def.provider))
-		return false, true
-	}
-	if disabled && def.provider == r.disable {
-		return false, true
-	}
-	return enabledNow, true
+	return usable, known
 }
 
 // modelProviderFromName infers a model's owning provider from its catalog
@@ -660,11 +674,11 @@ func (r *resolver) referenceState(global *parsedLayer, ref string) refState {
 		// A group-shaped reference to an undefined, non-reserved name.
 		return refUnknown
 	}
-	beforeUsable, knownBefore := r.available(global, name, false)
+	beforeUsable, knownBefore, _ := r.availability(global, name, false)
 	if !knownBefore {
 		return refUnknown
 	}
-	afterUsable, _ := r.available(global, name, true)
+	afterUsable, _, _ := r.availability(global, name, true)
 	switch {
 	case afterUsable:
 		return refUsable
@@ -681,8 +695,23 @@ func (r *resolver) referenceState(global *parsedLayer, ref string) refState {
 // and refDeadBefore states contribute nothing to the verdict.
 func (r *resolver) checkReference(global *parsedLayer, ref, where, kind string) {
 	if r.referenceState(global, ref) == refDeadAfter {
-		r.unsafe(fmt.Sprintf("disabling %q kills the %s reference %q of definition %s; the reference would no longer resolve", r.disable, kind, ref, where))
+		r.unsafe(fmt.Sprintf("disabling %q kills the %s reference %q of definition %s; the reference would no longer resolve", r.disable, kind, reasonRef(ref), where))
 	}
+}
+
+// reasonRefMax bounds one definition reference rendered into report reasons.
+const reasonRefMax = 120
+
+// reasonRef renders a definition reference for reason evidence: whitespace
+// runs are flattened and the value capped, so a multi-line or oversized
+// attribute value can never put a newline or unbounded text into a report
+// reason (Report.Reasons are documented as sanitized single-line evidence).
+func reasonRef(ref string) string {
+	flat := strings.Join(strings.Fields(ref), " ")
+	if len(flat) > reasonRefMax {
+		flat = flat[:reasonRefMax] + "..."
+	}
+	return flat
 }
 
 // polytokenRefAttr matches one double-quoted attribute inside a polytoken-ref
@@ -692,9 +721,11 @@ var polytokenRefAttr = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_.:-]*)="([^"]*)"
 // polytokenRefGroup recognizes the definition frontmatter's element-shaped
 // group reference, <polytoken-ref type="model_group" name="X"/>, and returns
 // the referenced group name. isRef reports whether the value is a polytoken-ref
-// element at all: an element that is missing its type, carries a non-
-// model_group type, or names no group is recognized but unresolvable
-// (refUnknown) — it is never mistaken for a literal model name.
+// element at all. An element that is ambiguous (more than one type or name
+// attribute), carries leftover non-whitespace body text, is missing its type,
+// carries a non-model_group type, or names no group is recognized but
+// unresolvable (refUnknown) — it is never mistaken for a literal model name
+// and never resolved to a last-match guess.
 func polytokenRefGroup(ref string) (name string, isRef bool) {
 	const refOpen = "<polytoken-ref"
 	const refSelfClose = "/>"
@@ -703,14 +734,27 @@ func polytokenRefGroup(ref string) (name string, isRef bool) {
 		return "", false
 	}
 	inner := s[len(refOpen) : len(s)-len(refSelfClose)]
-	attrs := map[string]string{}
-	for _, m := range polytokenRefAttr.FindAllStringSubmatch(inner, -1) {
-		attrs[m[1]] = m[2]
+	var types, names []string
+	var leftover strings.Builder
+	last := 0
+	for _, m := range polytokenRefAttr.FindAllStringSubmatchIndex(inner, -1) {
+		leftover.WriteString(inner[last:m[0]])
+		switch key := inner[m[2]:m[3]]; key {
+		case "type":
+			types = append(types, inner[m[4]:m[5]])
+		case "name":
+			names = append(names, inner[m[4]:m[5]])
+		}
+		last = m[1]
 	}
-	if attrs["type"] != "model_group" {
+	leftover.WriteString(inner[last:])
+	if len(types) != 1 || len(names) != 1 || strings.TrimSpace(leftover.String()) != "" {
 		return "", true
 	}
-	return attrs["name"], true
+	if types[0] != "model_group" {
+		return "", true
+	}
+	return names[0], true
 }
 
 // parseLayer strictly parses the relevant subset of one layer's config.yaml:
