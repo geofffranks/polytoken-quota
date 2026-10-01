@@ -1391,6 +1391,39 @@ func TestProviderGateKeepEnabledSparesSignalDisable(t *testing.T) {
 			t.Fatalf("claims = %+v, want the restored claim released", st.ProviderOwnership)
 		}
 	})
+
+	t.Run("still-gated signal claim is restored once keep_enabled is set", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+		now := f.clock.t
+		// gp holds a signal claim from BEFORE the keep_enabled flip, and its
+		// signal is STILL at/below threshold — no recovery. The next pass
+		// restores the baseline anyway.
+		f.seedState(8, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // still gated: -0.72
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+		}, map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+		})
+		before := f.readGlobalConfig()
+		if !strings.Contains(before, "enabled: false") {
+			t.Fatal("fixture must start with gp gated off")
+		}
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		if got := f.readGlobalConfig(); !strings.Contains(got, "enabled: true") || got == before {
+			t.Fatalf("still-gated keep_enabled provider was not restored:\n%s", got)
+		}
+		if st := f.loadState(); len(st.ProviderOwnership) != 0 {
+			t.Fatalf("claims = %+v, want the stale signal claim released", st.ProviderOwnership)
+		}
+	})
 }
 
 // fmtHash renders a sha256 digest as the journal's hex form.

@@ -71,8 +71,9 @@ retained in their authored positions.
   automatic signal gate: with `keep_enabled: true` the gate never plans a
   disable for that provider, whatever its quota signal shows (default false
   when the key is absent). It constrains disabling only — a keep_enabled
-  provider that is currently off is still re-enabled when its signal
-  recovers, and an explicit operator `routing disable`/`enable` overrides it.
+  provider that is currently gated off is re-enabled on the next reconcile
+  pass, regardless of signal recovery, and an explicit operator
+  `routing disable`/`enable` overrides it.
 - `providers.<id>.quota` optionally attaches quota polling. Unlike legacy
   mode, the quota block must name its adapter explicitly with `quota.adapter`
   (one of the built-in adapter names). The Anthropic rules carry over:
