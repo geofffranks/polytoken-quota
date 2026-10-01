@@ -38,6 +38,13 @@ type ModelBaseline struct {
 type Mapping struct {
 	Models map[string]ModelBaseline
 
+	// KeepEnabled spares the provider from automatic signal gating: the gate
+	// never plans a disable for it, whatever its signal shows. It constrains
+	// disabling only — a keep_enabled provider that is currently off is still
+	// re-enabled when its signal recovers, and an explicit operator
+	// `routing disable`/`enable` overrides it.
+	KeepEnabled bool
+
 	// Quota is the optional per-provider quota/routing configuration. It is nil
 	// when the mapping's desired.yaml entry omits a quota section (routing
 	// disabled for that mapping). When present it carries the routing-relevant

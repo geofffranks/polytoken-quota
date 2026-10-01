@@ -67,6 +67,12 @@ retained in their authored positions.
 - `providers.<id>` enrolls the Polytoken provider ID `<id>`. IDs are enrolled
   verbatim — they do not need to name a quota adapter. A mapping may be empty
   (`id: {}`): the provider is visible in diagnostics but never polled.
+- `providers.<id>.keep_enabled` optionally spares the provider from the
+  automatic signal gate: with `keep_enabled: true` the gate never plans a
+  disable for that provider, whatever its quota signal shows (default false
+  when the key is absent). It constrains disabling only — a keep_enabled
+  provider that is currently off is still re-enabled when its signal
+  recovers, and an explicit operator `routing disable`/`enable` overrides it.
 - `providers.<id>.quota` optionally attaches quota polling. Unlike legacy
   mode, the quota block must name its adapter explicitly with `quota.adapter`
   (one of the built-in adapter names). The Anthropic rules carry over:
@@ -100,7 +106,7 @@ retained in their authored positions.
 | `check` | Polls enrolled, adapter-configured providers as usual. |
 | `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the signal gate and staged validation pass. |
 | `reconcile` | Apply provider-only gating without polling; provider state comes from the latest saved evidence. Supports `--dry-run`, `--keep-staging` (dry-run only), and `--verbose`. |
-| `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. |
+| `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. Manual toggles override `keep_enabled`: an explicit operator action may disable a provider the automatic gate spares. |
 | `routing reset` | Unsupported: clearing every manual disable has no provider-only meaning; enable providers individually with `routing enable <provider>`. |
 | `doctor` | Maintained: policy schema, state, publication/journal, and quota findings work; no chain findings exist. |
 | `history` | Maintained: state history is independent of the policy mode. |
@@ -250,7 +256,9 @@ In provider-only mode `projects` entries carry exactly `id` and `root`:
 version: 1
 mode: provider-only
 providers:
-  codex: {}
+  codex:
+    keep_enabled: true
+  zai: {}
 global:
   root: /home/user/.config/polytoken
 projects:

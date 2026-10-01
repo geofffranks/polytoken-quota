@@ -76,7 +76,8 @@ func loadBytes(data []byte) (Desired, error) {
 			return Desired{}, fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			Models: map[string]ModelBaseline{},
+			Models:     map[string]ModelBaseline{},
+			KeepEnabled: mw.KeepEnabled,
 		}
 		for _, entry := range mw.Models {
 			base := entry.name
@@ -428,7 +429,7 @@ func loadProviderOnly(w docWire) (Desired, error) {
 		if len(mw.Models) > 0 {
 			return Desired{}, fmt.Errorf("policy: provider-only mapping %q must not enumerate models (remove the legacy models field)", idStr)
 		}
-		m := Mapping{}
+		m := Mapping{KeepEnabled: mw.KeepEnabled}
 		if mw.Quota != nil {
 			if !mw.Quota.adapterSet || strings.TrimSpace(mw.Quota.Adapter) == "" {
 				names := adapterNames()
@@ -527,8 +528,9 @@ func providerOnlyProjectRoots(wire []projectWire) ([]Target, error) {
 }
 
 type mappingWire struct {
-	Models []modelWire `yaml:"models"`
-	Quota  *quotaWire  `yaml:"quota"`
+	Models      []modelWire `yaml:"models"`
+	Quota       *quotaWire  `yaml:"quota"`
+	KeepEnabled bool        `yaml:"keep_enabled"`
 }
 
 // modelWire is one entry in a mapping's models sequence. It accepts a bare name

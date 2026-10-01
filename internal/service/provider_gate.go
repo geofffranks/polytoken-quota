@@ -494,8 +494,10 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		verdict := verdicts[id] // zero value: no verdict means never gate
 		gateEnabled, gateThreshold := signalGateConfigOf(desired, id)
 		// The signal axis engages only on fresh at-or-below-threshold evidence
-		// that the pool rule did not suppress this pass.
-		gated := gateEnabled && verdict.Gated && !pool.SkipSignal[id]
+		// that the pool rule did not suppress this pass, and never on a
+		// keep_enabled provider: the operator has marked it spared from
+		// automatic disabling (its recovery enable path is unaffected).
+		gated := gateEnabled && verdict.Gated && !pool.SkipSignal[id] && !desired.Providers[policy.MappingID(id)].KeepEnabled
 
 		summary := ProviderGateSummary{Provider: id}
 		if verdict.Signal != nil {

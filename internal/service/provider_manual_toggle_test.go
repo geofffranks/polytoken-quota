@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -431,6 +432,33 @@ func TestProviderToggleInputCurrentRejectsChangedField(t *testing.T) {
 	}
 	if err := providerToggleInputCurrent(removed, "gp", false, false); err != nil {
 		t.Fatalf("absent-key match refused: %v", err)
+	}
+}
+
+// TestProviderToggleWorksOnKeepEnabledProvider proves manual toggles are
+// unaffected by keep_enabled: an explicit operator `routing disable` still
+// gates off a keep_enabled provider (manual action overrides the constraint).
+func TestProviderToggleWorksOnKeepEnabledProvider(t *testing.T) {
+	f := newGateFixture(t, []string{"gp", "pp"}, nil)
+	m := f.desired.Providers[policy.MappingID("gp")]
+	m.KeepEnabled = true
+	f.desired.Providers[policy.MappingID("gp")] = m
+	f.seedState(7, nil, nil)
+	before := f.readGlobalConfig()
+	pub := &gateCountingPublisher{PublisherAdapter: PublisherAdapter{Publisher: f.publisher()}}
+	c := f.coordinatorWith(pub)
+
+	out := c.Disable(context.Background(), "gp")
+	if !out.Accepted || out.Error != nil {
+		t.Fatalf("out=%+v err=%v", out, out.Error)
+	}
+	want := strings.Replace(before, "    # operator-set value\n    enabled: true", "    # operator-set value\n    enabled: false", 1)
+	if got := f.readGlobalConfig(); got != want {
+		t.Fatalf("manual disable on a keep_enabled provider did not publish:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	st := f.loadState()
+	if claim, ok := st.ProviderOwnership["gp"]; !ok || !claim.Owned {
+		t.Fatalf("gp claim = %+v, want the manual-disable claim", claim)
 	}
 }
 

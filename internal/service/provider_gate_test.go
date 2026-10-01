@@ -1302,6 +1302,97 @@ func TestProviderGateRefusesDuplicateProviderConfig(t *testing.T) {
 	})
 }
 
+// TestProviderGateKeepEnabledSparesSignalDisable proves the keep_enabled
+// desired.yaml contract: a keep_enabled provider is never a signal-disable
+// candidate (no edit, no claim, gate row unchanged) while other eligible
+// providers still gate normally in the same pass; and a keep_enabled provider
+// with recovered signal is still re-enabled (the enable path is untouched).
+func TestProviderGateKeepEnabledSparesSignalDisable(t *testing.T) {
+	t.Run("gated signal spares the keep_enabled provider and still gates others", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp", "zz"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		now := f.clock.t
+		f.seedState(7, map[string]state.ProviderState{
+			// gp and pp both carry gating (overdrawn) signals; zz keeps the
+			// pool from being fully overdrawn so signal gating engages at all.
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp signal -0.72
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // pp signal -0.72
+			"zz": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)}, // zz signal +1.60
+		}, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		// pp gates off normally; gp is untouched.
+		after := f.readGlobalConfig()
+		if after == before {
+			t.Fatal("pp was not gated off")
+		}
+		gp := strings.Split(strings.Split(after, "  gp:\n")[1], "  pp:")[0]
+		if !strings.Contains(gp, "enabled: true") {
+			t.Fatalf("keep_enabled provider was gated off:\n%s", gp)
+		}
+		st := f.loadState()
+		if _, held := st.ProviderOwnership["gp"]; held {
+			t.Fatalf("keep_enabled provider claimed: %+v", st.ProviderOwnership["gp"])
+		}
+		if claim, ok := st.ProviderOwnership["pp"]; !ok || !claim.Owned {
+			t.Fatalf("pp claim = %+v, want the normal signal claim", claim)
+		}
+		// The gate summary still observes gp's signal, but proposes no disable.
+		var gpRow, ppRow ProviderGateSummary
+		for _, g := range out.Targets[0].ProviderGates {
+			switch g.Provider {
+			case "gp":
+				gpRow = g
+			case "pp":
+				ppRow = g
+			}
+		}
+		if gpRow.Action != GateActionUnchanged {
+			t.Fatalf("gp gate row = %+v, want unchanged (no disable proposal)", gpRow)
+		}
+		if ppRow.Action != GateActionDisabled {
+			t.Fatalf("pp gate row = %+v, want disabled", ppRow)
+		}
+	})
+
+	t.Run("recovered signal still re-enables a keep_enabled provider", func(t *testing.T) {
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		m := f.desired.Providers[policy.MappingID("gp")]
+		m.KeepEnabled = true
+		f.desired.Providers[policy.MappingID("gp")] = m
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false"}))
+		now := f.clock.t
+		// gp currently held by a signal claim (operator baseline true).
+		f.seedState(8, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)}, // recovered: +1.60
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+		}, map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+		})
+		before := f.readGlobalConfig()
+		if !strings.Contains(before, "enabled: false") {
+			t.Fatal("fixture must start with gp gated off")
+		}
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		if got := f.readGlobalConfig(); !strings.Contains(got, "enabled: true") || got == before {
+			t.Fatalf("keep_enabled provider was not re-enabled:\n%s", got)
+		}
+		if st := f.loadState(); len(st.ProviderOwnership) != 0 {
+			t.Fatalf("claims = %+v, want the restored claim released", st.ProviderOwnership)
+		}
+	})
+}
+
 // fmtHash renders a sha256 digest as the journal's hex form.
 func fmtHash(d [32]byte) string {
 	const hex = "0123456789abcdef"

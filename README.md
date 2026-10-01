@@ -374,8 +374,8 @@ Offline repository tests verify protocol handling, selection, persistence bounda
 | `status [--json]` | Show the merged quota and routing view: routing enablement, one global last-checked time, every configured mapping's status/reason, raw per-window quota numbers, next resets, compact target/source route rows with first desired/effective models, and a pending-config warning pointing at `doctor`. `--json` additionally retains ranking fields, route provenance, and complete desired/effective chains. |
 | `check [--provider <id>] [--reconcile] [--json] [--quiet]` | Poll quota once; optionally filter a mapping, reconcile after saving (including provider-only gating), emit JSON, or suppress all output (for cron/launchd/systemd). |
 | `reconcile [--dry-run [--keep-staging]] [--verbose]` | Reconcile managed fields; in provider-only mode gates enrolled providers after staged validation of the composed candidate. Quiet by default. `--keep-staging` is dry-run only; retained candidates may contain merged configuration. |
-| `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). |
-| `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). |
+| `routing enable <mapping-id>` | Enable a provider mapping (clear manual disable). Overrides `keep_enabled` (the keep_enabled flag constrains automatic gating only). |
+| `routing disable <mapping-id>` | Disable a provider mapping (hard exclusion). Overrides `keep_enabled`: an explicit operator disable works even on a keep_enabled provider. |
 | `routing reset` | Clear all manual disables while preserving automatic observations. |
 | `doctor [--json]` | Run configuration, quota, journal, and persisted-error diagnostics. |
 | `history [--limit N] [--revision N] [--json]` | Show the meaningful provider/routing event timeline. `--limit` (1–100, default 20) limits event rows; `--revision` shows all events for one revision; `--json` emits deterministic structured events. |
