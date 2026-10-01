@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -118,8 +119,10 @@ type Report struct {
 // are the configured tier defaults. polytoken:general-purpose and
 // polytoken:general-purpose-mini are the derived reserved groups observed to
 // publish the full/mini default's effective leaves. The nano tier's derived
-// reserved name has never been observed, so a reference to one is
-// pending-unknown, as is any other name in the polytoken: namespace.
+// reserved name has never been observed: a modelgroups-leaf reference to it
+// (or any other name in the polytoken: namespace) is pending-unknown, while
+// a definition reference to an unresolvable name is advisory under the
+// best-effort definition contract.
 const (
 	tierDefaultFull = "polytoken:default_model_full"
 	tierDefaultMini = "polytoken:default_model_mini"
@@ -591,11 +594,13 @@ func (r *resolver) resolveGroups(global *parsedLayer) {
 	}
 }
 
-// checkDefinitions verifies every facet/subagent reference from the
-// registered roots stays usable after the disable. A primary reference that
-// dies is provable breakage (unsafe); a reference that was already dead, or
-// whose fallback list would lose entries, involves semantics that were never
-// pinned against the binary (pending-unknown).
+// checkDefinitions verifies every facet/subagent primary reference from the
+// registered roots survives the proposed disable. Under the best-effort
+// definition-reference contract only a provable primary-reference death is
+// unsafe; uncertain shapes (unresolvable names, already-dead references,
+// polytoken-ref elements that are not model_group references) and every
+// fallback outcome are advisory and contribute nothing to the verdict —
+// no pending-unknown and no reason emission.
 func (r *resolver) checkDefinitions(global *parsedLayer) {
 	for _, def := range r.definitions {
 		where := def.Path
@@ -604,30 +609,6 @@ func (r *resolver) checkDefinitions(global *parsedLayer) {
 		}
 		if def.Model != "" {
 			r.checkReference(global, def.Model, where, "primary")
-		}
-		alive, deadAfter, deadBefore, unknown := 0, 0, 0, 0
-		for _, fb := range def.Fallbacks {
-			switch r.referenceState(global, fb) {
-			case refUsable:
-				alive++
-			case refDeadAfter:
-				deadAfter++
-			case refDeadBefore:
-				deadBefore++
-			case refUnknown:
-				unknown++
-			}
-		}
-		switch {
-		case len(def.Fallbacks) == 0:
-		case unknown > 0:
-			r.pending(fmt.Sprintf("definition %s lists a fallback that no registered layer defines; fallback composition is unproven", where))
-		case alive == 0:
-			r.pending(fmt.Sprintf("definition %s would keep no usable fallback; fallback semantics are unproven", where))
-		case deadAfter > 0:
-			r.pending(fmt.Sprintf("disabling %q would drop %d of %d fallback references of definition %s; fallback semantics are unproven", r.disable, deadAfter, len(def.Fallbacks), where))
-		case deadBefore > 0:
-			r.pending(fmt.Sprintf("definition %s lists %d already-unavailable fallback references; the registered root is not currently valid", where, deadBefore))
 		}
 	}
 }
@@ -642,8 +623,18 @@ const (
 )
 
 // referenceState classifies one reference before and after the proposed
-// disable.
+// disable. An element-shaped <polytoken-ref type="model_group" name="X"/>
+// primary or fallback value is recognized as a reference to configured group
+// X, equivalent to the mg:X spelling, resolved through the effective
+// global+project graph; any other polytoken-ref element shape is recognized
+// but unresolvable (refUnknown).
 func (r *resolver) referenceState(global *parsedLayer, ref string) refState {
+	if group, isRef := polytokenRefGroup(ref); isRef {
+		if group == "" {
+			return refUnknown
+		}
+		ref = "mg:" + group
+	}
 	name := ref
 	if strings.HasPrefix(ref, "mg:") {
 		name = strings.TrimPrefix(ref, "mg:")
@@ -684,16 +675,42 @@ func (r *resolver) referenceState(global *parsedLayer, ref string) refState {
 	}
 }
 
+// checkReference classifies one primary definition reference. Under the
+// best-effort contract only a reference that was usable before the proposal
+// and provably dies under it is breakage (unsafe); refUsable, refUnknown,
+// and refDeadBefore states contribute nothing to the verdict.
 func (r *resolver) checkReference(global *parsedLayer, ref, where, kind string) {
-	switch r.referenceState(global, ref) {
-	case refUsable:
-	case refUnknown:
-		r.pending(fmt.Sprintf("definition %s %s reference %q cannot be resolved; dynamic catalog composition is unproven", where, kind, ref))
-	case refDeadAfter:
+	if r.referenceState(global, ref) == refDeadAfter {
 		r.unsafe(fmt.Sprintf("disabling %q kills the %s reference %q of definition %s; the reference would no longer resolve", r.disable, kind, ref, where))
-	case refDeadBefore:
-		r.pending(fmt.Sprintf("definition %s %s reference %q is already unavailable; the registered root is not currently valid", where, kind, ref))
 	}
+}
+
+// polytokenRefAttr matches one double-quoted attribute inside a polytoken-ref
+// element body, e.g. type="model_group".
+var polytokenRefAttr = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_.:-]*)="([^"]*)"`)
+
+// polytokenRefGroup recognizes the definition frontmatter's element-shaped
+// group reference, <polytoken-ref type="model_group" name="X"/>, and returns
+// the referenced group name. isRef reports whether the value is a polytoken-ref
+// element at all: an element that is missing its type, carries a non-
+// model_group type, or names no group is recognized but unresolvable
+// (refUnknown) — it is never mistaken for a literal model name.
+func polytokenRefGroup(ref string) (name string, isRef bool) {
+	const refOpen = "<polytoken-ref"
+	const refSelfClose = "/>"
+	s := strings.TrimSpace(ref)
+	if !strings.HasPrefix(s, refOpen) || !strings.HasSuffix(s, refSelfClose) {
+		return "", false
+	}
+	inner := s[len(refOpen) : len(s)-len(refSelfClose)]
+	attrs := map[string]string{}
+	for _, m := range polytokenRefAttr.FindAllStringSubmatch(inner, -1) {
+		attrs[m[1]] = m[2]
+	}
+	if attrs["type"] != "model_group" {
+		return "", true
+	}
+	return attrs["name"], true
 }
 
 // parseLayer strictly parses the relevant subset of one layer's config.yaml:

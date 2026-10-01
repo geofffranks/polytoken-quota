@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +266,45 @@ func TestSignalGateAnalyzerRefusal(t *testing.T) {
 		}
 		f.requireNoPendingEdit(t, f.loadState())
 	})
+}
+
+// TestSignalGateUnresolvedDefinitionReferencesAreAdvisory mirrors the live
+// incident shape: a facet's primary model is a model_group polytoken-ref
+// naming a group no layer defines, and its fallback list names an undefined
+// model. Definition-reference uncertainty is advisory in the safety
+// analyzer, so the signal-gated disable proceeds and publishes instead of
+// being refused as pending-unknown.
+func TestSignalGateUnresolvedDefinitionReferencesAreAdvisory(t *testing.T) {
+	f := newSignalFixture(t, []string{"gp", "pp"})
+	if err := os.MkdirAll(filepath.Join(f.globalRoot, "facets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: PM\npolytoken:\n" +
+		"  model: <polytoken-ref type=\"model_group\" name=\"pm_facet\"/>\n" +
+		"  fallback_models:\n    - some/undefined\n---\n"
+	if err := os.WriteFile(filepath.Join(f.globalRoot, "facets", "pm.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := f.clock.t
+	f.seedState(7, map[string]state.ProviderState{
+		"gp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)}, // gp overdrawn
+		"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},
+	}, nil)
+	before := f.readGlobalConfig()
+
+	out := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.PendingCount() != 0 {
+		t.Fatalf("out=%+v want the disable published", out)
+	}
+	want := strings.Replace(before, "    # operator-set value\n    enabled: true", "    # operator-set value\n    enabled: false", 1)
+	if got := f.readGlobalConfig(); got != want {
+		t.Fatalf("byte mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	st := f.loadState()
+	claim, ok := st.ProviderOwnership["gp"]
+	if !ok || !claim.Owned {
+		t.Fatalf("gp ownership claim = %+v, want a signal claim", claim)
+	}
 }
 
 // TestSignalGateRecoveryRestoresBaseline proves AC.4 for both restore shapes:

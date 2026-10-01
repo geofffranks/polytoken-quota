@@ -140,13 +140,16 @@ func TestProjectGroupCannotMaskAnotherProjectsEmptyGroup(t *testing.T) {
 
 	// A project facet pin to a group is resolved only against that project's
 	// effective root; it cannot borrow a same-name group from another project.
+	// Under the best-effort contract the already-dead pin is advisory and
+	// contributes no reason of its own; the pending evidence is the empty
+	// project-local group itself.
 	in.Projects[0].Config = []byte("version: 4\nmodelgroups:\n  outer: []\n")
 	in.Projects[0].Definitions = []Definition{{Path: "facets/pinned.md", Model: "mg:outer"}}
 	in.Projects[1].Config = []byte("version: 4\nmodelgroups:\n  outer:\n    - pp/p2\n")
 	in.Projects[1].Definitions = nil
 	r = Analyze(in, "gp")
 	wantVerdict(t, r, Unsafe)
-	wantReason(t, r, "already unavailable")
+	wantReason(t, r, "group \"outer\" already has no available leaf")
 }
 
 func TestGroupEligibilityGlobalProjectConcatenates(t *testing.T) {
@@ -613,12 +616,18 @@ modelgroups:
 		wantVerdict(t, analyze("gp", global, layeredProject()), Safe)
 	})
 
-	t.Run("unobserved nano reserved name is pending-unknown", func(t *testing.T) {
+	t.Run("unobserved nano reserved name pin is advisory", func(t *testing.T) {
 		global := layeredGlobal()
 		global.Definitions = []Definition{{Path: "subagents/nano.md", Model: "polytoken:general-purpose-nano"}}
 		r := analyze("gp", global, layeredProject())
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "polytoken:general-purpose-nano")
+		// Best-effort definition contract: the unobserved reserved name is an
+		// unresolvable definition reference, so the pin contributes nothing;
+		// modelgroups-leaf references to the namespace still fail closed
+		// (pinned in the neighboring operator-defined subtest).
+		wantVerdict(t, r, Safe)
+		if len(r.Reasons) != 0 {
+			t.Fatalf("advisory pin carried evidence: %v", r.Reasons)
+		}
 	})
 
 	t.Run("operator-defined reserved-namespace group is pending-unknown", func(t *testing.T) {
@@ -795,10 +804,11 @@ modelgroups:
 }
 
 // TestAnalyzerDefinitionReferences proves facet/subagent reference checking in
-// registered roots: a primary reference that would die is unsafe, an
-// already-dead or unresolvable reference is pending-unknown, group-shaped
-// pins resolve through the effective graph, and fallback loss is
-// pending-unknown because fallback semantics were never pinned.
+// registered roots under the best-effort definition-reference contract: a
+// primary reference that would provably die is unsafe, and every uncertain
+// shape — unresolvable names, already-dead references, polytoken-ref elements
+// that are not model_group references, and any fallback outcome — is advisory
+// and contributes nothing to the verdict.
 func TestAnalyzerDefinitionReferences(t *testing.T) {
 	base := `version: 4
 providers:
@@ -852,34 +862,52 @@ modelgroups:
 		wantReason(t, r, "mg:solo")
 	})
 
-	t.Run("undefined pin model is pending-unknown", func(t *testing.T) {
-		r := analyze("gp", defs(Definition{Path: "facets/pinned.md", Model: "ghost/nope"}))
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "ghost/nope")
+	t.Run("undefined pin model is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/pinned.md", Model: "ghost/nope"})), Safe)
 	})
 
-	t.Run("already-dead pin model is pending-unknown", func(t *testing.T) {
-		r := analyze("gp", defs(Definition{Path: "subagents/dead.md", Model: "pp/p4"}))
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "already unavailable")
+	t.Run("already-dead pin model is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "subagents/dead.md", Model: "pp/p4"})), Safe)
 	})
 
-	t.Run("partial fallback loss is pending-unknown", func(t *testing.T) {
-		r := analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"gp/g1", "pp/p2"}}))
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "drop 1 of 2 fallback")
+	t.Run("polytoken-ref primary on an emptied group is unsafe", func(t *testing.T) {
+		r := analyze("pp", defs(Definition{Path: "facets/pinned.md", Model: `<polytoken-ref type="model_group" name="solo"/>`}))
+		wantVerdict(t, r, Unsafe)
+		wantReason(t, r, "kills the primary reference")
+		// Reasons render quoted values with %q, so the element's double
+		// quotes are escaped; assert on the quote-free element prefix.
+		wantReason(t, r, "<polytoken-ref type=")
 	})
 
-	t.Run("all fallbacks dead is pending-unknown", func(t *testing.T) {
-		r := analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"gp/g1"}}))
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "no usable fallback")
+	t.Run("polytoken-ref primary on a surviving group is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/pinned.md", Model: `<polytoken-ref type="model_group" name="failover"/>`})), Safe)
 	})
 
-	t.Run("undefined fallback is pending-unknown", func(t *testing.T) {
-		r := analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"ghost/nope"}}))
-		wantVerdict(t, r, PendingUnknown)
-		wantReason(t, r, "fallback")
+	t.Run("polytoken-ref naming an unknown group is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/pinned.md", Model: `<polytoken-ref type="model_group" name="pm_facet"/>`})), Safe)
+	})
+
+	t.Run("polytoken-ref without model_group type is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(
+			Definition{Path: "facets/typed.md", Model: `<polytoken-ref type="model" name="gp/g1"/>`},
+			Definition{Path: "facets/untyped.md", Model: `<polytoken-ref name="gp/g1"/>`},
+		)), Safe)
+	})
+
+	t.Run("partial fallback loss is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"gp/g1", "pp/p2"}})), Safe)
+	})
+
+	t.Run("all fallbacks dead is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"gp/g1"}})), Safe)
+	})
+
+	t.Run("undefined fallback is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{"ghost/nope"}})), Safe)
+	})
+
+	t.Run("polytoken-ref fallback is advisory", func(t *testing.T) {
+		wantVerdict(t, analyze("gp", defs(Definition{Path: "facets/fb.md", Model: "pp/p2", Fallbacks: []string{`<polytoken-ref type="model_group" name="solo"/>`}})), Safe)
 	})
 }
 
