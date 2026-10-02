@@ -26,13 +26,13 @@ import (
 // `quota_gate: {enabled: false}`: findings keep evaluating the raw
 // observations and this names the policy fact alongside them.
 type QuotaProbe struct {
-	Provider       string
-	HasQuotaConfig bool
-	FreshnessTTL   time.Duration
-	Snapshot       *quota.QuotaSnapshot
-	Attempt        *quota.QuotaSnapshot
-	Supported      bool
-	SupportReason  string
+	Provider           string
+	HasQuotaConfig     bool
+	FreshnessTTL       time.Duration
+	Snapshot           *quota.QuotaSnapshot
+	Attempt            *quota.QuotaSnapshot
+	Supported          bool
+	SupportReason      string
 	QuotaGateSuspended bool
 }
 

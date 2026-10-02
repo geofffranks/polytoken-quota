@@ -76,7 +76,7 @@ func loadBytes(data []byte) (Desired, error) {
 			return Desired{}, fmt.Errorf("policy: mapping %q must enumerate concrete models", id)
 		}
 		m := Mapping{
-			Models:     map[string]ModelBaseline{},
+			Models:      map[string]ModelBaseline{},
 			KeepEnabled: mw.KeepEnabled,
 		}
 		for _, entry := range mw.Models {
@@ -632,10 +632,10 @@ type quotaWire struct {
 	Schedule         *scheduleWire `yaml:"schedule"`
 	// SignalGate is the strict sub-decode of the optional provider-only
 	// signal_gate block; nil when the key is absent.
-	SignalGate       *signalGateWire `yaml:"signal_gate"`
+	SignalGate *signalGateWire `yaml:"signal_gate"`
 	// QuotaGate is the strict sub-decode of the optional quota_gate block;
 	// nil when the key is absent. Accepted in both policy modes.
-	QuotaGate        *quotaGateWire  `yaml:"quota_gate"`
+	QuotaGate        *quotaGateWire `yaml:"quota_gate"`
 	hasFields        bool
 	monthlyBudgetSet bool
 	adapterSet       bool

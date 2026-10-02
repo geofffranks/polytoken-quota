@@ -39,8 +39,8 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 	// Build freshness TTL, adapter, and quota-gate lookups from policy, keyed
 	// by mapping ID. QuotaPoller observations are keyed by mapping ID.
 	type qcfg struct {
-		ttl     time.Duration
-		adapter string
+		ttl           time.Duration
+		adapter       string
 		gateSuspended bool
 	}
 	configs := map[string]qcfg{}
@@ -67,13 +67,13 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 		}
 		support := adapterSupport(cfg.adapter, in.now, in.evidence)
 		probes = append(probes, doctor.QuotaProbe{
-			Provider:       name,
-			HasQuotaConfig: configuredMapping,
-			FreshnessTTL:   cfg.ttl,
-			Snapshot:       ps.QuotaSnapshot,
-			Attempt:        ps.QuotaAttempt,
-			Supported:      support.Supported,
-			SupportReason:  support.Reason,
+			Provider:           name,
+			HasQuotaConfig:     configuredMapping,
+			FreshnessTTL:       cfg.ttl,
+			Snapshot:           ps.QuotaSnapshot,
+			Attempt:            ps.QuotaAttempt,
+			Supported:          support.Supported,
+			SupportReason:      support.Reason,
 			QuotaGateSuspended: configuredMapping && cfg.gateSuspended,
 		})
 	}

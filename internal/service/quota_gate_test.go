@@ -55,14 +55,14 @@ func TestPlanProviderGateQuotaGateExemption(t *testing.T) {
 	cases := []struct {
 		name string
 		// inputs
-		exempt  bool
-		ps      state.ProviderState
-		cfg     []byte
-		own     map[string]state.ProviderOwnership
+		exempt bool
+		ps     state.ProviderState
+		cfg    []byte
+		own    map[string]state.ProviderOwnership
 		// expectations
 		wantDisable, wantRestore, wantConflict, claimReleased bool
-		wantClaim           *state.ProviderOwnership
-		wantAction          string
+		wantClaim                                             *state.ProviderOwnership
+		wantAction                                            string
 	}{
 		{
 			name:       "exempt provider with a zero-remaining snapshot plans no disable",
@@ -81,20 +81,20 @@ func TestPlanProviderGateQuotaGateExemption(t *testing.T) {
 			wantAction: GateActionRestored,
 		},
 		{
-			name:   "claim released without edits when the operator already restored the baseline",
-			exempt: true,
-			ps:     exhaustedAxes,
-			cfg:    configTrue,
-			own:    map[string]state.ProviderOwnership{"gp": reserveClaim},
+			name:          "claim released without edits when the operator already restored the baseline",
+			exempt:        true,
+			ps:            exhaustedAxes,
+			cfg:           configTrue,
+			own:           map[string]state.ProviderOwnership{"gp": reserveClaim},
 			claimReleased: true,
 			wantAction:    GateActionReleased,
 		},
 		{
-			name:   "operator divergence from a held claim still reports conflict",
-			exempt: true,
-			ps:     exhaustedAxes,
-			cfg:    configTrue,
-			own: map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 4}},
+			name:         "operator divergence from a held claim still reports conflict",
+			exempt:       true,
+			ps:           exhaustedAxes,
+			cfg:          configTrue,
+			own:          map[string]state.ProviderOwnership{"gp": {BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 4}},
 			wantConflict: true,
 			wantClaim:    &state.ProviderOwnership{BaselinePresent: false, Owned: true, Axis: state.OwnershipAxisReserve, Conflict: true, EngagedRevision: 4},
 			wantAction:   GateActionConflict,
@@ -132,11 +132,11 @@ func TestPlanProviderGateQuotaGateExemption(t *testing.T) {
 			wantAction:  GateActionDisabled,
 		},
 		{
-			name:   "non-exempt held reserve claim stays held (baseline unchanged)",
-			exempt: false,
-			ps:     state.ProviderState{Quota: state.QuotaLow, Availability: state.Available},
-			cfg:    configFalse,
-			own:    map[string]state.ProviderOwnership{"gp": reserveClaim},
+			name:       "non-exempt held reserve claim stays held (baseline unchanged)",
+			exempt:     false,
+			ps:         state.ProviderState{Quota: state.QuotaLow, Availability: state.Available},
+			cfg:        configFalse,
+			own:        map[string]state.ProviderOwnership{"gp": reserveClaim},
 			wantClaim:  &state.ProviderOwnership{BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisReserve, EngagedRevision: 4},
 			wantAction: GateActionHeld,
 		},
@@ -234,11 +234,11 @@ func TestMergedStatusNamesSuspendedQuotaGating(t *testing.T) {
 func TestProviderProjectionNamesSuspendedQuotaGating(t *testing.T) {
 	exemptQuota := &policy.QuotaConfig{Adapter: "codex", Gate: policy.QuotaGateConfig{Disabled: true}}
 	cases := []struct {
-		name        string
-		quota       *policy.QuotaConfig
-		ps          state.ProviderState
-		wantMode    state.Mode
-		wantReason  string
+		name       string
+		quota      *policy.QuotaConfig
+		ps         state.ProviderState
+		wantMode   state.Mode
+		wantReason string
 	}{
 		{
 			name:       "exempt exhausted axes",
@@ -255,9 +255,9 @@ func TestProviderProjectionNamesSuspendedQuotaGating(t *testing.T) {
 			wantReason: "provider unavailable; quota gating suspended",
 		},
 		{
-			name:  "exempt exhausted poll snapshot with healthy axes",
-			quota: exemptQuota,
-			ps:    state.ProviderState{Quota: state.QuotaNormal, Availability: state.Available, QuotaSnapshot: quotaGateSnapshot(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), quota.QuotaUnavailable, 100)},
+			name:       "exempt exhausted poll snapshot with healthy axes",
+			quota:      exemptQuota,
+			ps:         state.ProviderState{Quota: state.QuotaNormal, Availability: state.Available, QuotaSnapshot: quotaGateSnapshot(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), quota.QuotaUnavailable, 100)},
 			wantMode:   state.ModeReserve,
 			wantReason: "out of quota; quota gating suspended",
 		},
