@@ -143,6 +143,7 @@ func TestMergedStatusTextStatusColors(t *testing.T) {
 		{"available", "\x1b[32m"},
 		{"disabled", "\x1b[31m"},
 		{"unavailable", "\x1b[31m"},
+		{"gated", "\x1b[31m"},
 		{"enabled", "\x1b[33m"},
 	} {
 		report := service.MergedStatusReport{Providers: []service.MergedStatusProvider{{Provider: "p", Status: tc.status}}}
@@ -224,6 +225,31 @@ func TestMergedStatusTextANSIAlignment(t *testing.T) {
 		PendingTargets: []string{"work"},
 	}
 	assertStyledLayoutMatchesPlain(t, func(out *bytes.Buffer, s styler) { writeMergedStatusText(out, report, s) })
+}
+
+// TestMergedStatusTextWindowlessFallbacks pins the QUOTA column's windowless
+// renderings: the named condition, the unavailable fallback, plain "no data"
+// for unknown availability, and plain "no data" when never observed.
+func TestMergedStatusTextWindowlessFallbacks(t *testing.T) {
+	checked := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		row  service.MergedStatusProvider
+		want string
+	}{
+		"named condition":      {service.MergedStatusProvider{Provider: "p", Condition: "in overage", CheckedAt: checked, Availability: "unavailable"}, "unavailable (in overage)"},
+		"unavailable fallback": {service.MergedStatusProvider{Provider: "p", CheckedAt: checked, Availability: "unavailable"}, "no data (unavailable)"},
+		"unknown stays plain":  {service.MergedStatusProvider{Provider: "p", CheckedAt: checked, Availability: "unknown"}, "no data"},
+		"never observed":       {service.MergedStatusProvider{Provider: "p"}, "no data"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := service.MergedStatusReport{RoutingEnabled: true, Providers: []service.MergedStatusProvider{tc.row}}
+			var out bytes.Buffer
+			writeMergedStatusText(&out, report, styler{enabled: true})
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("output %q missing %q", out.String(), tc.want)
+			}
+		})
+	}
 }
 
 func TestMergedStatusTextUsesHiddenRankForProviderOrder(t *testing.T) {

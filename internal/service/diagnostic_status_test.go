@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
@@ -147,5 +148,80 @@ func TestMergedStatusProjectionErrorRoute(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("route-scope error for target global missing: %+v", report.Errors)
+	}
+}
+
+// TestMergedStatusGatedPrecedence pins the consolidated status matrix:
+// signal- and reserve-held gates read `gated` over any quota health, manual
+// disable still wins, conflicted claims keep their quota-health status, and
+// disabled-axis, legacy, and no-claim rows render exactly as before.
+func TestMergedStatusGatedPrecedence(t *testing.T) {
+	asOf := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	gate := func(axis string, conflict bool) *GateReport {
+		return &GateReport{Axis: axis, Conflict: conflict, EngagedRevision: 3}
+	}
+	for name, tc := range map[string]struct {
+		provider ProviderProjection
+		want     string
+	}{
+		"signal gate over fresh":            {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
+		"reserve gate over fresh":           {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
+		"manual disable beats gate":         {ProviderProjection{MappingID: "p", ManualDisabled: true, Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusDisabled},
+		"gated never observed":              {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false)}, StatusGated},
+		"gated over unavailable":            {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), Availability: state.Unavailable, CheckedAt: asOf, Freshness: FreshnessFresh}, StatusGated},
+		"conflicted signal claim stays healthy": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"conflicted reserve claim stays healthy": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"disabled axis keeps availability status": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisDisabled, false), Availability: state.Unavailable, CheckedAt: asOf, Freshness: FreshnessFresh}, StatusUnavailable},
+		"legacy claim keeps quota health":   {ProviderProjection{MappingID: "p", CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"unavailable without gate":          {ProviderProjection{MappingID: "p", Availability: state.Unavailable}, StatusUnavailable},
+		"never observed without gate":       {ProviderProjection{MappingID: "p", Freshness: FreshnessMissing}, StatusEnabled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view := DiagnosticSnapshot{
+				providers: []ProviderProjection{tc.provider},
+				ranks:     []RankEntryReport{{MappingID: tc.provider.MappingID}},
+			}
+			report := view.MergedStatusView()
+			if len(report.Providers) != 1 {
+				t.Fatalf("providers = %d, want 1", len(report.Providers))
+			}
+			if got := report.Providers[0].Status; got != tc.want {
+				t.Fatalf("status = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMergedStatusWindowlessPartialKeepsUnknownAvailability pins the
+// projection wiring end to end: a stored zero-window partial snapshot (the
+// codex/zai class) must keep its snapshot availability unknown through
+// aggregation — the row axis collapses to unavailable — so the QUOTA fallback
+// renders plain "no data" instead of claiming unavailable.
+func TestMergedStatusWindowlessPartialKeepsUnknownAvailability(t *testing.T) {
+	asOf := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	desired := policy.Desired{Providers: map[policy.MappingID]policy.Mapping{
+		"codex": {Quota: &policy.QuotaConfig{Adapter: "codex"}},
+	}}
+	observed := state.State{
+		Providers: map[string]state.ProviderState{
+			"codex": {QuotaSnapshot: &quota.QuotaSnapshot{
+				MappingID: "codex", CheckedAt: asOf, Status: quota.SourcePartial, Availability: quota.QuotaUnknown,
+			}},
+		},
+	}
+	providers, errs := projectProviders(desired, observed, asOf)
+	if len(errs) != 0 {
+		t.Fatalf("projection errors: %v", errs)
+	}
+	view := DiagnosticSnapshot{providers: providers, ranks: []RankEntryReport{{MappingID: "codex"}}}
+	row := view.MergedStatusView().Providers[0]
+	if row.Availability != quota.QuotaUnknown {
+		t.Fatalf("availability = %q, want unknown from the raw snapshot", row.Availability)
+	}
+	if row.Condition != "" {
+		t.Fatalf("condition = %q, want none", row.Condition)
+	}
+	if row.Status != StatusUnavailable {
+		t.Fatalf("status = %q, want unavailable from the fail-closed row axis", row.Status)
 	}
 }

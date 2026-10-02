@@ -100,6 +100,11 @@ type GateReport struct {
 	Signal          *float64 `json:"signal,omitempty"`
 	Threshold       *float64 `json:"threshold,omitempty"`
 	EngagedRevision uint64   `json:"engaged_revision,omitempty"`
+	// Conflict records a detected operator divergence from the held claim:
+	// the live enabled field is operator-controlled, so the provider is not
+	// actually held off. Status presentation must not render such a claim as
+	// an active gate.
+	Conflict bool `json:"conflict,omitempty"`
 }
 
 // ProviderProjection is one exact mapping-level diagnostic projection. Every
@@ -124,6 +129,15 @@ type ProviderProjection struct {
 	// no claim over this provider's enabled field (including legacy claims
 	// recorded before axis attribution, which keep today's presentation).
 	Gate *GateReport `json:"gate,omitempty"`
+	// Condition names the snapshot's sanitized out-of-quota condition when
+	// the adapter failed closed on a windowless observation; empty otherwise.
+	Condition string `json:"condition,omitempty"`
+	// SnapshotAvailability is the stored quota snapshot's own availability
+	// (available/unavailable/unknown), read from the raw pre-aggregation
+	// snapshot. Distinct from Availability above: the fail-closed row axis
+	// has no unknown member and is forced to unavailable for every
+	// windowless snapshot, losing the distinction the QUOTA fallback needs.
+	SnapshotAvailability quota.QuotaAvailability `json:"snapshot_availability,omitempty"`
 }
 
 // StatusViewReport is the provider-only status selector.
@@ -150,6 +164,15 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			ManualDisabled: ps.ManualDisabled, Reason: providerReason(ps),
 			Freshness: FreshnessMissing, QuotaClass: quota.ClassUnknown,
 		}
+		// Condition and snapshot availability come from the raw
+		// pre-aggregation snapshot: aggregateMappingState rewrites the
+		// aggregated copy's availability to unknown for every fail-closed
+		// snapshot, erasing the unavailable-vs-unknown distinction the
+		// status view renders.
+		if raw := observed.Providers[id]; raw.QuotaSnapshot != nil {
+			entry.SnapshotAvailability = raw.QuotaSnapshot.Availability
+			entry.Condition = quota.NormalizeQuotaCondition(raw.QuotaSnapshot.Condition)
+		}
 		var ttl time.Duration
 		if mapping.Quota != nil {
 			entry.Adapter = mapping.Quota.Adapter
@@ -171,7 +194,7 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 		entry.Usage = usageSummaryReport(ps.ResetCredits.UsageSummary)
 		entry.ResetCredits = resetCreditReport(ps.ResetCredits, asOf)
 		if record, ok := observed.OwnershipOf(id); ok && record.Owned && record.Axis != "" {
-			g := &GateReport{Axis: record.Axis, EngagedRevision: record.EngagedRevision}
+			g := &GateReport{Axis: record.Axis, EngagedRevision: record.EngagedRevision, Conflict: record.Conflict}
 			if record.Axis == state.OwnershipAxisSignal {
 				if ps.QuotaSnapshot != nil {
 					if signal, ok := routing.ComputeSignal(ps.QuotaSnapshot, asOf); ok {

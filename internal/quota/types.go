@@ -31,6 +31,37 @@ const (
 	SourceFailed  SourceStatus = "failed"
 )
 
+// Quota conditions are the sanitized, adapter-chosen labels for a successful
+// windowless snapshot: the provider reported an out-of-quota state the adapter
+// refuses to publish numbers for (fail-closed). Fixed literals only — never
+// provider-supplied text — so they can render verbatim. State persistence
+// normalizes unknown values to the empty condition.
+const (
+	ConditionKeyBlocked     = "key blocked"
+	ConditionInOverage      = "in overage"
+	ConditionBalanceDrained = "balance drained"
+)
+
+// ValidQuotaCondition reports whether s is a representable condition value.
+func ValidQuotaCondition(s string) bool {
+	switch s {
+	case ConditionKeyBlocked, ConditionInOverage, ConditionBalanceDrained:
+		return true
+	}
+	return false
+}
+
+// NormalizeQuotaCondition maps any value outside the condition set to the
+// empty condition, mirroring the ownership-axis normalization precedent: a
+// hand-edited state file or a foreign future value can never carry free text
+// into a rendered surface.
+func NormalizeQuotaCondition(s string) string {
+	if ValidQuotaCondition(s) {
+		return s
+	}
+	return ""
+}
+
 // QuotaWindow is a single usage window within a snapshot. Pointer fields are
 // nil when the provider did not report that value; reset times are never
 // invented.
@@ -53,6 +84,12 @@ type QuotaSnapshot struct {
 	Availability QuotaAvailability
 	Status       SourceStatus
 	Error        string
+
+	// Condition names the sanitized, adapter-chosen out-of-quota condition
+	// behind a successful windowless snapshot (a fail-closed blocked/overage/
+	// drained state). Empty when no condition is named. It is an observation
+	// label only: it never changes Status, Availability, or policy math.
+	Condition string
 
 	// Codex-only additive observations. Optional reset-credit enrichment never
 	// changes Status or Availability, which remain ordinary-usage signals.

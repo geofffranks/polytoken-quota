@@ -457,6 +457,64 @@ func TestSanitizedSnapshotErrorPersists(t *testing.T) {
 	}
 }
 
+// TestQuotaConditionRoundTripAndNormalization pins the condition's persistence
+// contract: a representable condition round trips exactly, a hand-edited
+// foreign value normalizes to empty on load, and the persist path
+// re-normalizes. State files written before the field existed (json omits it)
+// are covered by every pre-existing round-trip fixture.
+func TestQuotaConditionRoundTripAndNormalization(t *testing.T) {
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	p := filepath.Join(t.TempDir(), "state.json")
+	st := Store{Path: p, Now: func() time.Time { return now }, RecoveredRetention: 24 * time.Hour}
+
+	s := State{Schema: CurrentSchema, Providers: map[string]ProviderState{}, Targets: map[string]TargetState{}}
+	s.Providers["neuralwatt"] = ProviderState{
+		QuotaSnapshot: &quota.QuotaSnapshot{
+			MappingID: "neuralwatt", Status: quota.SourceFresh,
+			Availability: quota.QuotaUnavailable, Condition: quota.ConditionInOverage,
+		},
+	}
+	if err := st.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Providers["neuralwatt"].QuotaSnapshot.Condition; got != quota.ConditionInOverage {
+		t.Fatalf("condition = %q, want %q", got, quota.ConditionInOverage)
+	}
+
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(raw), quota.ConditionInOverage, "totally broken", 1)
+	if edited == string(raw) {
+		t.Fatal("hand edit did not change the file")
+	}
+	if err := os.WriteFile(p, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Providers["neuralwatt"].QuotaSnapshot.Condition; got != "" {
+		t.Fatalf("hand-edited condition = %q, want empty after load normalization", got)
+	}
+	if err := st.Save(loaded); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = st.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.Providers["neuralwatt"].QuotaSnapshot.Condition; got != "" {
+		t.Fatalf("re-saved condition = %q, want empty after persist normalization", got)
+	}
+}
+
 func TestSaveFreshStatePersistsCurrentSchema(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	dir := t.TempDir()

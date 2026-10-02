@@ -430,10 +430,12 @@ polytoken-quota status
 ```
 routing: enabled    last checked: 2026-08-14 09:12 UTC
 
-PROVIDER  STATUS     REASON                    QUOTA                     NEXT RESET
-codex     available  peak, signal +1.00        5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
-zai       available  off-peak, signal -0.19    5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
-minime    enabled    not configured             no data                   —
+PROVIDER   STATUS       REASON                                              QUOTA                     NEXT RESET
+codex      available    peak, signal +1.00                                  5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
+zai        available    off-peak, signal -0.19                              5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
+gp         gated        signal-gated (-0.72 <= +0.00); peak, signal -0.72   5h 41/80                  —
+neuralwatt unavailable  ineligible: disabled                                unavailable (in overage)  —
+minime     enabled      not configured                                      no data                   —
 
 TARGET  SOURCE                 ROUTE     DESIRED       EFFECTIVE
 global  config.yaml            global    glm-4.6       glm-4.6
@@ -442,7 +444,11 @@ work    subagents/work-api.md  work-api  glm-4.6       glm-4.6
 warning: 1 target(s) pending — shown values may not be live; run polytoken-quota doctor
 ```
 
-Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a configured mapping with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`. The provider table shows status, the ranking explanation, raw quota windows, and the next reset. Route rows show target/source provenance and only the first desired/effective model; `status --json` retains ranking fields, complete route chains, raw window numbers, `skipped` arrays, `pending_targets`, and `problem`. Exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
+Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a provider an ownership gate holds off shows `gated` — the signal- and reserve-axis gates, where quota holds the provider's `enabled` field off (a conflicted claim, where the operator re-enabled the field, keeps its quota-health status, and a deliberately gated provider keeps a clean exit code: the red row is informational, while exit codes still reflect quota health); a configured mapping with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`.
+
+When a poll succeeds but the provider is out of quota, the QUOTA column names the fail-closed condition — `unavailable (key blocked)`, `unavailable (in overage)`, or `unavailable (balance drained)` — and NEXT RESET stays `—`; an observed windowless snapshot without a named condition renders `no data (unavailable)`.
+
+The provider table shows status, the ranking explanation, raw quota windows, and the next reset. Route rows show target/source provenance and only the first desired/effective model; `status --json` retains ranking fields, complete route chains, raw window numbers, `skipped` arrays, `pending_targets`, and `problem`, plus per-provider `condition`, `checked_at`, and `availability`. Exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
 
 Use `check --reconcile` when scheduled runs should apply the fresh routing decision to the live managed configs. Without `--reconcile`, `check` refreshes quota state only. In interactive use `check` prints each provider's polling status; pass `--quiet` in cron, launchd, or systemd timers to suppress all output (exit codes still reflect success or failure).
 
