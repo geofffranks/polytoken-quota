@@ -80,6 +80,13 @@ retained in their authored positions.
   `adapter: anthropic` requires `monthly_budget_usd` unless
   `mode: subscription` is set, and `adapter: anthropic-subscription` is always
   subscription mode (no budget, no `mode` key).
+- `providers.<id>.quota.quota_gate: {enabled: false}` suspends automatic
+  **quota** gating for that provider: an exhausted/unavailable observation
+  never plans a disable, a quota claim holding the field off is restored on
+  the next pass, and only an explicit operator disable turns the provider off.
+  The signal gate is a separate axis and still applies. See
+  [`quota_gate`](#quota_gate) for the full contract and the ranking/polling
+  side effects of carrying a quota section.
 - `global.root` is required: it is the single configuration root the
   provider-only policy targets.
 - `projects` entries register additional roots with exactly `id` and `root` —
@@ -107,7 +114,7 @@ retained in their authored positions.
 | `check` | Polls enrolled, adapter-configured providers as usual. |
 | `check --reconcile` | Poll and apply provider-only gating to enrolled global providers after the signal gate and staged validation pass. |
 | `reconcile` | Apply provider-only gating without polling; provider state comes from the latest saved evidence. Supports `--dry-run`, `--keep-staging` (dry-run only), and `--verbose`. |
-| `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. Manual toggles override `keep_enabled`: an explicit operator action may disable a provider the automatic gate spares. |
+| `routing enable/disable <mapping-id>` | Maintained: writes the enrolled provider's `providers.<id>.enabled` field on the registered global target (staged, validated, and journaled like the automatic gate) and records/releases the durable manual-disable claim. A manual toggle survives later reconcile passes. Manual toggles override `keep_enabled` and `quota_gate`: an explicit operator action may disable a provider the automatic gate spares. |
 | `routing reset` | Unsupported: clearing every manual disable has no provider-only meaning; enable providers individually with `routing enable <provider>`. |
 | `doctor` | Maintained: policy schema, state, publication/journal, and quota findings work; no chain findings exist. |
 | `history` | Maintained: state history is independent of the policy mode. |
@@ -205,6 +212,7 @@ There is no `adapter` field; the mapping key selects the adapter.
 | `balance_group` | `default` | Providers are only ranked against others in the same group. Use to keep, say, a paid and a free provider from competing. |
 | `weight` | `1` | Global tie-break between providers otherwise ranked equal. Higher wins. When signal cluster, schedule, and weight are all equal, providers share a routing rank and each route keeps its authored chain order. The signal is compared only when every eligible provider in the balance group can compute it. |
 | `schedule` | none (never off-peak) | Off-peak windows for ranking; see below. |
+| `quota_gate` | gating on | `{enabled: false}` suspends automatic quota gating for that provider: an exhausted/unavailable observation — durable axes or the latest poll — never plans a disable, and a provider quota had gated off is re-enabled on the next pass. The signal axis is separate (`signal_gate`/`keep_enabled` still apply); diagnostics keep reporting the raw out-of-quota state; only an explicit `routing disable` turns the provider off. See below for the prerequisites and side effects. |
 
 ### `schedule`
 
@@ -228,6 +236,44 @@ schedule:
   not cross midnight and are rejected at load if they do.
 
 The legacy `off_peak` key is rejected with a pointer to `peak`.
+
+#### `quota_gate`
+
+Optional. `{enabled: false}` is the only non-default shape; it declares that
+quota observations must not turn the provider off — for example during a
+provider-side free-energy promo that the quota API cannot observe. The key is
+accepted in both policy modes wherever a `quota` section is valid: under a
+provider-only enrollment, and under a legacy mapping whose key names a known
+quota adapter.
+
+What it changes, and what it deliberately does not:
+
+- **Gating only.** Exhausted/unavailable durable axes and the fail-closed poll
+  boundary no longer plan a disable for that provider; a quota-axis claim
+  already holding its enabled field off is restored and released on the next
+  pass. Manual disables (`routing disable`) still apply, and a corrupted state
+  axis still fails closed to disabled.
+- **Observations stay truthful.** `status` and `doctor` keep reporting the raw
+  out-of-quota axes — the exemption never launders the provider to healthy —
+  and name the suspension as a separate policy fact: the status provider
+  projection carries `quota_gate_suspended: true` (the merged status REASON
+  ends with `; quota gating suspended`), and `doctor` emits a
+  `quota-gate-suspended` info finding. `check` names the provider out of quota
+  with gating suspended.
+- **The signal axis is separate.** `signal_gate` and `keep_enabled` are
+  unaffected in both directions: an exempt provider can still be signal-gated,
+  and the all-hot pool escape hatch keeps counting an exempt member as enabled.
+- **Ranking and `select` are unaffected.** An exempt out-of-quota provider is
+  never ranked for reordering and never appears in `select` recommendations —
+  it stays enabled-but-last in provider-only mode and in the reserve partition
+  of managed chains.
+
+Prerequisites and side effects: the key lives inside the `quota` section, so a
+provider-only mapping enrolled **without** a quota section cannot express it.
+In legacy mode, a mapping can carry a quota section only when its key is a
+known adapter name, and **adding a quota section flips the mapping into
+routing/ranking participation and scheduled polling** — if you add `quota_gate`
+solely to suspend gating, that mapping will now be polled and ranked.
 
 ## `selection.jev`
 

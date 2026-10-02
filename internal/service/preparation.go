@@ -89,7 +89,10 @@ func ProjectProviders(desired policy.Desired, observed state.State) []state.Prov
 }
 
 // providerModeReason produces a short, sanitized explanation for a mapping's
-// effective mode.
+// effective mode. A quota-gate-exempt provider's clamped reserve names the
+// out-of-quota observation with the suspension made explicit, so the
+// verbose/check projection never misreads an exempt exhausted provider as
+// merely "quota low"; a genuine low-quota reserve keeps the plain wording.
 func providerModeReason(id string, m policy.Mapping, mode state.Mode, observed state.State) string {
 	switch mode {
 	case state.ModeDisabled:
@@ -106,6 +109,16 @@ func providerModeReason(id string, m policy.Mapping, mode state.Mode, observed s
 		}
 		return "disabled"
 	case state.ModeReserve:
+		if reconcile.QuotaGateExempt(m) {
+			if ps, ok := observed.Providers[id]; ok {
+				if ps.Availability == state.Unavailable {
+					return "provider unavailable; quota gating suspended"
+				}
+				if ps.Quota == state.QuotaExhausted || reconcile.SnapshotQuotaUnavailable(ps) {
+					return "out of quota; quota gating suspended"
+				}
+			}
+		}
 		return "quota low (reserve)"
 	default:
 		return "healthy"

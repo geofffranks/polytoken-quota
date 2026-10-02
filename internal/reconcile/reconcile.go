@@ -130,27 +130,96 @@ func modeRank(m state.Mode) int {
 	}
 }
 
+// QuotaGateExempt reports whether the mapping's quota section declares
+// `quota_gate: {enabled: false}`: quota-derived gating is suspended for it.
+// A mapping without a quota section cannot express the key.
+func QuotaGateExempt(m policy.Mapping) bool {
+	return m.Quota != nil && m.Quota.Gate.Resolved().Disabled
+}
+
+// SnapshotQuotaUnavailable reports whether the provider's latest poll snapshot
+// crosses the fail-closed quota boundary: not explicitly available, or no
+// usable remaining allowance. A nil snapshot (no poll yet) does not cross the
+// boundary on its own — callers keep their own nil-snapshot fail-closed rules.
+func SnapshotQuotaUnavailable(ps state.ProviderState) bool {
+	if ps.QuotaSnapshot == nil {
+		return false
+	}
+	rem := ps.QuotaSnapshot.EffectiveRemaining()
+	return ps.QuotaSnapshot.Availability != quota.QuotaAvailable || rem == nil || *rem <= 0
+}
+
 // MappingMode derives a mapping's effective mode from the observed state keyed
 // by the mapping ID. A provider absent from the observed state is healthy.
+//
+// This is the single owner of the per-cause quota-gate exemption semantics,
+// consumed by the provider gate, the ranking observations, the legacy chain
+// projection, and the provider projection. For a mapping declaring
+// `quota_gate: {enabled: false}` the quota-derived degraded causes — exhausted
+// or unavailable durable axes and the fail-closed poll snapshot boundary —
+// clamp to reserve instead of disabling, so the provider is never
+// automatically disabled by a quota observation while remaining visible as
+// out-of-quota. Manual disable and corrupted (non-empty unrecognized) axis
+// values still fail closed to disabled: the exemption lifts only quota
+// observations, never operator intent, and never launders a broken
+// observation into health. The observation itself never changes — only the
+// action taken on it.
 func MappingMode(d policy.Desired, s state.State, id policy.MappingID) state.Mode {
-	if _, ok := d.Providers[id]; !ok {
+	m, ok := d.Providers[id]
+	if !ok {
 		return state.ModeNormal
 	}
 	ps, seen := s.Providers[string(id)]
 	if !seen {
 		return state.ModeNormal
 	}
+	if QuotaGateExempt(m) {
+		return quotaGateExemptMode(ps)
+	}
 	mode := state.EffectiveMode(ps)
 	// A successful quota poll is an additional, fail-closed availability
 	// boundary. The state axes may still reflect their last hook event while the
 	// latest snapshot reports explicit exhaustion/unavailability.
-	if ps.QuotaSnapshot != nil {
-		rem := ps.QuotaSnapshot.EffectiveRemaining()
-		if ps.QuotaSnapshot.Availability != quota.QuotaAvailable || rem == nil || *rem <= 0 {
-			return state.ModeDisabled
-		}
+	if SnapshotQuotaUnavailable(ps) {
+		return state.ModeDisabled
 	}
 	return mode
+}
+
+// quotaGateExemptMode derives the per-cause mode for a quota-gate-exempt
+// provider. It discriminates per cause instead of clamping EffectiveMode's
+// folded result (which folds four disabled causes together), in a fixed
+// order:
+//
+//   - a manual disable fails closed to disabled: the exemption lifts only
+//     quota observations, never operator intent;
+//   - a corrupted (non-empty unrecognized) axis fails closed to disabled,
+//     across any snapshot: a broken observation is never laundered into
+//     health;
+//   - the quota-derived degraded causes clamp to reserve — exhausted or
+//     unavailable durable axes and the fail-closed poll snapshot boundary —
+//     so an out-of-quota exempt provider stays visible as out-of-quota
+//     without ever planning a disable;
+//   - low quota keeps its reserve classification and healthy axes stay
+//     normal.
+//
+// Sparse (empty-string) axes normalize to their healthy baselines first, so
+// legacy sparse states classify exactly as EffectiveMode does.
+func quotaGateExemptMode(ps state.ProviderState) state.Mode {
+	if ps.ManualDisabled {
+		return state.ModeDisabled
+	}
+	q, av := state.NormalizeProviderAxes(ps)
+	if !state.ValidQuotaAxis(q) || !state.ValidAvailabilityAxis(av) {
+		return state.ModeDisabled
+	}
+	if SnapshotQuotaUnavailable(ps) {
+		return state.ModeReserve
+	}
+	if av == state.Unavailable || q == state.QuotaExhausted || q == state.QuotaLow {
+		return state.ModeReserve
+	}
+	return state.ModeNormal
 }
 
 // RankLookup maps a provider mapping ID to its global rank (0 = best). A mapping

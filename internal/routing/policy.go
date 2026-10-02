@@ -247,7 +247,7 @@ func (p ProviderPolicy) weight() int {
 // ProviderObs is the observed state for one provider mapping at ranking time.
 type ProviderObs struct {
 	MappingID string
-	Mode      string // "normal" | "reserve" | "disabled" (from state.EffectiveMode)
+	Mode      string // "normal" | "reserve" | "disabled" (from reconcile.MappingMode via service.aggregateMappingObs; an exempt provider's clamped reserve appears here where state.EffectiveMode would say disabled)
 	Snapshot  *quota.QuotaSnapshot
 }
 

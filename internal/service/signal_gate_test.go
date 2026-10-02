@@ -27,7 +27,11 @@ func signalVerdict(gated bool) routing.SignalGateVerdict {
 // skipped exactly when its proposed signal-gate set covers every member that
 // would otherwise remain enabled (operator-held and reserve/disabled-gated
 // members never count as enabled), and signal-held claims in a skipped pool
-// are released unless another axis still gates them.
+// are released unless another axis still gates them. The quota exemption
+// column carries the quota-gate exemption set: it lifts only the mode switch
+// in coverage, and only the clamped reserve in release, so an exempt member
+// never masks a signal-hot sibling's gate and its own claim still releases
+// while an operator disable keeps holding.
 func TestSignalPoolRuleTable(t *testing.T) {
 	hot := map[string]routing.SignalGateVerdict{
 		"a": signalVerdict(true),
@@ -44,6 +48,7 @@ func TestSignalPoolRuleTable(t *testing.T) {
 		liveEnabled  map[string]bool   // absent = live enabled
 		modes        map[string]state.Mode
 		signalHeld   []string
+		exempt       []string
 		wantSkipped  []string
 		wantReleased []string
 		wantPools    []string
@@ -114,6 +119,62 @@ func TestSignalPoolRuleTable(t *testing.T) {
 			wantSkipped: nil,
 			wantPools:   nil,
 		},
+		// --- quota-gate exemption cases (AC.5) ---
+		{
+			name:        "exhausted exempt member counts as enabled so the signal-hot sibling still gates",
+			enrolled:    []string{"a", "b"},
+			modes:       map[string]state.Mode{"b": reserve},
+			exempt:      []string{"b"},
+			wantSkipped: nil,
+			wantPools:   nil,
+		},
+		{
+			name:        "corrupted exempt member does not count as enabled while it is durably disabled",
+			enrolled:    []string{"a", "b"},
+			modes:       map[string]state.Mode{"b": disabled},
+			exempt:      []string{"b"},
+			wantSkipped: []string{"a"},
+			wantPools:   []string{"default"},
+		},
+		{
+			name:         "exempt singleton with a clamped reserve behaves exactly like the healthy singleton",
+			enrolled:     []string{"a"},
+			modes:        map[string]state.Mode{"a": reserve},
+			signalHeld:   []string{"a"},
+			exempt:       []string{"a"},
+			wantSkipped:  []string{"a"},
+			wantReleased: []string{"a"},
+			wantPools:    []string{"default"},
+		},
+		{
+			name:         "a skipped pool releases the exempt member's own held signal claim",
+			enrolled:     []string{"a", "c"},
+			modes:        map[string]state.Mode{"a": reserve},
+			signalHeld:   []string{"a"},
+			exempt:       []string{"a"},
+			wantSkipped:  []string{"a", "c"},
+			wantReleased: []string{"a"},
+			wantPools:    []string{"default"},
+		},
+		{
+			name:        "operator-held exempt member does not count as enabled and the hot sibling is still spared",
+			enrolled:    []string{"a", "b"},
+			liveEnabled: map[string]bool{"b": false},
+			exempt:      []string{"b"},
+			wantSkipped: []string{"a"},
+			wantPools:   []string{"default"},
+		},
+		{
+			name:         "operator-disabled exempt member keeps its held claim when the pool skips",
+			enrolled:     []string{"a", "c"},
+			liveEnabled:  map[string]bool{"c": false},
+			modes:        map[string]state.Mode{"c": disabled},
+			signalHeld:   []string{"c"},
+			exempt:       []string{"c"},
+			wantSkipped:  []string{"a", "c"},
+			wantReleased: nil,
+			wantPools:    []string{"default"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -144,7 +205,11 @@ func TestSignalPoolRuleTable(t *testing.T) {
 			for _, id := range tc.signalHeld {
 				held[id] = true
 			}
-			dec := signalPoolRule(desired, hot, live, modes, held)
+			exempt := map[string]bool{}
+			for _, id := range tc.exempt {
+				exempt[id] = true
+			}
+			dec := signalPoolRule(desired, hot, live, modes, held, exempt)
 			if len(dec.SkipSignal) != len(tc.wantSkipped) {
 				t.Fatalf("skipped = %v, want %v", keysOf(dec.SkipSignal), tc.wantSkipped)
 			}

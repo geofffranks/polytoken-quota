@@ -22,14 +22,18 @@ import (
 // successful observation; Attempt is the latest attempt (including failures);
 // Supported and SupportReason come from the evidence gate. HasQuotaConfig is
 // true only when the desired policy has a quota section for this provider.
+// QuotaGateSuspended records that the section declares
+// `quota_gate: {enabled: false}`: findings keep evaluating the raw
+// observations and this names the policy fact alongside them.
 type QuotaProbe struct {
-	Provider       string
-	HasQuotaConfig bool
-	FreshnessTTL   time.Duration
-	Snapshot       *quota.QuotaSnapshot
-	Attempt        *quota.QuotaSnapshot
-	Supported      bool
-	SupportReason  string
+	Provider           string
+	HasQuotaConfig     bool
+	FreshnessTTL       time.Duration
+	Snapshot           *quota.QuotaSnapshot
+	Attempt            *quota.QuotaSnapshot
+	Supported          bool
+	SupportReason      string
+	QuotaGateSuspended bool
 }
 
 const (
@@ -188,6 +192,15 @@ func QuotaFindings(probes []QuotaProbe, reconcilePending bool, now time.Time) []
 	var findings []Finding
 	for _, p := range probes {
 		clean := safeIdentifier(p.Provider)
+		if p.QuotaGateSuspended {
+			findings = append(findings, Finding{
+				Code:        "quota-gate-suspended",
+				TargetID:    clean,
+				Severity:    Info,
+				Message:     fmt.Sprintf("provider %s quota gating is suspended (quota_gate: enabled false); it stays enabled while out of quota.", clean),
+				Remediation: "remove quota_gate from the provider's quota block to restore automatic quota gating",
+			})
+		}
 		if p.HasQuotaConfig && !p.Supported {
 			findings = append(findings, Finding{
 				Code:        "quota-adapter-unsupported",

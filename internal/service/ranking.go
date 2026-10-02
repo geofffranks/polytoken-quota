@@ -51,7 +51,7 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 			FreshnessTTL: m.Quota.FreshnessTTL,
 			Weight:       m.Quota.Weight,
 		})
-		mode, snap := aggregateMappingObs(idStr, observed.Providers)
+		mode, snap := aggregateMappingObs(desired, policy.MappingID(idStr), observed.Providers)
 		obs = append(obs, routing.ProviderObs{
 			MappingID: idStr,
 			Mode:      string(mode),
@@ -76,17 +76,19 @@ func ComputeRanking(desired policy.Desired, observed state.State, now time.Time)
 
 // aggregateMappingObs derives one mapping's observed mode and snapshot from its
 // single mapping-ID state entry. Missing or unsafe observations are fail-closed.
-func aggregateMappingObs(mappingID string, providers map[string]state.ProviderState) (state.Mode, *quota.QuotaSnapshot) {
-	ps, ok := providers[mappingID]
+// The mode comes from reconcile.MappingMode — the single per-cause mode
+// derivation shared with the provider gate and the projections — so ranking
+// observations cannot drift from the gating action: a quota-gate-exempt
+// exhausted/unavailable provider observes as reserve, while an absent provider
+// or a nil snapshot stay fail-closed disabled with a nil observation.
+func aggregateMappingObs(desired policy.Desired, id policy.MappingID, providers map[string]state.ProviderState) (state.Mode, *quota.QuotaSnapshot) {
+	ps, ok := providers[string(id)]
 	if !ok {
 		return state.ModeDisabled, nil
 	}
-	mode := state.EffectiveMode(ps)
+	mode := reconcile.MappingMode(desired, state.State{Providers: providers}, id)
 	if ps.QuotaSnapshot == nil {
 		return state.ModeDisabled, nil
-	}
-	if rem := ps.QuotaSnapshot.EffectiveRemaining(); ps.QuotaSnapshot.Availability != quota.QuotaAvailable || rem == nil || *rem <= 0 {
-		mode = state.ModeDisabled
 	}
 	return mode, ps.QuotaSnapshot
 }

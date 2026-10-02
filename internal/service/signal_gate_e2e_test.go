@@ -206,6 +206,196 @@ func TestSignalPoolAllHotSkipReleasesSignalClaims(t *testing.T) {
 	}
 }
 
+// exhaustedSignalSnapshot builds a signal-seeded snapshot that ALSO crosses
+// the fail-closed quota boundary (provider-reported unavailable): signal-hot
+// or not, the quota axis observes out-of-quota.
+func exhaustedSignalSnapshot(now time.Time, usedFrac float64) *quota.QuotaSnapshot {
+	snap := signalSeedSnapshot(now, usedFrac)
+	snap.Availability = quota.QuotaUnavailable
+	return snap
+}
+
+// signalClaimFixture seeds a fixture whose first enrolled provider is gated
+// off under a held signal claim (the committed result of a previous pass),
+// then refreshes every provider's snapshot to the given ones.
+func signalClaimFixture(t *testing.T, enrolled []string, snapshots map[string]*quota.QuotaSnapshot) *gateFixture {
+	t.Helper()
+	f := newSignalFixture(t, enrolled)
+	f.writeGlobalConfig(globalConfigWith(map[string]string{enrolled[0]: "false"}))
+	f.seedState(8, nil, map[string]state.ProviderOwnership{
+		enrolled[0]: {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+	})
+	f.updateSnapshots(snapshots)
+	return f
+}
+
+// TestQuotaGateExemptSignalComposition is AC.5 end to end through the real
+// coordinator, in three coupled parts: (b) a single-member pool of an exempt
+// out-of-quota signal-hot provider pool-skips and releases its held signal
+// claim, byte-identical to the healthy singleton; (c) when a pool IS skipped,
+// the exempt member's own held claim and the non-exempt member's claim both
+// release; (a) an exempt out-of-quota member that is NOT signal-hot never
+// makes a signal-hot sibling's pool look covered, so the sibling still gates.
+func TestQuotaGateExemptSignalComposition(t *testing.T) {
+	// markExempt flips provider id's quota_gate to the opt-out.
+	markExempt := func(f *gateFixture, id string) {
+		t.Helper()
+		m := f.desired.Providers[policy.MappingID(id)]
+		m.Quota.Gate = policy.QuotaGateConfig{Disabled: true}
+		f.desired.Providers[policy.MappingID(id)] = m
+	}
+
+	t.Run("exempt singleton is byte-identical to the healthy singleton", func(t *testing.T) {
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		healthy := signalClaimFixture(t, []string{"gp"}, map[string]*quota.QuotaSnapshot{
+			"gp": signalSeedSnapshot(now, 0.68), // signal-hot
+		})
+		exempt := signalClaimFixture(t, []string{"gp"}, map[string]*quota.QuotaSnapshot{
+			"gp": exhaustedSignalSnapshot(now, 0.68), // signal-hot AND out of quota
+		})
+		markExempt(exempt, "gp")
+		startBytes := healthy.readGlobalConfig() // both fixtures start from the same disabled bytes
+		if got := exempt.readGlobalConfig(); got != startBytes {
+			t.Fatal("fixture comparison broken: the two fixtures must start identically")
+		}
+
+		hOut := healthy.coordinator().Reconcile(context.Background(), false, false, false)
+		eOut := exempt.coordinator().Reconcile(context.Background(), false, false, false)
+		if !hOut.Accepted || !eOut.Accepted || hOut.PendingCount() != 0 || eOut.PendingCount() != 0 {
+			t.Fatalf("healthy=%+v exempt=%+v", hOut, eOut)
+		}
+		if got := healthy.readGlobalConfig(); got == startBytes {
+			t.Fatal("healthy singleton did not restore its baseline")
+		}
+		healthyBytes := healthy.readGlobalConfig()
+		if got := exempt.readGlobalConfig(); got != healthyBytes {
+			t.Fatalf("exempt singleton bytes differ from the healthy singleton:\n--- exempt ---\n%s\n--- healthy ---\n%s", got, healthyBytes)
+		}
+		if got := gateRow(t, eOut.Targets[0], "gp"); got.Action != GateActionRestored {
+			t.Fatalf("exempt singleton gate row = %+v, want restored like the healthy singleton", got)
+		}
+		if st := exempt.loadState(); len(st.ProviderOwnership) != 0 {
+			t.Fatalf("exempt singleton claims = %+v, want the held signal claim released", st.ProviderOwnership)
+		}
+	})
+
+	t.Run("a skipped pool releases the exempt member's own claim and the sibling's claim", func(t *testing.T) {
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		markExempt(f, "gp")
+		f.writeGlobalConfig(globalConfigWith(map[string]string{"gp": "false", "pp": "false"}))
+		f.seedState(8, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: exhaustedSignalSnapshot(now, 0.68)}, // out of quota AND signal-hot
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)},      // signal-hot, healthy quota
+		}, map[string]state.ProviderOwnership{
+			"gp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+			"pp": {BaselinePresent: true, BaselineValue: true, Owned: true, Axis: state.OwnershipAxisSignal, Threshold: 0.0, EngagedRevision: 8},
+		})
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		st := f.loadState()
+		if len(st.ProviderOwnership) != 0 {
+			t.Fatalf("claims = %+v, want both claims released by the pool skip", st.ProviderOwnership)
+		}
+		for _, id := range []string{"gp", "pp"} {
+			if row := gateRow(t, out.Targets[0], id); row.Action != GateActionRestored {
+				t.Fatalf("%s gate row = %+v, want restored", id, row)
+			}
+		}
+	})
+
+	t.Run("exhausted exempt member never masks a signal-hot sibling", func(t *testing.T) {
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		f := newSignalFixture(t, []string{"gp", "pp"})
+		markExempt(f, "gp")
+		f.seedState(7, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: exhaustedSignalSnapshot(now, 0.10)}, // out of quota, signal +1.60 (not hot)
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.68)},      // signal-hot
+		}, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		// pp gates off with a signal claim; gp stays enabled and unclaimed
+		// (quota gated nothing, and the signal axis did not propose a gate
+		// for gp).
+		after := f.readGlobalConfig()
+		if after == before {
+			t.Fatal("pass produced no byte change")
+		}
+		gpBlock := strings.Split(strings.Split(after, "  gp:\n")[1], "  pp:")[0]
+		if !strings.Contains(gpBlock, "enabled: true") {
+			t.Fatalf("gp was gated off or altered:\n%s", after)
+		}
+		ppBlock := strings.Split(strings.Split(after, "  pp:\n")[1], "  zz:")[0]
+		if !strings.Contains(ppBlock, "enabled: false") {
+			t.Fatalf("pp was not gated off while gp stayed enabled:\n%s", after)
+		}
+		st := f.loadState()
+		if claim, ok := st.ProviderOwnership["pp"]; !ok || !claim.Owned || claim.Axis != state.OwnershipAxisSignal {
+			t.Fatalf("pp claim = %+v, want the normal signal claim", claim)
+		}
+		if _, held := st.ProviderOwnership["gp"]; held {
+			t.Fatalf("gp claimed: %+v", st.ProviderOwnership)
+		}
+		if row := gateRow(t, out.Targets[0], "gp"); row.Action != GateActionUnchanged {
+			t.Fatalf("gp gate row = %+v, want unchanged", row)
+		}
+	})
+
+	t.Run("exempt signal-hot provider in a non-skipped pool is still signal-gated", func(t *testing.T) {
+		// quota_gate must not spare the provider from the SIGNAL axis: with a
+		// third not-gated enabled member keeping the pool open, the exempt
+		// signal-hot provider is disabled by the signal branch with a
+		// signal-attributed claim while the quota axis itself plans nothing.
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		f := newSignalFixture(t, []string{"gp", "pp", "zz"})
+		markExempt(f, "gp")
+		f.seedState(7, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: exhaustedSignalSnapshot(now, 0.68)}, // out of quota AND signal-hot
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},      // healthy, not gated
+			"zz": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},      // healthy, not gated
+		}, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		after := f.readGlobalConfig()
+		if after == before {
+			t.Fatal("pass produced no byte change")
+		}
+		gpBlock := strings.Split(strings.Split(after, "  gp:\n")[1], "  pp:")[0]
+		if !strings.Contains(gpBlock, "enabled: false") {
+			t.Fatalf("exempt signal-hot provider was spared by quota_gate:\n%s", after)
+		}
+		ppBlock := strings.Split(strings.Split(after, "  pp:\n")[1], "  zz:")[0]
+		if !strings.Contains(ppBlock, "enabled: true") {
+			t.Fatalf("pp was gated off:\n%s", after)
+		}
+		zzBlock := strings.Split(strings.SplitN(after, "  zz:\n", 2)[1], "\nmodels:")[0]
+		if !strings.Contains(zzBlock, "enabled: true") {
+			t.Fatalf("zz was gated off:\n%s", after)
+		}
+		st := f.loadState()
+		if claim, ok := st.ProviderOwnership["gp"]; !ok || !claim.Owned || claim.Axis != state.OwnershipAxisSignal {
+			t.Fatalf("gp claim = %+v, want a signal-attributed claim (the disable came from the signal axis, not quota)", claim)
+		}
+		if len(st.ProviderOwnership) != 1 {
+			t.Fatalf("claims = %+v, want only gp's signal claim", st.ProviderOwnership)
+		}
+		if row := gateRow(t, out.Targets[0], "gp"); row.Action != GateActionDisabled || row.Axis != state.OwnershipAxisSignal {
+			t.Fatalf("gp gate row = %+v, want a signal-axis disable", row)
+		}
+	})
+}
+
 // TestSignalGateUnresolvedDefinitionReferencesAreAdvisory mirrors the live
 // incident shape: a facet's primary model is a model_group polytoken-ref
 // naming a group no layer defines, and its fallback list names an undefined

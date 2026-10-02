@@ -192,13 +192,47 @@ type signalPoolDecision struct {
 	Pools []string
 }
 
+// durableGateApplies reports whether the gate's durable-axes branch gates a
+// provider with the given mode: a manual or corrupted disable always gates;
+// a reserve gates only a non-exempt provider (an exempt member's reserve is
+// the quota-gate clamp, not a gating axis). planProviderGate's durable branch
+// and signalPoolRule's coverage use share this single condition, so coverage
+// can never count as enabled a member the same pass durably gates, or vice
+// versa.
+func durableGateApplies(mode state.Mode, exempt bool) bool {
+	return mode == state.ModeDisabled || (mode == state.ModeReserve && !exempt)
+}
+
 // signalPoolRule evaluates the all-hot pool escape hatch over enrolled
 // providers. A pool is skipped when its proposed signal-gate set is non-empty
 // and covers every member that would otherwise remain enabled: members whose
 // global enabled field is currently absent-or-true AND that no non-pace axis
 // gates this pass. Every signal-held claim in a skipped pool is released
 // unless another axis still gates it.
-func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGateVerdict, liveEnabled map[string]bool, modes map[string]state.Mode, signalHeld map[string]bool) signalPoolDecision {
+//
+// The quota-gate exemption set (members declaring
+// `quota_gate: {enabled: false}`, per reconcile.QuotaGateExempt) must reach
+// both coupled uses without distorting the rule's premises:
+//
+//   - Coverage: an exempt member counts as otherwise-enabled whenever the
+//     operator does not hold its field off and its mode is not a disable the
+//     gate will actually apply this pass — the exemption lifts only the
+//     quota-derived clamped reserve (mode reserve), never the operator-held
+//     check and never a mode disabled from a manual disable or corrupted
+//     observation. Otherwise an exempt exhausted member would make all-hot
+//     coverage look complete and wrongly suppress a signal-hot sibling's
+//     gate, while an exempt corrupted member would be durably disabled in
+//     the same pass that coverage counted it as enabled, emptying the pool
+//     for an interval.
+//   - Release: when a pool IS skipped, an exempt member's own held signal
+//     claim is released even at its clamped reserve — the clamp is not
+//     another axis holding it — while a manual or corrupted disable keeps
+//     holding it, so a pool skip can never restore over an operator disable.
+//
+// Singleton pools stay byte-identical to the healthy case: a lone exempt
+// signal-hot member pool-skips and releases its held claim exactly as the
+// tested healthy singleton does.
+func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGateVerdict, liveEnabled map[string]bool, modes map[string]state.Mode, signalHeld map[string]bool, exempt map[string]bool) signalPoolDecision {
 	dec := signalPoolDecision{PoolOf: map[string]string{}}
 	members := make(map[string][]string)
 	seen := make(map[string]bool)
@@ -226,10 +260,11 @@ func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGa
 		otherwiseEnabled := make(map[string]bool)
 		for _, id := range members[g] {
 			if !liveEnabled[id] {
-				continue // operator holds the field off
+				continue // operator holds the field off — exemption or not
 			}
-			switch modes[id] {
-			case state.ModeReserve, state.ModeDisabled:
+			// Coverage counts as otherwise-enabled exactly the members the
+			// durable branch will not gate this pass.
+			if durableGateApplies(modes[id], exempt[id]) {
 				continue // a non-pace axis gates it this pass
 			}
 			otherwiseEnabled[id] = true
@@ -257,8 +292,19 @@ func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGa
 			if !signalHeld[id] {
 				continue
 			}
+			heldByAnotherAxis := false
 			switch modes[id] {
-			case state.ModeReserve, state.ModeDisabled:
+			case state.ModeDisabled:
+				// Manual or corrupted disable: the disable stands, even for
+				// an exempt member.
+				heldByAnotherAxis = true
+			case state.ModeReserve:
+				// Reserve gates only a non-exempt member: an exempt member's
+				// reserve is the quota-gate clamp, not a held gate, so its
+				// own signal claim is still released on the pool skip.
+				heldByAnotherAxis = !exempt[id]
+			}
+			if heldByAnotherAxis {
 				continue // another axis still holds the gate
 			}
 			dec.Release[id] = true

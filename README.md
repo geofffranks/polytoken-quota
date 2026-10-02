@@ -124,7 +124,7 @@ operational:
   notice_path: /shared/polytoken-quota/notice.json
 ```
 
-Reserve and exhausted/disabled quota gate a provider off; recovery restores only the baseline the quota process recorded and still owns. Groups, tier defaults, model enabled flags, and facet/subagent assignments remain operator-owned. Same-name global and project groups have been observed to concatenate global leaves before project leaves while retaining duplicates; this mode does not select or promise a specific remaining model. When migrating from legacy policy, old quota-authored chains and model flags remain in Polytoken as operator-owned edits; review `init --provider-only --preview` and its rollback information before applying. See the [configuration reference](docs/configuration.md#policy-modes-legacy-and-provider-only).
+Reserve and exhausted/disabled quota gate a provider off; recovery restores only the baseline the quota process recorded and still owns. Setting `quota_gate: {enabled: false}` inside a provider's `quota` block suspends this automatic quota gating for that provider: an out-of-quota observation never plans a disable, and a provider quota had gated off is re-enabled on the next pass, while `status` and `doctor` keep reporting the raw out-of-quota state and name the suspension (`quota_gate_suspended` on the status provider projection, a `quota-gate-suspended` doctor finding). The signal gate (`signal_gate`, `keep_enabled`) is a separate axis and still applies, and only an explicit `routing disable` turns an exempt provider off. Groups, tier defaults, model enabled flags, and facet/subagent assignments remain operator-owned. Same-name global and project groups have been observed to concatenate global leaves before project leaves while retaining duplicates; this mode does not select or promise a specific remaining model. When migrating from legacy policy, old quota-authored chains and model flags remain in Polytoken as operator-owned edits; review `init --provider-only --preview` and its rollback information before applying. See the [configuration reference](docs/configuration.md#policy-modes-legacy-and-provider-only).
 
 ### Neuralwatt adapter
 
@@ -200,7 +200,7 @@ review. A 401 fails closed and requires Claude Code to re-authenticate.
 `polytoken-quota select` recommends **one suitable, explicitly registered model** for a task. It separates two decisions:
 
 1. **Assess difficulty:** use a pinned Jev classifier to assess a task supplied on stdin, or provide `--difficulty` to keep the task entirely local.
-2. **Select a candidate:** apply your phase/tier policy, model and provider exclusions, and saved quota evidence deterministically.
+2. **Select a candidate:** apply your phase/tier policy, model and provider exclusions, and saved quota evidence deterministically. Known out-of-quota providers stay excluded from recommendations even when `quota_gate` spares them from automatic gating — the exemption changes gating, never the observation.
 
 The command does not launch a subagent, reserve quota, rewrite model chains, or migrate existing workflows. By default it does not poll providers or write state. Both `select` and `select-eval` retain the normal startup requirement for a supported `polytoken` binary on `PATH` or configured through `POLYTOKEN_BINARY`, including explicit-tier mode.
 

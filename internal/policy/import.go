@@ -727,6 +727,10 @@ type outQuota struct {
 	// provider-only re-init can never silently drop a non-default signal_gate
 	// setting.
 	SignalGate *outSignalGate `yaml:"signal_gate,omitempty"`
+	// QuotaGate round-trips the resolved quota-gating opt-out; omitted
+	// entirely when it equals the documented default (which loads back
+	// identically), so a rendered policy never carries the default shape.
+	QuotaGate *outQuotaGate `yaml:"quota_gate,omitempty"`
 }
 
 // outSignalGate is the rendered signal_gate block. It always carries both
@@ -734,6 +738,12 @@ type outQuota struct {
 type outSignalGate struct {
 	Enabled   bool    `yaml:"enabled"`
 	Threshold float64 `yaml:"threshold"`
+}
+
+// outQuotaGate is the rendered quota_gate block. It always carries the
+// enabled key so the rendered form is self-describing.
+type outQuotaGate struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // quotaOut renders the resolved quota adapter configuration. quota.mode is
@@ -753,6 +763,9 @@ func quotaOut(q *QuotaConfig) *outQuota {
 	}
 	if sg := q.SignalGate.Resolved(); !sg.IsDefault() {
 		out.SignalGate = &outSignalGate{Enabled: !sg.Disabled, Threshold: sg.Threshold}
+	}
+	if g := q.Gate.Resolved(); !g.IsDefault() {
+		out.QuotaGate = &outQuotaGate{Enabled: !g.Disabled}
 	}
 	return out
 }

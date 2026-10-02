@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
 )
@@ -44,6 +45,84 @@ func (r *toggleMutationRunner) Run(ctx context.Context, name string, args []stri
 type toggleClock struct{ t time.Time }
 
 func (c *toggleClock) Now() time.Time { return c.t }
+
+// TestProviderManualToggleOverridesQuotaGateExemption is AC.4 end to end: a
+// quota-gate-exempt out-of-quota provider plans no automatic disable, an
+// explicit `routing disable` still disables it (operator action overrides the
+// suspension) and survives the next reconcile as a held claim, and `routing
+// enable` restores it — after which the exemption keeps the out-of-quota
+// provider enabled on the following pass.
+func TestProviderManualToggleOverridesQuotaGateExemption(t *testing.T) {
+	f := newSignalFixture(t, []string{"gp", "pp"})
+	m := f.desired.Providers[policy.MappingID("gp")]
+	m.Quota.Gate = policy.QuotaGateConfig{Disabled: true}
+	f.desired.Providers[policy.MappingID("gp")] = m
+	now := f.clock.t
+	// gp is out of quota (provider-reported unavailable) AND exempt, but NOT
+	// signal-hot: the quota axis is isolated so the pass plans no disable.
+	f.seedState(7, map[string]state.ProviderState{
+		"gp": {QuotaSnapshot: quotaGateSnapshot(now, quota.QuotaUnavailable, 10)},
+		"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)}, // healthy, not gated
+	}, nil)
+	before := f.readGlobalConfig()
+
+	out := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !out.Accepted || out.PendingCount() != 0 {
+		t.Fatalf("pass out=%+v err=%v", out, out.Error)
+	}
+	if got := f.readGlobalConfig(); got != before {
+		t.Fatalf("exempt out-of-quota pass edited the config:\n--- got ---\n%s\n--- want ---\n%s", got, before)
+	}
+	if row := gateRow(t, out.Targets[0], "gp"); row.Action != GateActionUnchanged {
+		t.Fatalf("gp gate row = %+v, want unchanged (no disable plan)", row)
+	}
+
+	// The explicit operator disable overrides the exemption.
+	dis := f.coordinator().Disable(context.Background(), "gp")
+	if !dis.Accepted || dis.Error != nil {
+		t.Fatalf("disable out=%+v err=%v", dis, dis.Error)
+	}
+	disabledBytes := f.readGlobalConfig()
+	st := f.loadState()
+	if !st.Providers["gp"].ManualDisabled {
+		t.Fatal("manual disable not recorded")
+	}
+	if claim, ok := st.ProviderOwnership["gp"]; !ok || !claim.Owned || claim.Axis != state.OwnershipAxisDisabled {
+		t.Fatalf("claim = %+v, want a disabled-axis claim", claim)
+	}
+
+	// The disable survives the next reconcile as a held claim.
+	rec := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !rec.Accepted || rec.Error != nil {
+		t.Fatalf("reconcile out=%+v err=%v", rec, rec.Error)
+	}
+	if got := f.readGlobalConfig(); got != disabledBytes {
+		t.Fatalf("reconcile reverted the manual disable:\n--- got ---\n%s\n--- want ---\n%s", got, disabledBytes)
+	}
+	if row := gateRow(t, rec.Targets[0], "gp"); row.Action != GateActionHeld {
+		t.Fatalf("gate row after reconcile = %+v, want held", row)
+	}
+
+	// routing enable restores, and the exemption keeps the out-of-quota
+	// provider enabled on the following pass.
+	ena := f.coordinator().Enable(context.Background(), "gp")
+	if !ena.Accepted || ena.Error != nil {
+		t.Fatalf("enable out=%+v err=%v", ena, ena.Error)
+	}
+	if got := f.readGlobalConfig(); got != before {
+		t.Fatalf("enable did not restore the baseline bytes:\n--- got ---\n%s\n--- want ---\n%s", got, before)
+	}
+	rec2 := f.coordinator().Reconcile(context.Background(), false, false, false)
+	if !rec2.Accepted || rec2.Error != nil {
+		t.Fatalf("reconcile2 out=%+v err=%v", rec2, rec2.Error)
+	}
+	if got := f.readGlobalConfig(); got != before {
+		t.Fatalf("exempt out-of-quota provider was gated off after enable:\n%s", got)
+	}
+	if st2 := f.loadState(); len(st2.ProviderOwnership) != 0 {
+		t.Fatalf("claims = %+v, want none", st2.ProviderOwnership)
+	}
+}
 
 func TestProviderOnlyManualDisablePublishesByteEditAndClaim(t *testing.T) {
 	f := newGateFixture(t, []string{"gp", "pp"}, nil)

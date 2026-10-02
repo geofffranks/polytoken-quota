@@ -754,6 +754,59 @@ func TestRoutingExplainPendingTargetsSanitizedAndCopied(t *testing.T) {
 	}
 }
 
+// TestStatusProjectionStaysExemptionBlind is AC.2(b): the status provider
+// projection keeps the raw observed EffectiveMode and Reason for an exempt
+// provider — the observation is never laundered to healthy — and names the
+// suspension only as the separate quota_gate_suspended policy flag. The
+// exempt row is identical to a non-exempt provider's apart from that flag.
+func TestStatusProjectionStaysExemptionBlind(t *testing.T) {
+	desired := policy.Desired{Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{
+		"gp": {Quota: &policy.QuotaConfig{Adapter: "codex", Gate: policy.QuotaGateConfig{Disabled: true}}},
+	}}
+	observed := state.State{Providers: map[string]state.ProviderState{
+		"gp": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaSnapshot: quotaGateSnapshot(diagnosticAsOf, quota.QuotaUnavailable, 100)},
+	}}
+	providers, errs := projectProviders(desired, observed, diagnosticAsOf)
+	if len(errs) != 0 {
+		t.Fatalf("projection errors: %v", errs)
+	}
+	if len(providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(providers))
+	}
+	row := providers[0]
+	if row.EffectiveMode != state.ModeDisabled {
+		t.Fatalf("EffectiveMode = %v, want the raw exemption-blind disabled mode", row.EffectiveMode)
+	}
+	// providerReason reads the aggregated raw axes; a quota-configured
+	// mapping without a usable snapshot aggregates to unavailable in this
+	// projection (quota_aggregate.go), so that — not a laundered healthy
+	// value — is the exemption-blind reason here.
+	if row.Reason != "unavailable" {
+		t.Fatalf("Reason = %q, want the raw exemption-blind reason", row.Reason)
+	}
+	if row.ManualDisabled {
+		t.Fatalf("ManualDisabled = true, want the observed axis value preserved")
+	}
+	if row.Gate != nil {
+		t.Fatalf("Gate = %+v, want no gate record (nothing gated the provider off)", row.Gate)
+	}
+	if !row.QuotaGateSuspended {
+		t.Fatalf("QuotaGateSuspended = false, want the policy flag set for the exempt provider")
+	}
+
+	// The same provider without the key projects identically apart from the
+	// flag: the exemption never changes what status observes.
+	desired.Providers["gp"] = policy.Mapping{Quota: &policy.QuotaConfig{Adapter: "codex"}}
+	plain, _ := projectProviders(desired, observed, diagnosticAsOf)
+	if plain[0].QuotaGateSuspended {
+		t.Fatalf("non-exempt provider carries the suspension flag: %+v", plain[0])
+	}
+	plain[0].QuotaGateSuspended = row.QuotaGateSuspended
+	if !reflect.DeepEqual(plain[0], row) {
+		t.Fatalf("exempt projection %+v differs from the non-exempt projection beyond the flag", row)
+	}
+}
+
 func TestRoutingPartialDefinitionError(t *testing.T) {
 	d, canonicalRoot := diagnosticFixture(t, true)
 	broken := filepath.Join(d.desired.Global.Root, "subagents", "zeta.md")

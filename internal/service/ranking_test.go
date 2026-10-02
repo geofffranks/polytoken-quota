@@ -176,6 +176,56 @@ func TestMappingNilSnapshotFailsClosed(t *testing.T) {
 
 func ptrFloat(v float64) *float64 { return &v }
 
+// TestExemptExhaustedObservationDerivesReserveWithQuotaReason is AC.2(a): an
+// exempt out-of-quota provider's ranking observation derives mode reserve via
+// the centralized reconcile.MappingMode call (never laundered to healthy,
+// never disabled), CheckEligibility's snapshot branch names the quota cause in
+// the explanation, the provider sorts after eligible ones, and it earns no
+// RankLookup entry — enabled-but-last, never ranked for reorder.
+func TestExemptExhaustedObservationDerivesReserveWithQuotaReason(t *testing.T) {
+	desired := qmap(true,
+		rankMapping{id: "hot", bases: []string{"hot/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1}},
+		rankMapping{id: "exempt", bases: []string{"exempt/x"}, quota: &policy.QuotaConfig{Adapter: "codex", BalanceGroup: "g", Weight: 1, Gate: policy.QuotaGateConfig{Disabled: true}}},
+	)
+	exhausted := qsnap(100, 100)
+	exhausted.Availability = quota.QuotaUnavailable
+	observed := state.State{Providers: map[string]state.ProviderState{
+		"hot":    pstate(qsnap(10, 100)),
+		"exempt": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaSnapshot: exhausted},
+	}}
+
+	// The observation itself derives reserve through the centralized mode
+	// derivation, with its truthful snapshot intact.
+	mode, snap := aggregateMappingObs(desired, "exempt", observed.Providers)
+	if mode != state.ModeReserve || snap != exhausted {
+		t.Fatalf("exempt exhausted observation = (%v, %+v), want reserve with its snapshot", mode, snap)
+	}
+
+	_, ranking := ComputeRanking(desired, observed, rankNow)
+	e, ok := rankEntry(ranking, "exempt")
+	if !ok {
+		t.Fatal("exempt mapping missing from ranking")
+	}
+	if e.Eligible {
+		t.Fatalf("exempt exhausted provider must be ineligible: %+v", e)
+	}
+	if e.Explanation != "ineligible: quota exhausted/unavailable" {
+		t.Fatalf("explanation = %q, want the quota cause (not disabled)", e.Explanation)
+	}
+	hot, ok := rankEntry(ranking, "hot")
+	if !ok || !hot.Eligible || hot.Rank >= e.Rank {
+		t.Fatalf("eligible provider must sort before the exempt exhausted one: hot=%+v exempt=%+v", hot, e)
+	}
+
+	lookup, _ := ComputeRanking(desired, observed, rankNow)
+	if _, ranked := lookup["exempt"]; ranked {
+		t.Fatal("ineligible exempt mapping entered the RankLookup")
+	}
+	if _, ranked := lookup["hot"]; !ranked {
+		t.Fatal("eligible mapping missing from the RankLookup")
+	}
+}
+
 type staticStateStore struct{ state state.State }
 
 type staticPolicyLoader struct{ desired policy.Desired }
