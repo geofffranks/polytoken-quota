@@ -434,7 +434,7 @@ PROVIDER   STATUS       REASON                                              QUOT
 codex      available    peak, signal +1.00                                  5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
 zai        available    off-peak, signal -0.19                              5h 41/80, weekly 120/400  2026-08-15 00:00 UTC
 gp         gated        signal-gated (-0.72 <= +0.00); peak, signal -0.72   5h 41/80                  —
-neuralwatt unavailable  ineligible: disabled                                unavailable (in overage)  —
+neuralwatt unavailable  ineligible: out of quota                            unavailable (in overage)  —
 minime     enabled      not configured                                      no data                   —
 
 TARGET  SOURCE                 ROUTE     DESIRED       EFFECTIVE
@@ -446,7 +446,7 @@ warning: 1 target(s) pending — shown values may not be live; run polytoken-quo
 
 Provider STATUS consolidates the axes: `disabled` (manual `routing disable`) wins over everything; a provider an ownership gate holds off shows `gated` — the signal- and reserve-axis gates, where quota holds the provider's `enabled` field off (a conflicted claim, where the operator re-enabled the field, keeps its quota-health status, and a deliberately gated provider keeps a clean exit code: the red row is informational, while exit codes still reflect quota health); a configured mapping with no quota observation yet shows `enabled`; otherwise the availability axis decides `available`/`unavailable`.
 
-When a poll succeeds but the provider is out of quota, the QUOTA column names the fail-closed condition — `unavailable (key blocked)`, `unavailable (in overage)`, or `unavailable (balance drained)` — and NEXT RESET stays `—`; an observed windowless snapshot without a named condition renders `no data (unavailable)`.
+When a poll succeeds but the provider is out of quota, the QUOTA column names the fail-closed condition — `unavailable (key blocked)`, `unavailable (in overage)`, or `unavailable (balance drained)` — and NEXT RESET stays `—`; the REASON column reads `ineligible: out of quota` for the same rows; an observed windowless snapshot without a named condition renders `no data (unavailable)`.
 
 The provider table shows status, the ranking explanation, raw quota windows, and the next reset. Route rows show target/source provenance and only the first desired/effective model; `status --json` retains ranking fields, complete route chains, raw window numbers, `skipped` arrays, `pending_targets`, and `problem`, plus per-provider `condition`, `checked_at`, and `availability`. Exit codes are `1` for a fatal error or failed route projection and `2` for actionable quota problems.
 

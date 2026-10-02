@@ -111,10 +111,13 @@ type GateReport struct {
 // configured mapping is projected; mappings without a pollable quota config use
 // their observed state and remain visible without fabricated quota data.
 type ProviderProjection struct {
-	MappingID      string              `json:"mapping_id"`
-	Adapter        string              `json:"adapter,omitempty"`
-	QuotaClass     quota.QuotaClass    `json:"quota_class"`
-	Availability   state.Availability  `json:"availability"`
+	MappingID    string             `json:"mapping_id"`
+	Adapter      string             `json:"adapter,omitempty"`
+	QuotaClass   quota.QuotaClass   `json:"quota_class"`
+	Availability state.Availability `json:"availability"`
+	// Quota is the row's aggregated quota axis, exposed so presentation can
+	// name a quota-exhausted cause instead of the generic disabled text.
+	Quota          state.Quota         `json:"quota,omitempty"`
 	EffectiveMode  state.Mode          `json:"effective_mode"`
 	ManualDisabled bool                `json:"manual_disabled"`
 	Reason         string              `json:"reason"`
@@ -160,7 +163,7 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 		mapping := desired.Providers[policy.MappingID(id)]
 		ps := mappingProviderState(id, mapping, observed.Providers)
 		entry := ProviderProjection{
-			MappingID: id, Availability: ps.Availability, EffectiveMode: state.EffectiveMode(ps),
+			MappingID: id, Availability: ps.Availability, Quota: ps.Quota, EffectiveMode: state.EffectiveMode(ps),
 			ManualDisabled: ps.ManualDisabled, Reason: providerReason(ps),
 			Freshness: FreshnessMissing, QuotaClass: quota.ClassUnknown,
 		}

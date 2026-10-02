@@ -25,6 +25,11 @@ const (
 	StatusAvailable   = "available"
 )
 
+// disabledRankExplanation is the ranking's generic mode-disabled explanation —
+// routing.Rank's "ineligible: " prefix on CheckEligibility's "disabled"
+// reason — into which every disabled cause collapses.
+const disabledRankExplanation = "ineligible: disabled"
+
 // MergedStatusProvider is one provider row: consolidated status, ranking
 // metadata, raw quota window numbers, the earliest upcoming reset, and the
 // gate attribution when quota holds the provider's enabled field off.
@@ -115,6 +120,18 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	for _, provider := range s.providers {
 		rank := ranks[provider.MappingID]
 		reason := rank.Explanation
+		// The ranking's mode explanation collapses every disabled cause into
+		// "ineligible: disabled". When the row's own aggregated axes name a
+		// quota cause — an exhausted quota axis, or an availability axis held
+		// off by out-of-quota evidence — and a real snapshot backs the row,
+		// say so. Manual disables, corrupted axis values, and rows without a
+		// snapshot (never observed, or observed-but-failed) keep the generic
+		// ranking text.
+		if rank.Explanation == disabledRankExplanation && !provider.ManualDisabled &&
+			provider.Freshness != FreshnessMissing &&
+			(provider.Quota == state.QuotaExhausted || provider.Availability == state.Unavailable) {
+			reason = "ineligible: out of quota"
+		}
 		// A signal-held gate names itself ahead of the ranking explanation: the
 		// reason a provider is OFF must lead the row, and the ranking
 		// explanation (why it ranks where it does) follows.

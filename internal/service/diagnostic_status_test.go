@@ -225,3 +225,104 @@ func TestMergedStatusWindowlessPartialKeepsUnknownAvailability(t *testing.T) {
 		t.Fatalf("status = %q, want unavailable from the fail-closed row axis", row.Status)
 	}
 }
+
+// TestMergedStatusReasonNamesOutOfQuota pins the merged view's reason
+// refinement: the ranking's generic mode-disabled explanation becomes
+// "ineligible: out of quota" exactly when the row's aggregated axes name a
+// quota cause (an exhausted quota axis, or an availability axis held off by
+// out-of-quota evidence) and a real snapshot backs the row.
+func TestMergedStatusReasonNamesOutOfQuota(t *testing.T) {
+	asOf := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		provider ProviderProjection
+		want     string
+	}{
+		"exhausted quota axis": {
+			provider: ProviderProjection{MappingID: "p", Quota: state.QuotaExhausted, EffectiveMode: state.ModeDisabled,
+				Availability: state.Available, CheckedAt: asOf, Freshness: FreshnessFresh},
+			want: "ineligible: out of quota",
+		},
+		"availability axis held off by overage": {
+			provider: ProviderProjection{MappingID: "p", Availability: state.Unavailable, EffectiveMode: state.ModeDisabled,
+				CheckedAt: asOf, Freshness: FreshnessFresh, SnapshotAvailability: quota.QuotaUnavailable, Condition: "in overage"},
+			want: "ineligible: out of quota",
+		},
+		"manual disable keeps generic text": {
+			provider: ProviderProjection{MappingID: "p", ManualDisabled: true, Quota: state.QuotaExhausted,
+				EffectiveMode: state.ModeDisabled, CheckedAt: asOf, Freshness: FreshnessFresh},
+			want: "ineligible: disabled",
+		},
+		"no snapshot keeps generic text": {
+			// The fail-closed axes for a missing observation say exhausted and
+			// unavailable, but without a snapshot the row was never observed:
+			// "out of quota" would fabricate data.
+			provider: ProviderProjection{MappingID: "p", Quota: state.QuotaExhausted, Availability: state.Unavailable,
+				EffectiveMode: state.ModeDisabled, Freshness: FreshnessMissing},
+			want: "ineligible: disabled",
+		},
+		"corrupted axis keeps generic text": {
+			provider: ProviderProjection{MappingID: "p", Quota: state.Quota("bogus"), EffectiveMode: state.ModeDisabled,
+				Availability: state.Available, CheckedAt: asOf, Freshness: FreshnessFresh},
+			want: "ineligible: disabled",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			view := DiagnosticSnapshot{
+				providers: []ProviderProjection{tc.provider},
+				ranks:     []RankEntryReport{{MappingID: tc.provider.MappingID, Explanation: disabledRankExplanation}},
+			}
+			report := view.MergedStatusView()
+			if len(report.Providers) != 1 {
+				t.Fatalf("providers = %d, want 1", len(report.Providers))
+			}
+			if got := report.Providers[0].Reason; got != tc.want {
+				t.Fatalf("reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMergedStatusOutOfQuotaReasonEndToEnd runs the refinement through the
+// real projection pipeline: a quota-exhausted axis names the quota cause while
+// the healthy sibling keeps its own ranking explanation.
+func TestMergedStatusOutOfQuotaReasonEndToEnd(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	ps := d.observed.Providers["beta"]
+	ps.Quota = state.QuotaExhausted
+	d.observed.Providers["beta"] = ps
+	report := mergedView(t, d)
+	rowFor := func(id string) MergedStatusProvider {
+		for _, row := range report.Providers {
+			if row.Provider == id {
+				return row
+			}
+		}
+		t.Fatalf("provider %q missing from report", id)
+		return MergedStatusProvider{}
+	}
+	if got := rowFor("beta").Reason; got != "ineligible: out of quota" {
+		t.Fatalf("beta reason = %q, want %q", got, "ineligible: out of quota")
+	}
+	if got := rowFor("alpha").Reason; got == "ineligible: out of quota" {
+		t.Fatalf("healthy alpha reason = %q, must not read as out of quota", got)
+	}
+}
+
+// TestMergedStatusUnavailableSnapshotReasonOutOfQuota pins the in-overage
+// shape: a raw snapshot reporting unavailable (no usable remaining) drives the
+// aggregated availability axis down, and the reason names the quota cause.
+func TestMergedStatusUnavailableSnapshotReasonOutOfQuota(t *testing.T) {
+	d, _ := diagnosticFixture(t, true)
+	d.observed.Providers["beta"].QuotaSnapshot.Availability = quota.QuotaUnavailable
+	report := mergedView(t, d)
+	for _, row := range report.Providers {
+		if row.Provider != "beta" {
+			continue
+		}
+		if row.Reason != "ineligible: out of quota" {
+			t.Fatalf("beta reason = %q, want %q", row.Reason, "ineligible: out of quota")
+		}
+		return
+	}
+	t.Fatal("beta missing from report")
+}
