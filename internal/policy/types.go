@@ -176,6 +176,44 @@ func (p SignalGateConfig) IsDefault() bool {
 	return !p.Disabled && p.Threshold == DefaultSignalGateThreshold
 }
 
+// QuotaGateConfig is the resolved quota-gating configuration for one provider
+// mapping. Quota-derived gating — the durable quota/availability axes plus the
+// fail-closed poll snapshot boundary — is on by default. An explicit
+// `quota_gate: {enabled: false}` suspends it for that provider only: it is
+// never automatically disabled by a quota observation, and a gate pass
+// restores a provider a quota gate had turned off. The observation itself
+// never changes; only the action taken on it does. The zero value IS the
+// documented default (gating on): Disabled is false, so an absent quota_gate
+// block — which Load resolves to the zero value — is indistinguishable from an
+// explicit `quota_gate: {enabled: true}`. Unlike SignalGateConfig this key is
+// accepted in both policy modes wherever a quota section is valid.
+type QuotaGateConfig struct {
+	// Disabled records an explicit `quota_gate: {enabled: false}`. The wire
+	// grammar stays positive ("enabled"); the resolved form is inverted so
+	// the struct's zero value means "as documented" with no ambiguity
+	// between "absent" and "explicitly off".
+	Disabled bool
+}
+
+// DefaultQuotaGate returns the documented default quota-gating configuration:
+// quota observations gate normally. It is the zero value of QuotaGateConfig.
+func DefaultQuotaGate() QuotaGateConfig {
+	return QuotaGateConfig{}
+}
+
+// Resolved returns g with the documented defaults applied. Quota gating has no
+// tunable beyond the enable switch, so the resolved form is the value itself;
+// the method keeps every quota sub-config on the same resolved-struct pattern.
+func (g QuotaGateConfig) Resolved() QuotaGateConfig {
+	return g
+}
+
+// IsDefault reports whether g is exactly the documented default configuration
+// (the only shape the rendered policy omits).
+func (g QuotaGateConfig) IsDefault() bool {
+	return !g.Disabled
+}
+
 // QuotaConfig holds per-provider quota/routing configuration (additive on
 // Mapping). When a mapping omits its quota section, the mapping's Quota pointer
 // is nil and routing treats it as unrankable (it keeps its position, never
@@ -204,6 +242,14 @@ type QuotaConfig struct {
 	// block to DefaultSignalGate, so the in-memory config always carries the
 	// effective values.
 	SignalGate SignalGateConfig
+	// Gate is the resolved quota-gating opt-out (additive). Unlike
+	// signal_gate it is accepted in both policy modes wherever a quota
+	// section is valid: legacy adapter-keyed mappings carrying a quota
+	// section need the opt-out too. Load resolves an absent quota_gate block
+	// to DefaultQuotaGate, so the in-memory config always carries the
+	// effective value. It changes only the automatic gating action, never
+	// the observation (see reconcile.MappingMode).
+	Gate QuotaGateConfig
 }
 
 // RoutingConfig holds the top-level routing enablement (additive on Desired).

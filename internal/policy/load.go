@@ -633,6 +633,9 @@ type quotaWire struct {
 	// SignalGate is the strict sub-decode of the optional provider-only
 	// signal_gate block; nil when the key is absent.
 	SignalGate       *signalGateWire `yaml:"signal_gate"`
+	// QuotaGate is the strict sub-decode of the optional quota_gate block;
+	// nil when the key is absent. Accepted in both policy modes.
+	QuotaGate        *quotaGateWire  `yaml:"quota_gate"`
 	hasFields        bool
 	monthlyBudgetSet bool
 	adapterSet       bool
@@ -717,6 +720,54 @@ func (p *signalGateWire) UnmarshalYAML(value *yaml.Node) error {
 			}
 		default:
 			return errors.New("policy: signal_gate: unknown key (want enabled or threshold)")
+		}
+	}
+	return nil
+}
+
+// quotaGateWire is the on-disk shape of a mapping's `quota.quota_gate`
+// section. It follows the signal_gate precedent — strict decoding with fixed,
+// non-echoing errors — with a deliberately narrower grammar: enabled is the
+// only key, and `enabled: false` is the only shape that resolves to anything
+// other than the documented default. Unlike signal_gate, the key is accepted
+// in both policy modes wherever a quota section is valid: legacy
+// adapter-keyed mappings carrying a quota section need the opt-out too (the
+// signal_gate provider-only rejection is deliberately NOT replicated here).
+type quotaGateWire struct {
+	Enabled *bool
+	// enabledSet distinguishes an explicit key (including an explicit empty
+	// value, which must be rejected) from an omitted one, which defaults.
+	enabledSet bool
+}
+
+func (p *quotaGateWire) UnmarshalYAML(value *yaml.Node) error {
+	if value.Tag == "!!null" {
+		return nil // `quota_gate:` with no value: every key defaults
+	}
+	if value.Kind != yaml.MappingNode {
+		return errors.New("policy: quota_gate must be a mapping")
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		switch value.Content[i].Value {
+		case "enabled":
+			if p.enabledSet {
+				return errors.New("policy: quota_gate: duplicate enabled key")
+			}
+			p.enabledSet = true
+			if value.Content[i+1].ShortTag() == "!!null" {
+				// An explicit `enabled: null` (also ~ and aliases to null) is
+				// not a boolean: yaml would silently decode it as the zero
+				// value. Reject it with the same fixed, non-echoing error as
+				// any other non-boolean value.
+				return errors.New("policy: quota_gate: enabled must be a boolean")
+			}
+			var b bool
+			if err := value.Content[i+1].Decode(&b); err != nil {
+				return errors.New("policy: quota_gate: enabled must be a boolean")
+			}
+			p.Enabled = &b
+		default:
+			return errors.New("policy: quota_gate: unknown key (want enabled)")
 		}
 	}
 	return nil
@@ -1049,6 +1100,14 @@ func quotaFromWire(mappingID, explicitAdapter string, w *quotaWire) (*QuotaConfi
 			}
 			qc.SignalGate.Threshold = w.SignalGate.Threshold
 		}
+	}
+	// Resolve quota gating: an absent block (or any omitted key within it)
+	// means quota-derived gating on. No legacy-mode rejection here — by
+	// deliberate divergence from the signal_gate precedent above, quota_gate
+	// is accepted in both policy modes wherever a quota section is valid.
+	qc.Gate = DefaultQuotaGate()
+	if w.QuotaGate != nil && w.QuotaGate.Enabled != nil && !*w.QuotaGate.Enabled {
+		qc.Gate.Disabled = true
 	}
 	return qc, nil
 }
