@@ -525,7 +525,7 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		// disable. An exempt provider at mode disabled (a manual disable or
 		// a corrupted observation) keeps the durable branch exactly as a
 		// non-exempt provider would.
-		if mode == state.ModeDisabled || (mode == state.ModeReserve && !exempt[id]) {
+		if durableGateApplies(mode, exempt[id]) {
 			axis := state.OwnershipAxisReserve
 			summary.Axis = string(axis)
 			if mode == state.ModeDisabled {

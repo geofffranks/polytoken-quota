@@ -192,6 +192,17 @@ type signalPoolDecision struct {
 	Pools []string
 }
 
+// durableGateApplies reports whether the gate's durable-axes branch gates a
+// provider with the given mode: a manual or corrupted disable always gates;
+// a reserve gates only a non-exempt provider (an exempt member's reserve is
+// the quota-gate clamp, not a gating axis). planProviderGate's durable branch
+// and signalPoolRule's coverage use share this single condition, so coverage
+// can never count as enabled a member the same pass durably gates, or vice
+// versa.
+func durableGateApplies(mode state.Mode, exempt bool) bool {
+	return mode == state.ModeDisabled || (mode == state.ModeReserve && !exempt)
+}
+
 // signalPoolRule evaluates the all-hot pool escape hatch over enrolled
 // providers. A pool is skipped when its proposed signal-gate set is non-empty
 // and covers every member that would otherwise remain enabled: members whose
@@ -251,12 +262,9 @@ func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGa
 			if !liveEnabled[id] {
 				continue // operator holds the field off — exemption or not
 			}
-			// The exemption lifts only the quota-derived clamped reserve —
-			// exactly the causes the gate's durable branch does not gate (see
-			// planProviderGate). An exempt member at mode disabled (a manual
-			// disable or a corrupted observation) is durably gated this very
-			// pass and must not count as otherwise-enabled.
-			if modes[id] == state.ModeDisabled || (modes[id] == state.ModeReserve && !exempt[id]) {
+			// Coverage counts as otherwise-enabled exactly the members the
+			// durable branch will not gate this pass.
+			if durableGateApplies(modes[id], exempt[id]) {
 				continue // a non-pace axis gates it this pass
 			}
 			otherwiseEnabled[id] = true
