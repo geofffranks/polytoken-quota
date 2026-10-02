@@ -472,16 +472,21 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		live[id] = liveField{present: present, value: value}
 		plan.Enabled[id] = !present || value
 	}
-	// Effective modes drive both the durable axes and the pool rule.
+	// Effective modes drive both the durable axes and the pool rule. The
+	// quota-gate exemption set rides along so the pool rule's coverage and
+	// release uses see it (reconcile.MappingMode already clamped the exempt
+	// members' modes).
 	modes := make(map[string]state.Mode, len(ids))
+	exempt := make(map[string]bool, len(ids))
 	signalHeld := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		modes[id] = reconcile.MappingMode(desired, observed, policy.MappingID(id))
+		exempt[id] = reconcile.QuotaGateExempt(desired.Providers[policy.MappingID(id)])
 		if record, ok := observed.OwnershipOf(id); ok && record.SignalHeld() {
 			signalHeld[id] = true
 		}
 	}
-	pool := signalPoolRule(desired, verdicts, plan.Enabled, modes, signalHeld)
+	pool := signalPoolRule(desired, verdicts, plan.Enabled, modes, signalHeld, exempt)
 	plan.PoolSkips = pool.Pools
 	poolSkipDetail := "pool fully overdrawn this pass; signal gate skipped"
 	operatorHeldDetail := "operator holds the provider off"
@@ -511,10 +516,16 @@ func planProviderGate(desired policy.Desired, observed state.State, globalConfig
 		}
 
 		// The gate consumes the reconciler's single mode derivation: the
-		// durable axes via EffectiveMode plus the fail-closed snapshot
-		// boundary. Reserve remains the existing low-quota axis state; a poll
-		// snapshot only forces disabled, never its own write rule.
-		if mode == state.ModeReserve || mode == state.ModeDisabled {
+		// durable axes plus the fail-closed snapshot boundary, with the
+		// quota-gate exemption's per-cause clamp already applied. A
+		// non-exempt reserve remains the existing low-quota gating axis. An
+		// exempt provider's clamped reserve is NOT a gating axis: it flows
+		// to the normal branch below, which restores any claim the quota
+		// gate had held — the affirmative restore duty — and never plans a
+		// disable. An exempt provider at mode disabled (a manual disable or
+		// a corrupted observation) keeps the durable branch exactly as a
+		// non-exempt provider would.
+		if mode == state.ModeDisabled || (mode == state.ModeReserve && !exempt[id]) {
 			axis := state.OwnershipAxisReserve
 			summary.Axis = string(axis)
 			if mode == state.ModeDisabled {
