@@ -484,6 +484,47 @@ func TestJSONErrorAndPendingEnvelopes(t *testing.T) {
 	})
 }
 
+// TestStatusJSONGatedAndConditionFields pins the extended status --json
+// provider surface: the `gated` status value plus the condition, checked_at,
+// and availability fields.
+func TestStatusJSONGatedAndConditionFields(t *testing.T) {
+	checked := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	spy := newDepsSpy()
+	spy.StatusReportValue = service.MergedStatusReport{
+		RoutingEnabled: true,
+		LastChecked:    checked,
+		Providers: []service.MergedStatusProvider{{
+			Provider: "codex", Status: service.StatusGated,
+			Reason:     "signal-gated (-0.90 <= +0.00); peak, signal -0.90",
+			Condition:  "key blocked", CheckedAt: checked, Availability: "unavailable",
+		}},
+	}
+	var out bytes.Buffer
+	code := Run(context.Background(), []string{"status", "--json"}, strings.NewReader(""), &out, io.Discard, spy.Dependencies())
+	if code != 0 {
+		t.Fatalf("exit=%d", code)
+	}
+	var parsed struct {
+		Providers []struct {
+			Provider     string `json:"provider"`
+			Status       string `json:"status"`
+			Condition    string `json:"condition"`
+			CheckedAt    string `json:"checked_at"`
+			Availability string `json:"availability"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out.String())
+	}
+	if len(parsed.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(parsed.Providers))
+	}
+	p := parsed.Providers[0]
+	if p.Status != "gated" || p.Condition != "key blocked" || p.Availability != "unavailable" || p.CheckedAt == "" {
+		t.Fatalf("provider row = %+v", p)
+	}
+}
+
 // TestCheckPendingDiagnosticsToStderr verifies check on an accepted-but-pending
 // outcome (exit 2) prints each pending target's stage/summary/remediation to
 // stderr, so the user knows why it is pending.

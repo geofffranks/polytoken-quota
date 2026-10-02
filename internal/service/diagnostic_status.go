@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -18,10 +19,16 @@ import (
 // Consolidated provider status values for the merged status view.
 const (
 	StatusDisabled    = "disabled"
+	StatusGated       = "gated"
 	StatusEnabled     = "enabled"
 	StatusUnavailable = "unavailable"
 	StatusAvailable   = "available"
 )
+
+// disabledRankExplanation is the ranking's generic mode-disabled explanation —
+// routing.Rank's "ineligible: " prefix on CheckEligibility's "disabled"
+// reason — into which every disabled cause collapses.
+const disabledRankExplanation = "ineligible: disabled"
 
 // MergedStatusProvider is one provider row: consolidated status, ranking
 // metadata, raw quota window numbers, the earliest upcoming reset, and the
@@ -35,6 +42,19 @@ type MergedStatusProvider struct {
 	Reason      string              `json:"reason"`
 	Windows     []QuotaWindowReport `json:"windows,omitempty"`
 	NextResetAt *time.Time          `json:"next_reset_at,omitempty"`
+	// Condition names the adapter's sanitized out-of-quota condition behind a
+	// windowless snapshot; empty otherwise.
+	Condition string `json:"condition,omitempty"`
+	// CheckedAt is the last observation time: the snapshot's when present,
+	// otherwise the latest attempt's — so an observed-but-failed row stays
+	// distinguishable from a never-observed one even when both read `gated`.
+	CheckedAt time.Time `json:"checked_at,omitempty"`
+	// Availability is the stored quota snapshot's own availability
+	// (available/unavailable/unknown), read from the raw pre-aggregation
+	// snapshot; empty when never observed. Distinct from the consolidated
+	// Status: the fail-closed row axis collapses windowless snapshots to
+	// unavailable, losing the unknown distinction the QUOTA fallback needs.
+	Availability quota.QuotaAvailability `json:"availability,omitempty"`
 	// Gate carries the provider-only gate attribution (axis, observed pace,
 	// threshold, engaged revision); nil when quota holds no attributed claim.
 	Gate *GateReport `json:"gate,omitempty"`
@@ -100,6 +120,18 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	for _, provider := range s.providers {
 		rank := ranks[provider.MappingID]
 		reason := rank.Explanation
+		// The ranking's mode explanation collapses every disabled cause into
+		// "ineligible: disabled". When the row's own aggregated axes name a
+		// quota cause — an exhausted quota axis, or an availability axis held
+		// off by out-of-quota evidence — and a real snapshot backs the row,
+		// say so. Manual disables, corrupted axis values, and rows without a
+		// snapshot (never observed, or observed-but-failed) keep the generic
+		// ranking text.
+		if rank.Explanation == disabledRankExplanation && !provider.ManualDisabled &&
+			provider.Freshness != FreshnessMissing &&
+			(provider.Quota == state.QuotaExhausted || provider.Availability == state.Unavailable) {
+			reason = "ineligible: out of quota"
+		}
 		// A signal-held gate names itself ahead of the ranking explanation: the
 		// reason a provider is OFF must lead the row, and the ranking
 		// explanation (why it ranks where it does) follows.
@@ -107,13 +139,22 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 			reason = signalGateReason(gate) + "; " + reason
 		}
 		row := MergedStatusProvider{
-			Provider: provider.MappingID,
-			Status:   mergedProviderStatus(provider),
-			Rank:     rank.Rank,
-			OffPeak:  rank.OffPeak,
-			Eligible: rank.Eligible,
-			Reason:   reason,
-			Gate:     cloneGateReport(provider.Gate),
+			Provider:     provider.MappingID,
+			Status:       mergedProviderStatus(provider),
+			Rank:         rank.Rank,
+			OffPeak:      rank.OffPeak,
+			Eligible:     rank.Eligible,
+			Reason:       reason,
+			Gate:         cloneGateReport(provider.Gate),
+			Condition:    provider.Condition,
+			Availability: provider.SnapshotAvailability,
+		}
+		// Observed-ness rides checked_at: fall back to the latest attempt's
+		// time when no snapshot exists, so observed-but-failed rows stay
+		// distinguishable from never-observed ones.
+		row.CheckedAt = provider.CheckedAt
+		if row.CheckedAt.IsZero() && provider.LatestAttempt != nil {
+			row.CheckedAt = provider.LatestAttempt.CheckedAt
 		}
 		if provider.CheckedAt.After(report.LastChecked) {
 			report.LastChecked = provider.CheckedAt
@@ -203,16 +244,25 @@ func dropCondition(ps state.ProviderState) string {
 // mergedProviderStatus applies the consolidated status precedence:
 //
 //  1. disabled — manual disable wins over everything.
-//  2. enabled — never observed: no quota snapshot and no attempt. This
+//  2. gated — an owned, non-conflicted ownership claim from an axis that
+//     holds a healthy provider off (signal or reserve). A conflicted claim
+//     means the live field is operator-controlled, so red `gated` there
+//     would be the reverse lie; disabled-axis claims mean quota-unhealthy
+//     and keep the availability status below.
+//  3. enabled — never observed: no quota snapshot and no attempt. This
 //     deliberately overrides the fail-closed Unavailable/Exhausted
 //     aggregation result for never-observed quota-mapped providers,
 //     for presentation in this view only.
-//  3. unavailable — the availability axis says unreachable, or the provider
+//  4. unavailable — the availability axis says unreachable, or the provider
 //     has been observed (attempt recorded) but never produced a snapshot.
-//  4. available — reachable with a quota observation.
+//  5. available — reachable with a quota observation.
 func mergedProviderStatus(provider ProviderProjection) string {
 	if provider.ManualDisabled {
 		return StatusDisabled
+	}
+	if g := provider.Gate; g != nil && !g.Conflict &&
+		(g.Axis == state.OwnershipAxisSignal || g.Axis == state.OwnershipAxisReserve) {
+		return StatusGated
 	}
 	if provider.Freshness == FreshnessMissing && provider.LatestAttempt == nil {
 		return StatusEnabled

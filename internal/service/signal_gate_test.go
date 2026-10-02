@@ -420,6 +420,9 @@ func TestMergedStatusSignalReasonLeads(t *testing.T) {
 		t.Fatalf("providers = %d, want 1", len(report.Providers))
 	}
 	row := report.Providers[0]
+	if row.Status != StatusGated {
+		t.Fatalf("status = %q, want %q for a signal-held gate", row.Status, StatusGated)
+	}
 	if !strings.HasPrefix(row.Reason, "signal-gated (-0.72 <= +0.00); ") {
 		t.Fatalf("reason = %q, want the signal attribution to lead", row.Reason)
 	}

@@ -173,7 +173,7 @@ func (s styler) mergedStatusStyler(status string) func(string) string {
 	switch status {
 	case service.StatusAvailable:
 		return s.green
-	case service.StatusDisabled, service.StatusUnavailable:
+	case service.StatusDisabled, service.StatusUnavailable, service.StatusGated:
 		return s.red
 	case service.StatusEnabled:
 		return s.yellow

@@ -104,15 +104,22 @@ func TestNeuralwattKeyAllowanceTakesPrecedence(t *testing.T) {
 }
 
 func TestNeuralwattBlockedAndOverageFailClosedAsUnavailable(t *testing.T) {
-	for name, body := range map[string]string{
-		"blocked": `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"key":{"allowance":{"blocked":true}}}`,
-		"overage": `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"in_overage":true}}`,
+	for name, tc := range map[string]struct {
+		body      string
+		condition string
+	}{
+		"blocked": {`{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"key":{"allowance":{"blocked":true}}}`, ConditionKeyBlocked},
+		"overage": {`{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"in_overage":true}}`, ConditionInOverage},
 	} {
 		t.Run(name, func(t *testing.T) {
-			src, _ := neuralwattTestSource(t, body, http.StatusOK, true)
+			src, _ := neuralwattTestSource(t, tc.body, http.StatusOK, true)
 			snap, err := src.Fetch(context.Background())
 			if err != nil || snap.Availability != QuotaUnavailable {
 				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			// Fail-closed: a successful windowless snapshot naming its condition.
+			if len(snap.Windows) != 0 || snap.Status != SourceFresh || snap.Condition != tc.condition {
+				t.Fatalf("snapshot=%+v want windowless fresh snapshot with condition %q", snap, tc.condition)
 			}
 		})
 	}
@@ -162,7 +169,7 @@ func TestNeuralwattSubscriptionRollingCycleReset(t *testing.T) {
 		"on boundary": {time.Date(2026, 9, 12, 21, 48, 47, 0, time.UTC), time.Date(2026, 10, 12, 21, 48, 47, 0, time.UTC)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, windows, _, _, err := parseNeuralwattQuota(body, tc.now)
+			_, windows, _, _, _, err := parseNeuralwattQuota(body, tc.now)
 			if err != nil {
 				t.Fatalf("parse: %v", err)
 			}
@@ -187,7 +194,7 @@ func TestNeuralwattSubscriptionRollingCycleReset(t *testing.T) {
 func TestNeuralwattSubscriptionResetKeepsAnchorOffset(t *testing.T) {
 	body := []byte(`{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-08-13T21:48:47+09:00","in_overage":false}}`)
 	now := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-	_, windows, _, _, err := parseNeuralwattQuota(body, now)
+	_, windows, _, _, _, err := parseNeuralwattQuota(body, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -208,7 +215,7 @@ func TestNeuralwattSubscriptionResetKeepsAnchorOffset(t *testing.T) {
 func TestNeuralwattSubscriptionResetBeforeAnchor(t *testing.T) {
 	body := []byte(`{"snapshot_at":"2026-08-01T00:00:00Z","subscription":{"kwh_included":100,"kwh_used":0,"kwh_remaining":100,"current_period_start":"2026-08-13T21:48:47Z","in_overage":false}}`)
 	now := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	_, windows, _, _, err := parseNeuralwattQuota(body, now)
+	_, windows, _, _, _, err := parseNeuralwattQuota(body, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -229,7 +236,7 @@ func TestNeuralwattSubscriptionResetBeforeAnchor(t *testing.T) {
 func TestNeuralwattSubscriptionMultiCycleAdvance(t *testing.T) {
 	body := []byte(`{"snapshot_at":"2026-02-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"current_period_start":"2026-01-31T00:00:00Z","in_overage":false}}`)
 	now := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
-	_, windows, _, _, err := parseNeuralwattQuota(body, now)
+	_, windows, _, _, _, err := parseNeuralwattQuota(body, now)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -248,6 +255,22 @@ func TestNeuralwattExhaustedBalanceIsUnavailable(t *testing.T) {
 	snap, err := src.Fetch(context.Background())
 	if err != nil || snap.Availability != QuotaUnavailable || len(snap.Windows) != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	// A drained balance that still reports its total renders as a 100%-used
+	// window, not a fail-closed condition.
+	if snap.Condition != "" {
+		t.Fatalf("condition=%q, want none for a windowed exhaustion", snap.Condition)
+	}
+}
+
+func TestNeuralwattDrainedBalanceWithoutTotalNamesCondition(t *testing.T) {
+	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":0},"subscription":null}`, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Availability != QuotaUnavailable || len(snap.Windows) != 0 {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if snap.Status != SourceFresh || snap.Condition != ConditionBalanceDrained {
+		t.Fatalf("snapshot=%+v want windowless fresh snapshot with condition %q", snap, ConditionBalanceDrained)
 	}
 }
 

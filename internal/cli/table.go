@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
@@ -125,7 +126,7 @@ func writeMergedStatusText(w io.Writer, r service.MergedStatusReport, s styler) 
 			return providers[i].Provider < providers[j].Provider
 		})
 		for _, p := range providers {
-			quota, quotaStyle := formatMergedWindows(p.Windows, s)
+			quota, quotaStyle := formatMergedWindows(p, s)
 			rows = append(rows, []tableCell{
 				{text: p.Provider},
 				{text: p.Status, style: s.mergedStatusStyler(p.Status)},
@@ -177,23 +178,33 @@ func mergedReasonStyler(s styler, reason string) func(string) string {
 }
 
 // formatMergedWindows renders one provider's raw quota numbers: "name used/limit"
-// per window joined with ", ", falling back to usage percent, then "no data".
-func formatMergedWindows(windows []service.QuotaWindowReport, s styler) (string, func(string) string) {
-	if len(windows) == 0 {
-		return "no data", s.dim
-	}
-	parts := make([]string, 0, len(windows))
-	for _, win := range windows {
-		switch {
-		case win.Used != nil && win.Limit != nil:
-			parts = append(parts, fmt.Sprintf("%s %g/%g", win.Name, *win.Used, *win.Limit))
-		case win.UsagePercent != nil:
-			parts = append(parts, fmt.Sprintf("%s %g%%", win.Name, *win.UsagePercent))
-		default:
-			parts = append(parts, win.Name)
+// per window joined with ", ", falling back to usage percent. Windowless rows
+// explain themselves instead of a bare "no data": the adapter's named
+// out-of-quota condition, the unavailable fallback for an observed windowless
+// snapshot without one, or plain "no data" (never observed, or observed with
+// unknown snapshot availability). Every windowless rendering stays dim.
+func formatMergedWindows(p service.MergedStatusProvider, s styler) (string, func(string) string) {
+	if len(p.Windows) > 0 {
+		parts := make([]string, 0, len(p.Windows))
+		for _, win := range p.Windows {
+			switch {
+			case win.Used != nil && win.Limit != nil:
+				parts = append(parts, fmt.Sprintf("%s %g/%g", win.Name, *win.Used, *win.Limit))
+			case win.UsagePercent != nil:
+				parts = append(parts, fmt.Sprintf("%s %g%%", win.Name, *win.UsagePercent))
+			default:
+				parts = append(parts, win.Name)
+			}
 		}
+		return strings.Join(parts, ", "), nil
 	}
-	return strings.Join(parts, ", "), nil
+	if p.Condition != "" {
+		return "unavailable (" + p.Condition + ")", s.dim
+	}
+	if !p.CheckedAt.IsZero() && p.Availability == quota.QuotaUnavailable {
+		return "no data (unavailable)", s.dim
+	}
+	return "no data", s.dim
 }
 
 // formatMergedReset renders the earliest upcoming reset, or an em dash when

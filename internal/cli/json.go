@@ -40,14 +40,22 @@ type statusWindowJSON struct {
 
 // statusProviderJSON is one provider row in the status JSON envelope.
 type statusProviderJSON struct {
-	Provider    string             `json:"provider"`
-	Status      string             `json:"status"`
-	Rank        int                `json:"rank"`
-	OffPeak     bool               `json:"off_peak"`
-	Eligible    bool               `json:"eligible"`
-	Reason      string             `json:"reason"`
-	Windows     []statusWindowJSON `json:"windows"`
-	NextResetAt string             `json:"next_reset_at,omitempty"`
+	Provider string `json:"provider"`
+	Status   string `json:"status"`
+	Rank     int    `json:"rank"`
+	OffPeak  bool   `json:"off_peak"`
+	Eligible bool   `json:"eligible"`
+	Reason   string `json:"reason"`
+	Windows  []statusWindowJSON `json:"windows"`
+	NextResetAt string          `json:"next_reset_at,omitempty"`
+	// Condition names the adapter's sanitized out-of-quota condition behind a
+	// windowless snapshot; empty otherwise.
+	Condition string `json:"condition,omitempty"`
+	// CheckedAt is the last observation time (snapshot, else latest attempt).
+	CheckedAt string `json:"checked_at,omitempty"`
+	// Availability is the stored snapshot's own availability
+	// (available/unavailable/unknown); omitted when never observed.
+	Availability string `json:"availability,omitempty"`
 }
 
 // statusSkippedJSON is one desired model absent from the effective chain.
@@ -97,6 +105,13 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 		pj := statusProviderJSON{
 			Provider: p.Provider, Status: p.Status, Rank: p.Rank,
 			OffPeak: p.OffPeak, Eligible: p.Eligible, Reason: p.Reason,
+			Condition: p.Condition,
+		}
+		if !p.CheckedAt.IsZero() {
+			pj.CheckedAt = p.CheckedAt.UTC().Format(time.RFC3339)
+		}
+		if p.Availability != "" {
+			pj.Availability = string(p.Availability)
 		}
 		for _, win := range p.Windows {
 			wj := statusWindowJSON{Name: win.Name, Used: win.Used, Limit: win.Limit, UsagePercent: win.UsagePercent}

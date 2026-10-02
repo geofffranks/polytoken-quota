@@ -200,6 +200,49 @@ func sanitizeSnap(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
 	return &out, true
 }
 
+// normalizeQuotaConditions maps every persisted snapshot's Condition to a
+// representable value, mirroring the ownership-axis normalization: a
+// hand-edited state file or a foreign future value degrades to the empty
+// condition instead of carrying free text into rendered surfaces. It never
+// mutates the input state.
+func normalizeQuotaConditions(s State) State {
+	changed := false
+	providers := s.Providers
+	for k, ps := range providers {
+		snap, snapChanged := normalizeSnapCondition(ps.QuotaSnapshot)
+		attempt, attemptChanged := normalizeSnapCondition(ps.QuotaAttempt)
+		if !snapChanged && !attemptChanged {
+			continue
+		}
+		if !changed {
+			// Copy the map lazily on first mutation.
+			providers = make(map[string]ProviderState, len(providers))
+			for kk, vv := range s.Providers {
+				providers[kk] = vv
+			}
+			changed = true
+		}
+		ps.QuotaSnapshot = snap
+		ps.QuotaAttempt = attempt
+		providers[k] = ps
+	}
+	if !changed {
+		return s
+	}
+	next := s
+	next.Providers = providers
+	return next
+}
+
+func normalizeSnapCondition(snap *quota.QuotaSnapshot) (*quota.QuotaSnapshot, bool) {
+	if snap == nil || snap.Condition == "" || quota.ValidQuotaCondition(snap.Condition) {
+		return snap, false
+	}
+	out := *snap
+	out.Condition = ""
+	return &out, true
+}
+
 // strErr adapts a plain string to an error so it can flow through
 // quota.SanitizeError.
 type strErr string
@@ -259,6 +302,10 @@ func (st Store) Load() (State, error) {
 	// failing the load: the claim's owned-expected-off meaning survives and
 	// recovery is never blocked by an unrecognized attribution value.
 	s = normalizeProviderOwnershipAxes(s)
+	// An unknown quota condition degrades to the empty condition instead of
+	// failing the load: the snapshot's numbers and availability survive, and a
+	// hand-edited value can never carry free text into a rendered surface.
+	s = normalizeQuotaConditions(s)
 	if s.NextArrivalSequence == 0 {
 		maxArrival := uint64(0)
 		for _, ps := range s.Providers {
@@ -296,6 +343,7 @@ func (st Store) Save(s State) error {
 	s = PruneRecovered(s, st.now(), st.RecoveredRetention)
 	s = PruneUsageHistory(s, st.now())
 	s = sanitizeSnapshots(s)
+	s = normalizeQuotaConditions(s)
 	s = sanitizeDiagnostics(s)
 	s = sanitizeProviderOwnership(s)
 	s = normalizeProviderOwnershipAxes(s)

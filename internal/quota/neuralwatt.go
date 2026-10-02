@@ -144,7 +144,7 @@ func (n *NeuralwattSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		return n.fail(msg), errors.New(msg)
 	}
 	checkedAt := n.now()
-	observedAt, windows, unavailable, partial, err := parseNeuralwattQuota(resp.Body, checkedAt)
+	observedAt, windows, unavailable, partial, condition, err := parseNeuralwattQuota(resp.Body, checkedAt)
 	if err != nil {
 		msg := SanitizeError(err)
 		return n.fail(msg), errors.New(msg)
@@ -163,6 +163,7 @@ func (n *NeuralwattSource) Fetch(ctx context.Context) (QuotaSnapshot, error) {
 		Windows:      windows,
 		Availability: availability,
 		Status:       status,
+		Condition:    condition,
 	}, nil
 }
 
@@ -204,57 +205,57 @@ type neuralwattSubscription struct {
 	InOverage    *bool    `json:"in_overage"`
 }
 
-func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaWindow, bool, bool, error) {
+func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaWindow, bool, bool, string, error) {
 	var response neuralwattQuotaResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return time.Time{}, nil, false, false, errors.New("neuralwatt: invalid response body (could not decode JSON)")
+		return time.Time{}, nil, false, false, "", errors.New("neuralwatt: invalid response body (could not decode JSON)")
 	}
 	if response.SnapshotAt == "" {
-		return time.Time{}, nil, false, false, errors.New("neuralwatt: response is missing snapshot_at")
+		return time.Time{}, nil, false, false, "", errors.New("neuralwatt: response is missing snapshot_at")
 	}
 	observedAt, err := time.Parse(time.RFC3339, response.SnapshotAt)
 	if err != nil || observedAt.After(checkedAt.Add(5*time.Minute)) {
-		return time.Time{}, nil, false, false, errors.New("neuralwatt: response has an invalid snapshot_at")
+		return time.Time{}, nil, false, false, "", errors.New("neuralwatt: response has an invalid snapshot_at")
 	}
 	if response.Key != nil && response.Key.Allowance != nil {
-		windows, unavailable, partial, err := neuralwattAllowanceWindow(*response.Key.Allowance)
-		return observedAt, windows, unavailable, partial, err
+		windows, unavailable, partial, condition, err := neuralwattAllowanceWindow(*response.Key.Allowance)
+		return observedAt, windows, unavailable, partial, condition, err
 	}
 	if response.Subscription != nil {
-		windows, unavailable, partial, err := neuralwattSubscriptionWindow(*response.Subscription, checkedAt)
+		windows, unavailable, partial, condition, err := neuralwattSubscriptionWindow(*response.Subscription, checkedAt)
 		if err != nil {
-			return time.Time{}, nil, false, false, err
+			return time.Time{}, nil, false, false, "", err
 		}
-		return observedAt, windows, unavailable, partial, nil
+		return observedAt, windows, unavailable, partial, condition, nil
 	}
 	if response.Balance == nil {
-		return time.Time{}, nil, false, false, errors.New("neuralwatt: response has no usable allowance or balance")
+		return time.Time{}, nil, false, false, "", errors.New("neuralwatt: response has no usable allowance or balance")
 	}
-	window, unavailable, partial, err := neuralwattBalanceWindow(*response.Balance)
+	window, unavailable, partial, condition, err := neuralwattBalanceWindow(*response.Balance)
 	if err != nil {
-		return time.Time{}, nil, false, false, err
+		return time.Time{}, nil, false, false, "", err
 	}
 	if window == nil && !unavailable {
-		return time.Time{}, nil, false, false, errors.New("neuralwatt: response has no usable balance limit")
+		return time.Time{}, nil, false, false, "", errors.New("neuralwatt: response has no usable balance limit")
 	}
 	if window == nil {
-		return observedAt, nil, unavailable, partial, nil
+		return observedAt, nil, unavailable, partial, condition, nil
 	}
-	return observedAt, []QuotaWindow{*window}, unavailable, partial, nil
+	return observedAt, []QuotaWindow{*window}, unavailable, partial, condition, nil
 }
 
-func neuralwattAllowanceWindow(a neuralwattAllowance) ([]QuotaWindow, bool, bool, error) {
+func neuralwattAllowanceWindow(a neuralwattAllowance) ([]QuotaWindow, bool, bool, string, error) {
 	if a.Blocked == nil {
-		return nil, false, false, errors.New("neuralwatt: key allowance is missing blocked state")
+		return nil, false, false, "", errors.New("neuralwatt: key allowance is missing blocked state")
 	}
 	if *a.Blocked {
-		return nil, true, false, nil
+		return nil, true, false, ConditionKeyBlocked, nil
 	}
 	if a.Limit == nil || a.Remaining == nil || !finiteNonNegative(*a.Limit) || !finiteNonNegative(*a.Remaining) || *a.Limit <= 0 {
-		return nil, false, false, errors.New("neuralwatt: key allowance is missing a valid limit or remaining value")
+		return nil, false, false, "", errors.New("neuralwatt: key allowance is missing a valid limit or remaining value")
 	}
 	if *a.Remaining > *a.Limit {
-		return nil, false, false, errors.New("neuralwatt: key allowance remaining exceeds limit")
+		return nil, false, false, "", errors.New("neuralwatt: key allowance remaining exceeds limit")
 	}
 	used := *a.Limit - *a.Remaining
 	derivedUsed := used
@@ -264,23 +265,23 @@ func neuralwattAllowanceWindow(a neuralwattAllowance) ([]QuotaWindow, bool, bool
 		used = *a.Spent
 	}
 	if !finiteNonNegative(used) || used > *a.Limit || !neuralwattValuesAgree(used, derivedUsed, *a.Limit) {
-		return nil, false, false, errors.New("neuralwatt: key allowance spent value is inconsistent with its limit and remaining value")
+		return nil, false, false, "", errors.New("neuralwatt: key allowance spent value is inconsistent with its limit and remaining value")
 	}
-	return []QuotaWindow{neuralwattWindow("key_allowance", used, *a.Limit)}, *a.Remaining <= 0, false, nil
+	return []QuotaWindow{neuralwattWindow("key_allowance", used, *a.Limit)}, *a.Remaining <= 0, false, "", nil
 }
 
-func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]QuotaWindow, bool, bool, error) {
+func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]QuotaWindow, bool, bool, string, error) {
 	if s.InOverage == nil {
-		return nil, false, false, errors.New("neuralwatt: subscription is missing overage state")
+		return nil, false, false, "", errors.New("neuralwatt: subscription is missing overage state")
 	}
 	if *s.InOverage {
-		return nil, true, false, nil
+		return nil, true, false, ConditionInOverage, nil
 	}
 	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || !finiteNonNegative(*s.KWHRemaining) || *s.KWHIncluded <= 0 {
-		return nil, false, false, errors.New("neuralwatt: subscription is missing a usable allowance")
+		return nil, false, false, "", errors.New("neuralwatt: subscription is missing a usable allowance")
 	}
 	if *s.KWHRemaining > *s.KWHIncluded {
-		return nil, false, false, errors.New("neuralwatt: subscription remaining exceeds included allowance")
+		return nil, false, false, "", errors.New("neuralwatt: subscription remaining exceeds included allowance")
 	}
 	used := *s.KWHIncluded - *s.KWHRemaining
 	derivedUsed := used
@@ -288,7 +289,7 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 		used = *s.KWHUsed
 	}
 	if !finiteNonNegative(used) || used > *s.KWHIncluded || !neuralwattValuesAgree(used, derivedUsed, *s.KWHIncluded) {
-		return nil, false, false, errors.New("neuralwatt: subscription used value is inconsistent with its allowance")
+		return nil, false, false, "", errors.New("neuralwatt: subscription used value is inconsistent with its allowance")
 	}
 	window := neuralwattWindow("subscription_kwh", used, *s.KWHIncluded)
 	partial := false
@@ -305,18 +306,18 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 	} else {
 		partial = true
 	}
-	return []QuotaWindow{window}, *s.KWHRemaining <= 0, partial, nil
+	return []QuotaWindow{window}, *s.KWHRemaining <= 0, partial, "", nil
 }
 
-func neuralwattBalanceWindow(b neuralwattBalance) (*QuotaWindow, bool, bool, error) {
+func neuralwattBalanceWindow(b neuralwattBalance) (*QuotaWindow, bool, bool, string, error) {
 	if b.Remaining == nil || !finiteNonNegative(*b.Remaining) {
-		return nil, false, false, errors.New("neuralwatt: balance is missing a valid credits_remaining_usd value")
+		return nil, false, false, "", errors.New("neuralwatt: balance is missing a valid credits_remaining_usd value")
 	}
 	if *b.Remaining == 0 && (b.Total == nil || *b.Total <= 0) {
-		return nil, true, false, nil
+		return nil, true, false, ConditionBalanceDrained, nil
 	}
 	if b.Total == nil || !finiteNonNegative(*b.Total) || *b.Total <= 0 || *b.Remaining > *b.Total {
-		return nil, false, false, errors.New("neuralwatt: balance is missing a valid total credits limit")
+		return nil, false, false, "", errors.New("neuralwatt: balance is missing a valid total credits limit")
 	}
 	used := *b.Total - *b.Remaining
 	derivedUsed := used
@@ -324,10 +325,10 @@ func neuralwattBalanceWindow(b neuralwattBalance) (*QuotaWindow, bool, bool, err
 		used = *b.Used
 	}
 	if !finiteNonNegative(used) || used > *b.Total || !neuralwattValuesAgree(used, derivedUsed, *b.Total) {
-		return nil, false, false, errors.New("neuralwatt: balance used value is inconsistent with its limit and remaining value")
+		return nil, false, false, "", errors.New("neuralwatt: balance used value is inconsistent with its limit and remaining value")
 	}
 	returnWindow := neuralwattWindow("balance_usd", used, *b.Total)
-	return &returnWindow, *b.Remaining <= 0, false, nil
+	return &returnWindow, *b.Remaining <= 0, false, "", nil
 }
 
 func neuralwattWindow(name string, used, limit float64) QuotaWindow {
