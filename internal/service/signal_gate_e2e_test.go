@@ -347,6 +347,53 @@ func TestQuotaGateExemptSignalComposition(t *testing.T) {
 			t.Fatalf("gp gate row = %+v, want unchanged", row)
 		}
 	})
+
+	t.Run("exempt signal-hot provider in a non-skipped pool is still signal-gated", func(t *testing.T) {
+		// quota_gate must not spare the provider from the SIGNAL axis: with a
+		// third not-gated enabled member keeping the pool open, the exempt
+		// signal-hot provider is disabled by the signal branch with a
+		// signal-attributed claim while the quota axis itself plans nothing.
+		now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+		f := newSignalFixture(t, []string{"gp", "pp", "zz"})
+		markExempt(f, "gp")
+		f.seedState(7, map[string]state.ProviderState{
+			"gp": {QuotaSnapshot: exhaustedSignalSnapshot(now, 0.68)}, // out of quota AND signal-hot
+			"pp": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},      // healthy, not gated
+			"zz": {QuotaSnapshot: signalSeedSnapshot(now, 0.10)},      // healthy, not gated
+		}, nil)
+		before := f.readGlobalConfig()
+
+		out := f.coordinator().Reconcile(context.Background(), false, false, false)
+		if !out.Accepted || out.PendingCount() != 0 {
+			t.Fatalf("out=%+v err=%v", out, out.Error)
+		}
+		after := f.readGlobalConfig()
+		if after == before {
+			t.Fatal("pass produced no byte change")
+		}
+		gpBlock := strings.Split(strings.Split(after, "  gp:\n")[1], "  pp:")[0]
+		if !strings.Contains(gpBlock, "enabled: false") {
+			t.Fatalf("exempt signal-hot provider was spared by quota_gate:\n%s", after)
+		}
+		ppBlock := strings.Split(strings.Split(after, "  pp:\n")[1], "  zz:")[0]
+		if !strings.Contains(ppBlock, "enabled: true") {
+			t.Fatalf("pp was gated off:\n%s", after)
+		}
+		zzBlock := strings.Split(strings.SplitN(after, "  zz:\n", 2)[1], "\nmodels:")[0]
+		if !strings.Contains(zzBlock, "enabled: true") {
+			t.Fatalf("zz was gated off:\n%s", after)
+		}
+		st := f.loadState()
+		if claim, ok := st.ProviderOwnership["gp"]; !ok || !claim.Owned || claim.Axis != state.OwnershipAxisSignal {
+			t.Fatalf("gp claim = %+v, want a signal-attributed claim (the disable came from the signal axis, not quota)", claim)
+		}
+		if len(st.ProviderOwnership) != 1 {
+			t.Fatalf("claims = %+v, want only gp's signal claim", st.ProviderOwnership)
+		}
+		if row := gateRow(t, out.Targets[0], "gp"); row.Action != GateActionDisabled || row.Axis != state.OwnershipAxisSignal {
+			t.Fatalf("gp gate row = %+v, want a signal-axis disable", row)
+		}
+	})
 }
 
 // TestSignalGateUnresolvedDefinitionReferencesAreAdvisory mirrors the live

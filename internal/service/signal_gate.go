@@ -204,11 +204,15 @@ type signalPoolDecision struct {
 // both coupled uses without distorting the rule's premises:
 //
 //   - Coverage: an exempt member counts as otherwise-enabled whenever the
-//     operator does not hold its field off — the exemption lifts only the
-//     mode switch, never the operator-held check. Its quota-derived reserve
-//     clamp therefore never reads as gated-by-another-axis; otherwise an
-//     exempt exhausted member would make all-hot coverage look complete and
-//     wrongly suppress a signal-hot sibling's gate.
+//     operator does not hold its field off and its mode is not a disable the
+//     gate will actually apply this pass — the exemption lifts only the
+//     quota-derived clamped reserve (mode reserve), never the operator-held
+//     check and never a mode disabled from a manual disable or corrupted
+//     observation. Otherwise an exempt exhausted member would make all-hot
+//     coverage look complete and wrongly suppress a signal-hot sibling's
+//     gate, while an exempt corrupted member would be durably disabled in
+//     the same pass that coverage counted it as enabled, emptying the pool
+//     for an interval.
 //   - Release: when a pool IS skipped, an exempt member's own held signal
 //     claim is released even at its clamped reserve — the clamp is not
 //     another axis holding it — while a manual or corrupted disable keeps
@@ -247,11 +251,13 @@ func signalPoolRule(desired policy.Desired, verdicts map[string]routing.SignalGa
 			if !liveEnabled[id] {
 				continue // operator holds the field off — exemption or not
 			}
-			if !exempt[id] {
-				switch modes[id] {
-				case state.ModeReserve, state.ModeDisabled:
-					continue // a non-pace axis gates it this pass
-				}
+			// The exemption lifts only the quota-derived clamped reserve —
+			// exactly the causes the gate's durable branch does not gate (see
+			// planProviderGate). An exempt member at mode disabled (a manual
+			// disable or a corrupted observation) is durably gated this very
+			// pass and must not count as otherwise-enabled.
+			if modes[id] == state.ModeDisabled || (modes[id] == state.ModeReserve && !exempt[id]) {
+				continue // a non-pace axis gates it this pass
 			}
 			otherwiseEnabled[id] = true
 		}

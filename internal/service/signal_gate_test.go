@@ -129,6 +129,14 @@ func TestSignalPoolRuleTable(t *testing.T) {
 			wantPools:   nil,
 		},
 		{
+			name:        "corrupted exempt member does not count as enabled while it is durably disabled",
+			enrolled:    []string{"a", "b"},
+			modes:       map[string]state.Mode{"b": disabled},
+			exempt:      []string{"b"},
+			wantSkipped: []string{"a"},
+			wantPools:   []string{"default"},
+		},
+		{
 			name:         "exempt singleton with a clamped reserve behaves exactly like the healthy singleton",
 			enrolled:     []string{"a"},
 			modes:        map[string]state.Mode{"a": reserve},
