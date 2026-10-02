@@ -254,8 +254,12 @@ What it changes, and what it deliberately does not:
   pass. Manual disables (`routing disable`) still apply, and a corrupted state
   axis still fails closed to disabled.
 - **Observations stay truthful.** `status` and `doctor` keep reporting the raw
-  out-of-quota axes; `check` names the provider out of quota with gating
-  suspended. The exemption never launders the provider to healthy.
+  out-of-quota axes — the exemption never launders the provider to healthy —
+  and name the suspension as a separate policy fact: the status provider
+  projection carries `quota_gate_suspended: true` (the merged status REASON
+  ends with `; quota gating suspended`), and `doctor` emits a
+  `quota-gate-suspended` info finding. `check` names the provider out of quota
+  with gating suspended.
 - **The signal axis is separate.** `signal_gate` and `keep_enabled` are
   unaffected in both directions: an exempt provider can still be signal-gated,
   and the all-hot pool escape hatch keeps counting an exempt member as enabled.

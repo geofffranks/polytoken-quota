@@ -525,6 +525,34 @@ func freshSnapshot(status quota.SourceStatus, checkedAt time.Time) *quota.QuotaS
 
 func ptrFloat(v float64) *float64 { return &v }
 
+// TestQuotaFindingsSuspendedGate verifies a probe carrying the quota-gate
+// suspension produces exactly one info finding naming the policy fact, while
+// the probe's raw observations are still evaluated as usual.
+func TestQuotaFindingsSuspendedGate(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	probes := []QuotaProbe{{
+		Provider:           "codex",
+		HasQuotaConfig:     true,
+		FreshnessTTL:       30 * time.Minute,
+		Snapshot:           freshSnapshot(quota.SourceFresh, now.Add(-time.Minute)),
+		Supported:          true,
+		QuotaGateSuspended: true,
+	}}
+	findings := QuotaFindings(probes, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-gate-suspended" || findings[0].Severity != Info {
+		t.Fatalf("findings=%+v", findings)
+	}
+	if !strings.Contains(findings[0].Message, "suspended") || findings[0].TargetID != "codex" {
+		t.Fatalf("finding=%+v", findings[0])
+	}
+
+	// A non-suspended probe stays finding-free on healthy evidence.
+	probes[0].QuotaGateSuspended = false
+	if findings := QuotaFindings(probes, false, now); len(findings) != 0 {
+		t.Fatalf("findings=%+v, want none without the suspension", findings)
+	}
+}
+
 // TestQuotaFindingsStaleSnapshot verifies a snapshot past its freshness TTL
 // produces a warning finding with the expected code and message.
 func TestQuotaFindingsStaleSnapshot(t *testing.T) {

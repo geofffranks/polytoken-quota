@@ -10,6 +10,7 @@ package service
 // filesystem, state store, or clock is involved.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -184,6 +185,43 @@ func TestPlanProviderGateQuotaGateExemption(t *testing.T) {
 				t.Fatalf("summary action=%q want %q (row %+v)", row.Action, tc.wantAction, row)
 			}
 		})
+	}
+}
+
+// TestMergedStatusNamesSuspendedQuotaGating proves the merged status row
+// names the suspension as a trailing policy fact while the raw ranking
+// explanation stands, and a leading signal-gate attribution keeps its
+// precedence over both.
+func TestMergedStatusNamesSuspendedQuotaGating(t *testing.T) {
+	snap := DiagnosticSnapshot{
+		providers: []ProviderProjection{{
+			MappingID:          "gp",
+			QuotaGateSuspended: true,
+		}},
+		ranks: []RankEntryReport{{MappingID: "gp", Rank: 0, Eligible: false, Explanation: "ineligible: quota exhausted/unavailable"}},
+	}
+	report := snap.MergedStatusView()
+	if len(report.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(report.Providers))
+	}
+	want := "ineligible: quota exhausted/unavailable; quota gating suspended"
+	if got := report.Providers[0].Reason; got != want {
+		t.Fatalf("reason = %q, want %q", got, want)
+	}
+
+	// A signal-held gate still leads; the suspension trails.
+	snap.providers[0].Gate = &GateReport{Axis: state.OwnershipAxisSignal, Signal: fptr64(-0.72), Threshold: fptr64(0), EngagedRevision: 7}
+	report = snap.MergedStatusView()
+	row := report.Providers[0]
+	if !strings.HasPrefix(row.Reason, "signal-gated (-0.72 <= +0.00); ") || !strings.HasSuffix(row.Reason, "; quota gating suspended") {
+		t.Fatalf("reason = %q, want the signal attribution leading and the suspension trailing", row.Reason)
+	}
+
+	// Without the flag the reason is untouched.
+	snap.providers[0].QuotaGateSuspended = false
+	report = snap.MergedStatusView()
+	if got := report.Providers[0].Reason; !strings.HasPrefix(got, "signal-gated") || strings.Contains(got, "quota gating suspended") {
+		t.Fatalf("reason = %q, want no suspension marker without the flag", got)
 	}
 }
 

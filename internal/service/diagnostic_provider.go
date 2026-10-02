@@ -7,6 +7,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
@@ -141,6 +142,11 @@ type ProviderProjection struct {
 	// has no unknown member and is forced to unavailable for every
 	// windowless snapshot, losing the distinction the QUOTA fallback needs.
 	SnapshotAvailability quota.QuotaAvailability `json:"snapshot_availability,omitempty"`
+	// QuotaGateSuspended records that the provider's quota section declares
+	// `quota_gate: {enabled: false}`: the raw EffectiveMode/Reason above stay
+	// exactly as observed (exemption-blind), and this flag names the policy
+	// fact that automatic quota gating will not act on them.
+	QuotaGateSuspended bool `json:"quota_gate_suspended,omitempty"`
 }
 
 // StatusViewReport is the provider-only status selector.
@@ -166,6 +172,7 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			MappingID: id, Availability: ps.Availability, Quota: ps.Quota, EffectiveMode: state.EffectiveMode(ps),
 			ManualDisabled: ps.ManualDisabled, Reason: providerReason(ps),
 			Freshness: FreshnessMissing, QuotaClass: quota.ClassUnknown,
+			QuotaGateSuspended: reconcile.QuotaGateExempt(mapping),
 		}
 		// Condition and snapshot availability come from the raw
 		// pre-aggregation snapshot: aggregateMappingState rewrites the

@@ -16,6 +16,7 @@ import (
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	"github.com/geofffranks/polytoken-quota/internal/reconcile"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -35,11 +36,12 @@ type doctorQuotaInputs struct {
 // aggregation logic (mapping IDs, freshness TTL, adapter support) without
 // re-loading state or policy.
 func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
-	// Build freshness TTL and adapter lookups from policy, keyed by mapping ID.
-	// QuotaPoller observations are keyed by mapping ID.
+	// Build freshness TTL, adapter, and quota-gate lookups from policy, keyed
+	// by mapping ID. QuotaPoller observations are keyed by mapping ID.
 	type qcfg struct {
 		ttl     time.Duration
 		adapter string
+		gateSuspended bool
 	}
 	configs := map[string]qcfg{}
 	configured := make(map[string][]string, len(in.desired.Providers))
@@ -47,7 +49,7 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 		id := string(mappingID)
 		configured[id] = []string{id}
 		if m.Quota != nil {
-			configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter}
+			configs[id] = qcfg{ttl: m.Quota.FreshnessTTL, adapter: m.Quota.Adapter, gateSuspended: reconcile.QuotaGateExempt(m)}
 		}
 	}
 	sorted := aggregateProviderNames(configured, in.observed.Providers)
@@ -72,6 +74,7 @@ func buildDoctorQuotaProbes(in doctorQuotaInputs) ([]doctor.QuotaProbe, bool) {
 			Attempt:        ps.QuotaAttempt,
 			Supported:      support.Supported,
 			SupportReason:  support.Reason,
+			QuotaGateSuspended: configuredMapping && cfg.gateSuspended,
 		})
 	}
 

@@ -134,9 +134,14 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		}
 		// A signal-held gate names itself ahead of the ranking explanation: the
 		// reason a provider is OFF must lead the row, and the ranking
-		// explanation (why it ranks where it does) follows.
+		// explanation (why it ranks where it does) follows. A suspended quota
+		// gate rides at the end as a policy fact: the raw out-of-quota
+		// observation stands, and this names why no gate acts on it.
 		if gate := provider.Gate; gate != nil && gate.Axis == state.OwnershipAxisSignal {
 			reason = signalGateReason(gate) + "; " + reason
+		}
+		if provider.QuotaGateSuspended {
+			reason += "; quota gating suspended"
 		}
 		row := MergedStatusProvider{
 			Provider:     provider.MappingID,

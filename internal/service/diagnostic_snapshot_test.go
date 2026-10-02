@@ -755,18 +755,16 @@ func TestRoutingExplainPendingTargetsSanitizedAndCopied(t *testing.T) {
 }
 
 // TestStatusProjectionStaysExemptionBlind is AC.2(b): the status provider
-// projection is deliberately exemption-blind. With quota_gate suspending
-// gating and the provider's global enabled field left true (nothing gated it
-// off), an out-of-quota provider still projects the raw disabled
-// EffectiveMode, the raw quota_exhausted reason, and no gate record — the
-// observation is never laundered to healthy. The projection is byte-identical
-// to a non-exempt provider's, which is the point: observations stay truthful.
+// projection keeps the raw observed EffectiveMode and Reason for an exempt
+// provider — the observation is never laundered to healthy — and names the
+// suspension only as the separate quota_gate_suspended policy flag. The
+// exempt row is identical to a non-exempt provider's apart from that flag.
 func TestStatusProjectionStaysExemptionBlind(t *testing.T) {
 	desired := policy.Desired{Mode: policy.ModeProviderOnly, Providers: map[policy.MappingID]policy.Mapping{
 		"gp": {Quota: &policy.QuotaConfig{Adapter: "codex", Gate: policy.QuotaGateConfig{Disabled: true}}},
 	}}
 	observed := state.State{Providers: map[string]state.ProviderState{
-		"gp": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaSnapshot: quotaGateSnapshot(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC), quota.QuotaUnavailable, 100)},
+		"gp": {Quota: state.QuotaExhausted, Availability: state.Available, QuotaSnapshot: quotaGateSnapshot(diagnosticAsOf, quota.QuotaUnavailable, 100)},
 	}}
 	providers, errs := projectProviders(desired, observed, diagnosticAsOf)
 	if len(errs) != 0 {
@@ -792,13 +790,20 @@ func TestStatusProjectionStaysExemptionBlind(t *testing.T) {
 	if row.Gate != nil {
 		t.Fatalf("Gate = %+v, want no gate record (nothing gated the provider off)", row.Gate)
 	}
+	if !row.QuotaGateSuspended {
+		t.Fatalf("QuotaGateSuspended = false, want the policy flag set for the exempt provider")
+	}
 
-	// The same provider without the key projects identically: the exemption
-	// never changes what status observes.
+	// The same provider without the key projects identically apart from the
+	// flag: the exemption never changes what status observes.
 	desired.Providers["gp"] = policy.Mapping{Quota: &policy.QuotaConfig{Adapter: "codex"}}
 	plain, _ := projectProviders(desired, observed, diagnosticAsOf)
+	if plain[0].QuotaGateSuspended {
+		t.Fatalf("non-exempt provider carries the suspension flag: %+v", plain[0])
+	}
+	plain[0].QuotaGateSuspended = row.QuotaGateSuspended
 	if !reflect.DeepEqual(plain[0], row) {
-		t.Fatalf("exempt projection %+v differs from the non-exempt projection %+v", row, plain[0])
+		t.Fatalf("exempt projection %+v differs from the non-exempt projection beyond the flag", row)
 	}
 }
 
