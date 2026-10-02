@@ -6,6 +6,36 @@ import (
 	"time"
 )
 
+// NormalizeProviderAxes returns the provider's quota and availability axes
+// with sparse (empty-string) legacy states resolved to their documented
+// healthy baselines — an empty quota axis is QuotaNormal and an empty
+// availability axis is Available — exactly the normalization EffectiveMode
+// applies. Sparse states are reachable by design (untracked providers and
+// seeded entries) and must stay healthy, never fail closed.
+func NormalizeProviderAxes(ps ProviderState) (Quota, Availability) {
+	q, av := ps.Quota, ps.Availability
+	if q == "" {
+		q = QuotaNormal
+	}
+	if av == "" {
+		av = Available
+	}
+	return q, av
+}
+
+// ValidQuotaAxis reports whether q is a recognized quota level. The empty
+// sparse state is not a recognized observation: callers normalize first.
+func ValidQuotaAxis(q Quota) bool {
+	return validQuota(q)
+}
+
+// ValidAvailabilityAxis reports whether a is a recognized availability state.
+// The empty sparse state is not a recognized observation: callers normalize
+// first.
+func ValidAvailabilityAxis(a Availability) bool {
+	return validAvailability(a)
+}
+
 // EffectiveMode derives the reconciler-internal effective mode from a provider's
 // independent quota and availability axes:
 //
@@ -19,13 +49,7 @@ import (
 // untracked providers. Any other unrecognized value is a corrupted observation
 // and must never enable a provider.
 func EffectiveMode(ps ProviderState) Mode {
-	q, av := ps.Quota, ps.Availability
-	if q == "" {
-		q = QuotaNormal
-	}
-	if av == "" {
-		av = Available
-	}
+	q, av := NormalizeProviderAxes(ps)
 	if ps.ManualDisabled || av == Unavailable || q == QuotaExhausted {
 		return ModeDisabled
 	}
