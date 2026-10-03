@@ -8,6 +8,10 @@ package service
 // healthy snapshot rather than retaining it.
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,12 +131,18 @@ func TestInvalidOverageReplacesPriorHealthyObservation(t *testing.T) {
 			"neuralwatt": {QuotaSnapshot: &priorGood, QuotaAttempt: &priorGood},
 		},
 	}
-	invalid := quota.QuotaSnapshot{
-		MappingID:    "neuralwatt",
-		CheckedAt:    time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
-		Availability: quota.QuotaUnavailable,
-		Status:       quota.SourceFresh,
-		Condition:    quota.ConditionInOverage,
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.NeuralwattEvidence(now))
+	source := quota.NewNeuralwattSource("neuralwatt", &quota.BoundedClient{
+		Transport: malformedOverageTransport{},
+	}, malformedOverageResolver{}, reg, now)
+	invalid, err := source.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("fetch malformed overage: %v", err)
+	}
+	if invalid.Status != quota.SourceFresh || invalid.Availability != quota.QuotaUnavailable || invalid.Condition != quota.ConditionInOverage || len(invalid.Windows) != 0 {
+		t.Fatalf("invalid overage snapshot=%+v", invalid)
 	}
 	next := applyQuotaObservations(observed, overageDesired(), map[string]quota.QuotaSnapshot{"neuralwatt": invalid})
 
@@ -140,6 +150,19 @@ func TestInvalidOverageReplacesPriorHealthyObservation(t *testing.T) {
 	if snap == nil || snap.Condition != quota.ConditionInOverage || len(snap.Windows) != 0 {
 		t.Fatalf("prior healthy snapshot retained over invalid overage observation: %+v", snap)
 	}
+}
+
+type malformedOverageTransport struct{}
+
+func (malformedOverageTransport) Do(*http.Request) (*http.Response, error) {
+	body := `{"snapshot_at":"2026-08-20T00:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"in_overage":true,"kwh_included":5,"kwh_remaining":0,"kwh_used":"bad"}}`
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+}
+
+type malformedOverageResolver struct{}
+
+func (malformedOverageResolver) Resolve(quota.CredentialRef) (string, error) {
+	return "synthetic-key", nil
 }
 
 func overageDesired() policy.Desired {

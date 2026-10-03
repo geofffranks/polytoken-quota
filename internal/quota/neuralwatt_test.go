@@ -555,6 +555,73 @@ func timePointer(t time.Time) *time.Time { return &t }
 // included (used omitted derives exhausted usage) retains a window with the
 // actual numbers and the reset metadata, on a fresh unavailable snapshot
 // naming the condition. Usage percent clamps at 100.
+func TestNeuralwattFetchInvalidResetTypesOmitWithoutFallback(t *testing.T) {
+	for name, reset := range map[string]string{
+		"number":       `123`,
+		"object":       `{}`,
+		"boolean":      `true`,
+		"array":        `[]`,
+		"empty string": `""`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"kwh_reset_date":` + reset + `,"current_period_start":"2026-08-13T21:48:47Z","in_overage":false}}`
+			src, _ := neuralwattTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourceFresh || snap.Availability != QuotaAvailable || len(snap.Windows) != 1 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if snap.Windows[0].ResetAt != nil {
+				t.Fatalf("invalid present reset used estimate: %+v", snap.Windows[0])
+			}
+		})
+	}
+}
+
+func TestNeuralwattKeyAllowancePrecedenceIgnoresBadSubscriptionReset(t *testing.T) {
+	src, _ := neuralwattTestSource(t, `{"snapshot_at":"2026-08-15T12:00:00Z","key":{"allowance":{"limit_usd":20,"spent_usd":5,"remaining_usd":15,"blocked":false}},"subscription":{"kwh_included":100,"kwh_used":25,"kwh_remaining":75,"kwh_reset_date":{"bad":"type"},"in_overage":false}}`, http.StatusOK, true)
+	snap, err := src.Fetch(context.Background())
+	if err != nil || snap.Status != SourceFresh || len(snap.Windows) != 1 || snap.Windows[0].Name != "key_allowance" || *snap.Windows[0].Limit != 20 {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+}
+
+func TestNeuralwattOverageWrongTypedDetailsStayWindowlessFresh(t *testing.T) {
+	for name, details := range map[string]string{
+		"included wrong type":  `"kwh_included":"bad","kwh_remaining":0,"kwh_used":5`,
+		"used wrong type":      `"kwh_included":5,"kwh_remaining":0,"kwh_used":"bad"`,
+		"remaining wrong type": `"kwh_included":5,"kwh_remaining":"bad","kwh_used":5`,
+		"included overflow":    `"kwh_included":1e400,"kwh_remaining":0,"kwh_used":1e400`,
+		"used overflow":        `"kwh_included":5,"kwh_remaining":0,"kwh_used":1e400`,
+		"remaining overflow":   `"kwh_included":5,"kwh_remaining":1e400,"kwh_used":5`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"snapshot_at":"2026-08-15T12:00:00Z","balance":{"credits_remaining_usd":50,"total_credits_usd":100},"subscription":{"in_overage":true,` + details + `}}`
+			src, _ := neuralwattTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourceFresh || snap.Availability != QuotaUnavailable || snap.Condition != ConditionInOverage || len(snap.Windows) != 0 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+		})
+	}
+}
+
+func TestNeuralwattHealthyWrongTypedDetailsStillFail(t *testing.T) {
+	for name, details := range map[string]string{
+		"used wrong type":     `"kwh_included":5,"kwh_remaining":4,"kwh_used":"bad"`,
+		"used overflow":       `"kwh_included":5,"kwh_remaining":4,"kwh_used":1e400`,
+		"included wrong type": `"kwh_included":"bad","kwh_remaining":4,"kwh_used":1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"snapshot_at":"2026-08-15T12:00:00Z","subscription":{"in_overage":false,` + details + `}}`
+			src, _ := neuralwattTestSource(t, body, http.StatusOK, true)
+			snap, err := src.Fetch(context.Background())
+			if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown {
+				t.Fatalf("snapshot=%+v err=%v, want strict healthy decode failure", snap, err)
+			}
+		})
+	}
+}
+
 func TestNeuralwattOverageRetainsValidDetails(t *testing.T) {
 	for name, tc := range map[string]struct {
 		body      string

@@ -172,10 +172,10 @@ func (n *NeuralwattSource) fail(reason string) QuotaSnapshot {
 }
 
 type neuralwattQuotaResponse struct {
-	SnapshotAt   string                  `json:"snapshot_at"`
-	Balance      *neuralwattBalance      `json:"balance"`
-	Subscription *neuralwattSubscription `json:"subscription"`
-	Key          *neuralwattKey          `json:"key"`
+	SnapshotAt   string             `json:"snapshot_at"`
+	Balance      *neuralwattBalance `json:"balance"`
+	Subscription json.RawMessage    `json:"subscription"`
+	Key          *neuralwattKey     `json:"key"`
 }
 
 type neuralwattBalance struct {
@@ -197,17 +197,74 @@ type neuralwattAllowance struct {
 }
 
 type neuralwattSubscription struct {
-	KWHIncluded  *float64 `json:"kwh_included"`
-	KWHUsed      *float64 `json:"kwh_used"`
-	KWHRemaining *float64 `json:"kwh_remaining"`
-	// KWHResetDate is the provider's explicit next-quota-reset instant, when
-	// it reports one (observed in operator-supplied output; not a documented
-	// public field). When absent or null the reset is estimated from
-	// current_period_start on the observed 30-day cycle.
-	KWHResetDate *string `json:"kwh_reset_date"`
-	PeriodStart  string  `json:"current_period_start"`
-	PeriodEnd    string  `json:"current_period_end"`
-	InOverage    *bool   `json:"in_overage"`
+	KWHIncluded     *float64
+	KWHUsed         *float64
+	KWHRemaining    *float64
+	KWHResetDate    *string
+	KWHResetPresent bool
+	KWHResetValid   bool
+	PeriodStart     string
+	PeriodEnd       string
+	InOverage       *bool
+	InvalidNumeric  bool
+}
+
+// decodeNeuralwattSubscription decodes overage state independently from its
+// optional detail fields. Bad numeric fields are recorded rather than returned
+// as envelope errors; an overage subscription can then remain known-unavailable
+// and windowless, while the healthy path rejects invalid numeric details. A
+// present reset of any invalid JSON type is represented as present but invalid
+// so it cannot trigger the absent/null fallback estimate.
+func decodeNeuralwattSubscription(raw json.RawMessage) (*neuralwattSubscription, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, errors.New("neuralwatt: invalid subscription object")
+	}
+	s := &neuralwattSubscription{KWHResetValid: true}
+	decodeNumber := func(name string, dst **float64) {
+		value, present := fields[name]
+		if !present || string(value) == "null" {
+			return
+		}
+		var n float64
+		if err := json.Unmarshal(value, &n); err != nil {
+			s.InvalidNumeric = true
+			return
+		}
+		*dst = &n
+	}
+	decodeNumber("kwh_included", &s.KWHIncluded)
+	decodeNumber("kwh_used", &s.KWHUsed)
+	decodeNumber("kwh_remaining", &s.KWHRemaining)
+	if value, present := fields["kwh_reset_date"]; present && string(value) != "null" {
+		s.KWHResetPresent = true
+		var reset string
+		if err := json.Unmarshal(value, &reset); err != nil {
+			s.KWHResetValid = false
+		} else {
+			s.KWHResetDate = &reset
+		}
+	}
+	if value, present := fields["current_period_start"]; present && string(value) != "null" {
+		if err := json.Unmarshal(value, &s.PeriodStart); err != nil {
+			s.PeriodStart = "!invalid!"
+		}
+	}
+	if value, present := fields["current_period_end"]; present && string(value) != "null" {
+		if err := json.Unmarshal(value, &s.PeriodEnd); err != nil {
+			s.PeriodEnd = "!invalid!"
+		}
+	}
+	if value, present := fields["in_overage"]; present && string(value) != "null" {
+		var overage bool
+		if err := json.Unmarshal(value, &overage); err == nil {
+			s.InOverage = &overage
+		}
+	}
+	return s, nil
 }
 
 func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaWindow, bool, bool, string, error) {
@@ -226,8 +283,12 @@ func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaW
 		windows, unavailable, partial, condition, err := neuralwattAllowanceWindow(*response.Key.Allowance)
 		return observedAt, windows, unavailable, partial, condition, err
 	}
-	if response.Subscription != nil {
-		windows, unavailable, partial, condition, err := neuralwattSubscriptionWindow(*response.Subscription, checkedAt)
+	if len(response.Subscription) > 0 && string(response.Subscription) != "null" {
+		subscription, decodeErr := decodeNeuralwattSubscription(response.Subscription)
+		if decodeErr != nil {
+			return time.Time{}, nil, false, false, "", decodeErr
+		}
+		windows, unavailable, partial, condition, err := neuralwattSubscriptionWindow(*subscription, checkedAt)
 		if err != nil {
 			return time.Time{}, nil, false, false, "", err
 		}
@@ -298,7 +359,7 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 		applyNeuralwattReset(window, s, now, &partial)
 		return []QuotaWindow{*window}, true, partial, ConditionInOverage, nil
 	}
-	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || !finiteNonNegative(*s.KWHRemaining) || *s.KWHIncluded <= 0 {
+	if s.InvalidNumeric || s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || !finiteNonNegative(*s.KWHRemaining) || *s.KWHIncluded <= 0 {
 		return nil, false, false, "", errors.New("neuralwatt: subscription is missing a usable allowance")
 	}
 	if *s.KWHRemaining > *s.KWHIncluded {
@@ -326,7 +387,7 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 // apply here. It returns false when the reported details are missing or
 // inconsistent with an exhausted allowance.
 func neuralwattOverageWindow(s neuralwattSubscription) (*QuotaWindow, bool) {
-	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || *s.KWHIncluded <= 0 || *s.KWHRemaining != 0 {
+	if s.InvalidNumeric || s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || *s.KWHIncluded <= 0 || *s.KWHRemaining != 0 {
 		return nil, false
 	}
 	included := *s.KWHIncluded
@@ -354,7 +415,10 @@ func neuralwattOverageWindow(s neuralwattSubscription) (*QuotaWindow, bool) {
 // reported reset instant is never used to infer a cycle duration: the Period
 // stays the existing observed 30-day cadence on either path.
 func applyNeuralwattReset(window *QuotaWindow, s neuralwattSubscription, now time.Time, partial *bool) {
-	if s.KWHResetDate != nil {
+	if s.KWHResetPresent {
+		if !s.KWHResetValid || s.KWHResetDate == nil {
+			return // malformed field type: present-invalid never uses fallback
+		}
 		reset, err := time.Parse(time.RFC3339, *s.KWHResetDate)
 		if err != nil || !reset.After(now) {
 			return // omit, never estimate
