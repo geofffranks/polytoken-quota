@@ -178,11 +178,14 @@ func mergedReasonStyler(s styler, reason string) func(string) string {
 }
 
 // formatMergedWindows renders one provider's raw quota numbers: "name used/limit"
-// per window joined with ", ", falling back to usage percent. Windowless rows
-// explain themselves instead of a bare "no data": the adapter's named
-// out-of-quota condition, the unavailable fallback for an observed windowless
-// snapshot without one, or plain "no data" (never observed, or observed with
-// unknown snapshot availability). Every windowless rendering stays dim.
+// per window joined with ", ", falling back to usage percent. A named
+// out-of-quota condition rides along even when usable numbers are present (a
+// windowed unavailable overage row keeps its numbers and names "in overage"),
+// dimming the combined cell. Windowless rows explain themselves instead of a
+// bare "no data": the adapter's named out-of-quota condition, the unavailable
+// fallback for an observed windowless snapshot without one, or plain "no data"
+// (never observed, or observed with unknown snapshot availability). Every
+// windowless rendering stays dim.
 func formatMergedWindows(p service.MergedStatusProvider, s styler) (string, func(string) string) {
 	if len(p.Windows) > 0 {
 		parts := make([]string, 0, len(p.Windows))
@@ -195,6 +198,9 @@ func formatMergedWindows(p service.MergedStatusProvider, s styler) (string, func
 			default:
 				parts = append(parts, win.Name)
 			}
+		}
+		if p.Condition != "" {
+			return strings.Join(parts, ", ") + " (" + p.Condition + ")", s.dim
 		}
 		return strings.Join(parts, ", "), nil
 	}

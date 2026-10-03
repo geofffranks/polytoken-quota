@@ -43,7 +43,7 @@ type MergedStatusProvider struct {
 	Windows     []QuotaWindowReport `json:"windows,omitempty"`
 	NextResetAt *time.Time          `json:"next_reset_at,omitempty"`
 	// Condition names the adapter's sanitized out-of-quota condition behind a
-	// windowless snapshot; empty otherwise.
+	// fail-closed snapshot, windowless or not; empty otherwise.
 	Condition string `json:"condition,omitempty"`
 	// CheckedAt is the last observation time: the snapshot's when present,
 	// otherwise the latest attempt's — so an observed-but-failed row stays

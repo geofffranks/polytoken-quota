@@ -252,6 +252,25 @@ func TestMergedStatusTextWindowlessFallbacks(t *testing.T) {
 	}
 }
 
+func TestMergedStatusTextShowsOverageConditionAlongsideNumbers(t *testing.T) {
+	used, limit := 2.911, 2.353
+	reset := time.Date(2026, 9, 12, 21, 48, 47, 250000000, time.UTC)
+	report := service.MergedStatusReport{RoutingEnabled: true, Providers: []service.MergedStatusProvider{{
+		Provider: "neuralwatt", Status: service.StatusUnavailable,
+		Condition: "in overage", Availability: "unavailable",
+		Windows:     []service.QuotaWindowReport{{Name: "subscription_kwh", Used: &used, Limit: &limit, ResetAt: &reset}},
+		NextResetAt: &reset,
+	}}}
+	var out bytes.Buffer
+	writeMergedStatusText(&out, report, styler{})
+	got := collapseSpaces(out.String())
+	for _, want := range []string{"subscription_kwh 2.911/2.353 (in overage)", "2026-09-12 21:48 UTC"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output %q missing %q", got, want)
+		}
+	}
+}
+
 func TestMergedStatusTextUsesHiddenRankForProviderOrder(t *testing.T) {
 	report := service.MergedStatusReport{
 		Providers: []service.MergedStatusProvider{

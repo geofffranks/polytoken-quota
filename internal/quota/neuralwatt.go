@@ -45,7 +45,7 @@ func NeuralwattEvidence(_ time.Time) Evidence {
 		Endpoint:    neuralwattQuotaEndpoint,
 		Method:      http.MethodGet,
 		AuthType:    "bearer-api-key",
-		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance (kwh_*; current_period_start/end are the annual billing term; quota renews on rolling 30-day cycles from current_period_start — dashboard-verified 2026-09: signup Aug 13 → resets Sep 12/Oct 12), usage/limits metadata may be null; blocked/overage states fail closed",
+		SchemaNote:  "balance credits, optional key.allowance, optional subscription allowance (kwh_*; current_period_start/end are the annual billing term; quota renews on rolling 30-day cycles from current_period_start — dashboard-verified 2026-09: signup Aug 13 → resets Sep 12/Oct 12; kwh_reset_date observed in operator-supplied output when present is preferred as the exact next reset, and valid overage details are retained unavailable), usage/limits metadata may be null; blocked/overage states fail closed",
 		FixturePath: "contract/testdata/quota/neuralwatt/quota.json",
 		RecordedAt:  evidenceRecordedAt(),
 		ReviewBy:    evidenceRecordedAt().AddDate(0, 3, 0), // quarterly review per evidence policy
@@ -200,9 +200,14 @@ type neuralwattSubscription struct {
 	KWHIncluded  *float64 `json:"kwh_included"`
 	KWHUsed      *float64 `json:"kwh_used"`
 	KWHRemaining *float64 `json:"kwh_remaining"`
-	PeriodStart  string   `json:"current_period_start"`
-	PeriodEnd    string   `json:"current_period_end"`
-	InOverage    *bool    `json:"in_overage"`
+	// KWHResetDate is the provider's explicit next-quota-reset instant, when
+	// it reports one (observed in operator-supplied output; not a documented
+	// public field). When absent or null the reset is estimated from
+	// current_period_start on the observed 30-day cycle.
+	KWHResetDate *string `json:"kwh_reset_date"`
+	PeriodStart  string  `json:"current_period_start"`
+	PeriodEnd    string  `json:"current_period_end"`
+	InOverage    *bool   `json:"in_overage"`
 }
 
 func parseNeuralwattQuota(body []byte, checkedAt time.Time) (time.Time, []QuotaWindow, bool, bool, string, error) {
@@ -270,12 +275,28 @@ func neuralwattAllowanceWindow(a neuralwattAllowance) ([]QuotaWindow, bool, bool
 	return []QuotaWindow{neuralwattWindow("key_allowance", used, *a.Limit)}, *a.Remaining <= 0, false, "", nil
 }
 
+// neuralwattSubscriptionWindow decodes the subscription boundary. A present
+// but invalid overage flag fails closed only as far as the subscription goes:
+// an in-overage subscription whose numeric details are unusable still yields a
+// successful, windowless, unavailable snapshot naming the condition (never a
+// SourceFailed snapshot, which would retain a prior healthy observation), and
+// it never falls through to the weaker balance boundary.
 func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]QuotaWindow, bool, bool, string, error) {
 	if s.InOverage == nil {
 		return nil, false, false, "", errors.New("neuralwatt: subscription is missing overage state")
 	}
 	if *s.InOverage {
-		return nil, true, false, ConditionInOverage, nil
+		window, ok := neuralwattOverageWindow(s)
+		if !ok {
+			// Known unavailability with unretained details: stay windowless,
+			// fresh, and unavailable with the condition named. Numbers that
+			// cannot be trusted must never convert overage into an available
+			// result or a balance fallback.
+			return nil, true, false, ConditionInOverage, nil
+		}
+		partial := false
+		applyNeuralwattReset(window, s, now, &partial)
+		return []QuotaWindow{*window}, true, partial, ConditionInOverage, nil
 	}
 	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || !finiteNonNegative(*s.KWHRemaining) || *s.KWHIncluded <= 0 {
 		return nil, false, false, "", errors.New("neuralwatt: subscription is missing a usable allowance")
@@ -293,20 +314,69 @@ func neuralwattSubscriptionWindow(s neuralwattSubscription, now time.Time) ([]Qu
 	}
 	window := neuralwattWindow("subscription_kwh", used, *s.KWHIncluded)
 	partial := false
-	if s.PeriodStart != "" {
-		start, err := time.Parse(time.RFC3339, s.PeriodStart)
-		if err != nil {
-			partial = true
-		} else {
-			reset := nextCycleBoundary(now, start, neuralwattQuotaCycle)
-			period := neuralwattQuotaCycle
-			window.ResetAt = &reset
-			window.Period = &period
-		}
-	} else {
-		partial = true
-	}
+	applyNeuralwattReset(&window, s, now, &partial)
 	return []QuotaWindow{window}, *s.KWHRemaining <= 0, partial, "", nil
+}
+
+// neuralwattOverageWindow retains the overage subscription's usable numbers in
+// a window: finite included > 0, remaining present and zero, and used finite
+// and >= included (used omitted derives exhausted usage). Reported used energy
+// may legitimately exceed included during overage; remaining is floored at
+// zero, so the healthy path's included-minus-remaining cross-check does not
+// apply here. It returns false when the reported details are missing or
+// inconsistent with an exhausted allowance.
+func neuralwattOverageWindow(s neuralwattSubscription) (*QuotaWindow, bool) {
+	if s.KWHIncluded == nil || s.KWHRemaining == nil || !finiteNonNegative(*s.KWHIncluded) || *s.KWHIncluded <= 0 || *s.KWHRemaining != 0 {
+		return nil, false
+	}
+	included := *s.KWHIncluded
+	used := included
+	if s.KWHUsed != nil {
+		used = *s.KWHUsed
+		if !finiteNonNegative(used) || used < included {
+			return nil, false
+		}
+	}
+	w := neuralwattWindow("subscription_kwh", used, included)
+	return &w, true
+}
+
+// applyNeuralwattReset sets the window's reset metadata. A present
+// subscription.kwh_reset_date wins: a valid strictly-future RFC3339 instant is
+// used exactly as reported (sub-second precision included), independent of
+// current_period_start, which may be absent or malformed without making the
+// otherwise valid quota partial. A reset that is malformed, or not strictly
+// after the check time, is simply omitted — no estimate is substituted and
+// eligibility is unchanged; the missing reset shows as no next-reset value. On
+// the absent/null fallback path the reset is estimated from
+// current_period_start on the observed 30-day cycle, and a missing or
+// malformed period start marks the snapshot partial (existing behavior). The
+// reported reset instant is never used to infer a cycle duration: the Period
+// stays the existing observed 30-day cadence on either path.
+func applyNeuralwattReset(window *QuotaWindow, s neuralwattSubscription, now time.Time, partial *bool) {
+	if s.KWHResetDate != nil {
+		reset, err := time.Parse(time.RFC3339, *s.KWHResetDate)
+		if err != nil || !reset.After(now) {
+			return // omit, never estimate
+		}
+		window.ResetAt = &reset
+		period := neuralwattQuotaCycle
+		window.Period = &period // established cadence, not inferred from this reset
+		return
+	}
+	if s.PeriodStart == "" {
+		*partial = true
+		return
+	}
+	start, err := time.Parse(time.RFC3339, s.PeriodStart)
+	if err != nil {
+		*partial = true
+		return
+	}
+	reset := nextCycleBoundary(now, start, neuralwattQuotaCycle)
+	period := neuralwattQuotaCycle
+	window.ResetAt = &reset
+	window.Period = &period
 }
 
 func neuralwattBalanceWindow(b neuralwattBalance) (*QuotaWindow, bool, bool, string, error) {

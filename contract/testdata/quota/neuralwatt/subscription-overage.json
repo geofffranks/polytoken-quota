@@ -1,0 +1,13 @@
+{
+  "snapshot_at": "2026-08-15T12:00:00Z",
+  "balance": null,
+  "subscription": {
+    "kwh_included": 2.353,
+    "kwh_used": 2.911,
+    "kwh_remaining": 0,
+    "kwh_reset_date": "2026-09-12T21:48:47.250Z",
+    "current_period_start": "2026-08-13T21:48:47Z",
+    "current_period_end": "2027-08-13T21:48:47Z",
+    "in_overage": true
+  }
+}

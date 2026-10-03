@@ -235,6 +235,19 @@ func QuotaFindings(probes []QuotaProbe, reconcilePending bool, now time.Time) []
 			} else if p.Snapshot.EffectiveRemaining() == nil || p.Snapshot.Availability == quota.QuotaUnknown {
 				findings = append(findings, Finding{Code: "quota-unusable", TargetID: clean, Severity: Warning, Message: fmt.Sprintf("provider %s quota snapshot has no usable quota signal; routing remains disabled for it.", clean), Remediation: "run `check` to refresh the snapshot"})
 			}
+			// A windowed snapshot that still names its out-of-quota condition
+			// (usable numbers retained while unavailable, e.g. subscription
+			// overage) has no "no usable quota signal" finding, so the human
+			// doctor output would otherwise lose the condition entirely.
+			if len(p.Snapshot.Windows) > 0 && p.Snapshot.Condition != "" {
+				findings = append(findings, Finding{
+					Code:        "quota-condition",
+					TargetID:    clean,
+					Severity:    Info,
+					Message:     fmt.Sprintf("provider %s quota snapshot reports condition: %s; it stays unavailable for routing.", clean, p.Snapshot.Condition),
+					Remediation: "run `check` to refresh the snapshot",
+				})
+			}
 		}
 		if p.Attempt != nil && p.Attempt.Status == quota.SourceFailed {
 			findings = append(findings, Finding{
