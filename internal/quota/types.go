@@ -32,8 +32,11 @@ const (
 )
 
 // Quota conditions are the sanitized, adapter-chosen labels for a successful
-// windowless snapshot: the provider reported an out-of-quota state the adapter
-// refuses to publish numbers for (fail-closed). Fixed literals only — never
+// snapshot's out-of-quota condition: the provider reported an out-of-quota
+// state the adapter refuses to treat as healthy (fail-closed). A condition is
+// windowless when the adapter declined to publish numbers for the state, but a
+// snapshot that retains usable numbers while unavailable (e.g. subscription
+// overage) also names its condition. Fixed literals only — never
 // provider-supplied text — so they can render verbatim. State persistence
 // normalizes unknown values to the empty condition.
 const (
@@ -86,9 +89,11 @@ type QuotaSnapshot struct {
 	Error        string
 
 	// Condition names the sanitized, adapter-chosen out-of-quota condition
-	// behind a successful windowless snapshot (a fail-closed blocked/overage/
-	// drained state). Empty when no condition is named. It is an observation
-	// label only: it never changes Status, Availability, or policy math.
+	// behind a successful fail-closed snapshot (blocked/overage/drained),
+	// windowless or not: a snapshot can retain usable numbers while
+	// unavailable and still name its condition. Empty when no condition is
+	// named. It is an observation label only: it never changes Status,
+	// Availability, or policy math.
 	Condition string
 
 	// Codex-only additive observations. Optional reset-credit enrichment never

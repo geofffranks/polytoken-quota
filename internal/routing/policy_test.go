@@ -518,6 +518,11 @@ func TestCheckEligibilityAllUnknown(t *testing.T) {
 func TestCheckEligibilityUnavailable(t *testing.T) {
 	p := ProviderPolicy{MappingID: "p"}
 	snap := remSnap("p", 0.0, rankNow)
+	// A windowed in-overage observation retains actual usage above its limit
+	// for diagnostics, but availability remains unavailable for routing.
+	used, limit := 125.0, 100.0
+	snap.Windows = []quota.QuotaWindow{{Name: "subscription_kwh", Used: &used, Limit: &limit}}
+	snap.Condition = quota.ConditionInOverage
 	snap.Availability = quota.QuotaUnavailable
 	e := CheckEligibility(p, ProviderObs{MappingID: "p", Mode: "normal", Snapshot: snap}, rankNow)
 	if e.Rankable {

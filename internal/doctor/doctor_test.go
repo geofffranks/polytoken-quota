@@ -555,6 +555,26 @@ func TestQuotaFindingsSuspendedGate(t *testing.T) {
 
 // TestQuotaFindingsStaleSnapshot verifies a snapshot past its freshness TTL
 // produces a warning finding with the expected code and message.
+func TestQuotaFindingsWindowedOveragePreservesCondition(t *testing.T) {
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	used, limit := 125.0, 100.0
+	snap := &quota.QuotaSnapshot{
+		MappingID: "neuralwatt", CheckedAt: now, Status: quota.SourceFresh,
+		Availability: quota.QuotaUnavailable, Condition: quota.ConditionInOverage,
+		Windows: []quota.QuotaWindow{{Name: "subscription_kwh", Used: &used, Limit: &limit}},
+	}
+	findings := QuotaFindings([]QuotaProbe{{
+		Provider: "neuralwatt", HasQuotaConfig: true, FreshnessTTL: time.Hour,
+		Snapshot: snap, Supported: true,
+	}}, false, now)
+	if len(findings) != 1 || findings[0].Code != "quota-condition" || findings[0].Severity != Info {
+		t.Fatalf("findings=%+v, want one condition finding", findings)
+	}
+	if !strings.Contains(findings[0].Message, "in overage") || !strings.Contains(findings[0].Message, "unavailable") {
+		t.Fatalf("finding=%+v", findings[0])
+	}
+}
+
 func TestQuotaFindingsStaleSnapshot(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	checked := now.Add(-2 * time.Hour)

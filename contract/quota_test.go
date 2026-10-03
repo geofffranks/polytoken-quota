@@ -1092,6 +1092,45 @@ func TestNeuralwattContractFixtureIsSecretFree(t *testing.T) {
 	}
 }
 
+// TestNeuralwattOverageContractFixture replays the synthetic in-overage
+// subscription fixture through the real NeuralwattSource adapter: the overage
+// numbers and explicit reset are retained on a fresh unavailable snapshot
+// naming the condition, and the row can never come out available.
+func TestNeuralwattOverageContractFixture(t *testing.T) {
+	path := filepath.Join("testdata", "quota", "neuralwatt", "subscription-overage.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	if secretPattern.MatchString(string(body)) {
+		t.Fatal("Neuralwatt overage fixture contains a secret pattern")
+	}
+	reg := quota.NewEvidenceRegistry()
+	reg.Register(quota.NeuralwattEvidence(contractNow))
+	client := &quota.BoundedClient{
+		Transport:    &neuralwattStubTransport{body: body, code: http.StatusOK},
+		Timeout:      time.Second,
+		MaxBodyBytes: 1 << 20,
+	}
+	fixtureNow := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	src := quota.NewNeuralwattSource("neuralwatt-overage-fixture", client, neuralwattFixtureResolver{}, reg, fixtureNow)
+	snap, err := src.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if snap.Status != quota.SourceFresh || snap.Availability != quota.QuotaUnavailable || snap.Condition != quota.ConditionInOverage {
+		t.Fatalf("status=%s availability=%s condition=%q", snap.Status, snap.Availability, snap.Condition)
+	}
+	w := contractFindWindow(snap.Windows, "subscription_kwh")
+	if w == nil || w.Used == nil || *w.Used != 2.911 || w.Limit == nil || *w.Limit != 2.353 {
+		t.Fatalf("overage window=%+v", w)
+	}
+	want := time.Date(2026, 9, 12, 21, 48, 47, 250000000, time.UTC)
+	if w.ResetAt == nil || !w.ResetAt.Equal(want) {
+		t.Fatalf("overage reset=%v want %v", w.ResetAt, want)
+	}
+}
+
 // --- Anthropic adapter fixture acceptance -----------------------------------
 //
 // The Anthropic adapter polls the Admin API cost report for month-to-date

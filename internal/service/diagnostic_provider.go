@@ -134,7 +134,8 @@ type ProviderProjection struct {
 	// recorded before axis attribution, which keep today's presentation).
 	Gate *GateReport `json:"gate,omitempty"`
 	// Condition names the snapshot's sanitized out-of-quota condition when
-	// the adapter failed closed on a windowless observation; empty otherwise.
+	// the adapter failed closed on the observation, whether or not usable
+	// numbers were retained alongside it; empty otherwise.
 	Condition string `json:"condition,omitempty"`
 	// SnapshotAvailability is the stored quota snapshot's own availability
 	// (available/unavailable/unknown), read from the raw pre-aggregation

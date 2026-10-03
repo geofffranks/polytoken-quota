@@ -49,7 +49,7 @@ type statusProviderJSON struct {
 	Windows  []statusWindowJSON `json:"windows"`
 	NextResetAt string          `json:"next_reset_at,omitempty"`
 	// Condition names the adapter's sanitized out-of-quota condition behind a
-	// windowless snapshot; empty otherwise.
+	// fail-closed snapshot, windowless or not; empty otherwise.
 	Condition string `json:"condition,omitempty"`
 	// CheckedAt is the last observation time (snapshot, else latest attempt).
 	CheckedAt string `json:"checked_at,omitempty"`
@@ -124,7 +124,7 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 			pj.Windows = []statusWindowJSON{}
 		}
 		if p.NextResetAt != nil {
-			pj.NextResetAt = p.NextResetAt.UTC().Format(time.RFC3339)
+			pj.NextResetAt = p.NextResetAt.UTC().Format(time.RFC3339Nano)
 		}
 		out.Providers = append(out.Providers, pj)
 	}
