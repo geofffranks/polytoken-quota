@@ -166,11 +166,17 @@ observation across providers, not proof that every provider is fresh.
   configuration problems never echo the rejected content.
 - Each subprocess runs in a process group owned by the plugin: on a deadline,
   an output overflow, or plugin termination the whole group (descendants
-  included) is signalled and reaped, and a producer that leaves children
-  behind after a clean exit is cleaned up too.
+  included) is signalled and reaped, a producer that leaves children behind
+  after any exit is cleaned up too, and the collector shutdown is bounded.
+  The cleanup's KILL escalation removes TERM-resistant descendants while the
+  command's own exit status and the deadline verdict are preserved.
 - Captured output is capped while the command runs, not afterwards; a
   producer that writes past the cap is stopped early and the truncation is
   reported in the menu.
+- Setup is fail-closed: if the capture FIFO cannot be created or the owned
+  process group cannot be established, the command is not run (an in-flight
+  producer is killed) and the refresh reports the setup failure visibly.
+  There is no unbounded or direct-PID fallback.
 
 ## Host and container notes
 

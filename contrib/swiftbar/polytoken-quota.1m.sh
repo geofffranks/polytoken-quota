@@ -199,16 +199,17 @@ resolve_exec_check() {
 
 run_bounded() {
   # $1 = timeout seconds, $2 = stdout capture file, rest = command.
-  # Returns 124 when the deadline fired, else the command's status.
-  local t=$1 cap=$2 jpid coll pgid wpid outerpg rc fire fifo
+  # Returns 124 when the deadline fired, 125 when setup failed (the producer
+  # is never run unbounded — fail closed), else the command's status.
+  local t=$1 cap=$2 jpid coll pgid wpid cw outerpg rc fire fifo
   shift 2
   : > "$cap"
   fire="$TMPDIR_LOCAL/fired.$RANDOM.$RANDOM.$RANDOM"
   fifo="$TMPDIR_LOCAL/pipe.$RANDOM.$RANDOM"
   if ! mkfifo "$fifo" 2>/dev/null; then
-    # No FIFOs: fall back to direct capture (still deadline-bounded).
-    "$@" > "$cap" 2>/dev/null < /dev/null
-    return $?
+    # Fail closed: without the FIFO the in-flight byte cap cannot exist, so
+    # the producer is never started and the caller reports a setup failure.
+    return 125
   fi
   (
     set -m 2>/dev/null
@@ -230,42 +231,53 @@ run_bounded() {
     pgid=$jpid
     case "$outerpg" in ''|*[!0-9]*) outerpg="" ;; esac
     if [ -n "$outerpg" ] && [ "$pgid" = "$outerpg" ]; then
+      # Job control unavailable: the producer shares this shell's group and
+      # could not be bounded — kill it and fail closed below.
       pgid=""
     fi
-    if [ -n "$pgid" ] && ! kill -0 "-$pgid" 2>/dev/null; then
-      pgid=""
+    if [ -z "$pgid" ]; then
+      # Fail closed: an unidentifiable group means neither the deadline nor
+      # the cleanup could bound the producer, so it is killed and reported
+      # as a setup failure rather than run unbounded. No direct-PID or
+      # unbounded fallback exists.
+      kill -KILL "$jpid" 2>/dev/null
+      kill -KILL "$coll" 2>/dev/null
+      wait "$jpid" 2>/dev/null
+      wait "$coll" 2>/dev/null
+      exit 125
     fi
-    if [ -n "$pgid" ]; then
-      printf '%s\n' "$pgid" >> "$OWNED_GROUPS_FILE"
-    fi
+    printf '%s\n' "$pgid" >> "$OWNED_GROUPS_FILE"
     ( sleep "$t"
       printf 'deadline-fired' > "$fire" 2>/dev/null
-      if [ -n "$pgid" ]; then kill -TERM "-$pgid" 2>/dev/null; else kill -TERM "$jpid" 2>/dev/null; fi
+      kill -TERM "-$pgid" 2>/dev/null
       sleep 1
-      if [ -n "$pgid" ]; then kill -KILL "-$pgid" 2>/dev/null; else kill -KILL "$jpid" 2>/dev/null; fi
+      kill -KILL "-$pgid" 2>/dev/null
     ) >/dev/null 2>&1 &
     wpid=$!
     wait "$jpid" 2>/dev/null
     rc=$?
     # The watchdog is never needed again: kill it and its whole group, which
     # takes its sleeping child with it (deterministic cleanup, no orphans).
-    if kill -0 "$wpid" 2>/dev/null; then
-      if [ -n "$pgid" ]; then
-        kill -TERM "-$wpid" 2>/dev/null
-      else
-        kill -TERM "$wpid" 2>/dev/null
-      fi
-    fi
+    kill -TERM "-$wpid" 2>/dev/null
     wait "$wpid" 2>/dev/null
-    # A successful producer may still have left descendants in the owned group
-    # (holding the FIFO write end or detached); clean the group up too, which
-    # also releases the collector.
-    if [ "$rc" -eq 0 ] && [ -n "$pgid" ] && kill -0 "-$pgid" 2>/dev/null; then
+    # Clean the producer group on EVERY exit, not only success: a partial
+    # report's descendants can hold the FIFO write end and would stall the
+    # collector indefinitely. The KILL escalation removes TERM-resistant
+    # members. The producer's own status and the deadline sentinel are
+    # untouched by this cleanup.
+    if kill -0 "-$pgid" 2>/dev/null; then
       kill -TERM "-$pgid" 2>/dev/null
       sleep 1
       kill -KILL "-$pgid" 2>/dev/null
     fi
+    wait "$jpid" 2>/dev/null
+    # Bound the collector shutdown: normal paths see EOF immediately; a
+    # pathological holder gets SIGTERM after the grace period.
+    ( sleep 2 && kill -TERM "-$coll" 2>/dev/null ) >/dev/null 2>&1 &
+    cw=$!
     wait "$coll" 2>/dev/null
+    kill -TERM "-$cw" 2>/dev/null
+    wait "$cw" 2>/dev/null
     exit "$rc"
   ) 2>/dev/null
   rc=$?
@@ -654,6 +666,7 @@ rc_text() {
     1) printf 'exit 1 (partial projection report)' ;;
     2) printf 'exit 2 (quota problem report)' ;;
     124) printf 'timed out' ;;
+    125) printf 'capture or process-group setup failed' ;;
     skipped) printf 'not run (missing dependency)' ;;
     nobudget) printf 'not run (refresh budget exhausted)' ;;
     *) printf 'unexpected exit %s' "$1" ;;
@@ -666,6 +679,7 @@ case "$STATUS_RC" in
   1) warn "status $(rc_text 1)" ;;
   2) warn "status $(rc_text 2)" ;;
   124) warn "status command timed out after ${CMD_TIMEOUT}s" ;;
+  125) warn "status capture setup failed — command not run" ;;
   0|skipped|nobudget) : ;;
   *) warn "status command failed ($(rc_text "$STATUS_RC"))" ;;
 esac
@@ -673,8 +687,10 @@ esac
 STATUS_DIGEST="$TMPDIR_LOCAL/status.digest"
 STATUS_BODY="$TMPDIR_LOCAL/status.body"
 
-if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-  if run_bounded "$JQ_TIMEOUT" "$STATUS_DIGEST" "$JQ_BIN" -r "$JQ_STATUS_DIGEST" "$STATUS_FILE" 2>/dev/null && [ -s "$STATUS_DIGEST" ]; then
+if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ "$STATUS_RC" != 125 ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+  run_bounded "$JQ_TIMEOUT" "$STATUS_DIGEST" "$JQ_BIN" -r "$JQ_STATUS_DIGEST" "$STATUS_FILE" 2>/dev/null
+  jqrc=$?
+  if [ "$jqrc" -eq 0 ] && [ -s "$STATUS_DIGEST" ]; then
     BADSHAPE=0
     while IFS= read -r dline; do
       case "$dline" in
@@ -708,8 +724,12 @@ if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ -n "$JQ_BI
       [ "$STPENDING" -gt 0 ] && warn "$STPENDING pending reconciler target(s)"
       [ "$STINVALID" -gt 0 ] && warn "status contained $STINVALID invalid or contradictory provider row(s)"
       if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-        if run_bounded "$JQ_TIMEOUT" "$STATUS_BODY" "$JQ_BIN" -r "$JQ_STATUS_BODY" "$STATUS_FILE" 2>/dev/null; then
+        run_bounded "$JQ_TIMEOUT" "$STATUS_BODY" "$JQ_BIN" -r "$JQ_STATUS_BODY" "$STATUS_FILE" 2>/dev/null
+        jqrc=$?
+        if [ "$jqrc" -eq 0 ]; then
           STATUS_PARSED=1
+        elif [ "$jqrc" -eq 125 ]; then
+          warn "jq capture setup failed — status details omitted"
         else
           warn "status output could not be rendered"
         fi
@@ -718,7 +738,9 @@ if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ -n "$JQ_BI
       fi
     fi
   else
-    if [ -s "$STATUS_FILE" ]; then
+    if [ "$jqrc" -eq 125 ]; then
+      warn "jq capture setup failed — status details omitted"
+    elif [ -s "$STATUS_FILE" ]; then
       warn "status output is malformed or unparseable"
     else
       warn "status output is empty"
@@ -736,6 +758,7 @@ fi
 case "$DOCTOR_RC" in
   0|1) : ;; # findings parsed independently below; the actionable count decides
   124) warn "doctor command timed out after ${CMD_TIMEOUT}s" ;;
+  125) warn "doctor capture setup failed — command not run" ;;
   skipped|nobudget) : ;;
   *) warn "doctor command failed ($(rc_text "$DOCTOR_RC"))" ;;
 esac
@@ -743,15 +766,17 @@ esac
 DOCTOR_DIGEST="$TMPDIR_LOCAL/doctor.digest"
 DOCTOR_BODY="$TMPDIR_LOCAL/doctor.body"
 
-if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-  if run_bounded "$JQ_TIMEOUT" "$DOCTOR_DIGEST" "$JQ_BIN" -r '
+if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ "$DOCTOR_RC" != 125 ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+  run_bounded "$JQ_TIMEOUT" "$DOCTOR_DIGEST" "$JQ_BIN" -r '
       . as $r
       | if ($r|type) != "object" or ($r.findings|type) != "array" then "shape=bad"
         else "find=\([$r.findings[]?] | length)",
              "act=\([$r.findings[]? | select(.severity == "warning" or .severity == "error")] | length)",
              "rec=\([$r.recovered[]?] | length)",
              (if (($r.error // "") != "") then "toperr=1" else "toperr=0" end)
-        end' "$DOCTOR_FILE" 2>/dev/null && [ -s "$DOCTOR_DIGEST" ]; then
+        end' "$DOCTOR_FILE" 2>/dev/null
+  jqrc=$?
+  if [ "$jqrc" -eq 0 ] && [ -s "$DOCTOR_DIGEST" ]; then
     BADDSHAPE=0
     while IFS= read -r dline; do
       case "$dline" in
@@ -772,8 +797,12 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ -n "$JQ_BI
       DOCTOR_OK=1
       [ "$D_ACT" -gt 0 ] && warn "doctor reported $D_ACT actionable finding(s)"
       if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-        if run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null; then
+        run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null
+        jqrc=$?
+        if [ "$jqrc" -eq 0 ]; then
           DOCTOR_PARSED=1
+        elif [ "$jqrc" -eq 125 ]; then
+          warn "jq capture setup failed — diagnostics details omitted"
         else
           warn "doctor output could not be rendered"
         fi
@@ -782,7 +811,9 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ -n "$JQ_BI
       fi
     fi
   else
-    if [ -s "$DOCTOR_FILE" ]; then
+    if [ "$jqrc" -eq 125 ]; then
+      warn "jq capture setup failed — diagnostics details omitted"
+    elif [ -s "$DOCTOR_FILE" ]; then
       warn "doctor output is malformed or unparseable"
     else
       warn "doctor output is empty"

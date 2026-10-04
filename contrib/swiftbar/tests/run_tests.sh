@@ -48,11 +48,16 @@ c="$1"
 if [ "$#" -ne 2 ] || [ "$2" != "--json" ]; then
   exit 64
 fi
+: > "$d/ran"
 printf '%s' "${POLYTOKEN_BINARY-}" > "$d/polytoken_seen"
 if [ -f "$d/$c.trapterm" ]; then
   trap 'exit 0' TERM
 fi
-if [ -f "$d/$c.child" ]; then
+if [ -f "$d/$c.termresist" ]; then
+  # TERM-resistant member: SIG_IGN survives exec, so only the group's KILL
+  # escalation can remove it.
+  sh -c 'trap "" TERM; exec sleep 42' &
+elif [ -f "$d/$c.child" ]; then
   sh -c 'exec sleep 42' &
 fi
 if [ -f "$d/$c.sleep" ]; then
@@ -95,24 +100,46 @@ stub_sleep()     { printf '%s\n' "$2" > "$CASE_DIR/$1.sleep"; }
 run_plugin() {
   local conf=${1:-}
   local envs=()
+  local path="/usr/bin:/bin:$JQ_DIR"
+  if [ -n "${PATH_PREPEND:-}" ]; then
+    path="$PATH_PREPEND:$path"
+  fi
   if [ -n "$conf" ]; then
     envs=(POLYTOKEN_SWIFTBAR_CONFIG="$conf")
   fi
   if [ -n "${PLUGIN_ENV_POLYTOKEN_BINARY:-}" ]; then
     envs=("${envs[@]+"${envs[@]}"}" POLYTOKEN_BINARY="$PLUGIN_ENV_POLYTOKEN_BINARY")
   fi
-  OUT=$(env -i PATH="/usr/bin:/bin:$JQ_DIR" HOME="$CASE_DIR" STUB_DIR="$CASE_DIR" \
+  OUT=$(env -i PATH="$path" HOME="$CASE_DIR" STUB_DIR="$CASE_DIR" \
     "${envs[@]+"${envs[@]}"}" "$PLUGIN_BASH" "$PLUGIN" 2>/dev/null)
   RC=$?
 }
 
 process_gone() {
-  # $1 = pattern; succeeds when no live process matches it.
-  sleep 1
-  if ps -eo args= 2>/dev/null | grep -q -- "$1"; then
-    return 1
+  # $1 = ps args pattern. Polls up to ~6s so slow reaping never flaps the
+  # result, and ignores zombie states (stat Z): an unreaped corpse is not a
+  # live descendant. Succeeds only when nothing alive matches.
+  local i=0
+  while [ "$i" -lt 12 ]; do
+    if ps -eo stat=,args= 2>/dev/null | grep -- "$1" | grep -v '^Z' >/dev/null 2>&1; then
+      sleep 0.5
+      i=$((i + 1))
+    else
+      return 0
+    fi
+  done
+  return 1
+}
+
+assert_member_gone() {
+  # The owned invocation must be fully finished before this assertion: the
+  # menu under test already rendered, and any sleep-42 survivor is reported
+  # with its actual ps state (zombies are not survivors).
+  if process_gone '[s]leep 42'; then
+    ok
+  else
+    bad "sleep-42 descendant still alive: $(ps -eo stat=,args= 2>/dev/null | grep '[s]leep 42' | head -n 2 | tr '\n' ' ')"
   fi
-  return 0
 }
 
 # --- assertions ----------------------------------------------------------------
@@ -144,6 +171,13 @@ assert_header() {
 assert_count() {
   local n
   n=$(printf '%s\n' "$OUT" | grep -cF -- "$2")
+  if [ "$n" -eq "$1" ]; then ok; else bad "expected $1 occurrences of [$2], got $n"; fi
+}
+assert_occurrences() {
+  # Counts total occurrences, not lines: joined warnings share one line.
+  local n
+  n=$(printf '%s\n' "$OUT" | grep -oF -- "$2" | wc -l)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
   if [ "$n" -eq "$1" ]; then ok; else bad "expected $1 occurrences of [$2], got $n"; fi
 }
 assert_count_re() {
@@ -205,6 +239,9 @@ standard_setup() {
   write_stub_polytoken
   write_default_config
 }
+
+command -v mkfifo >/dev/null 2>&1 || { echo "mkfifo is required for lifecycle fixtures" >&2; exit 1; }
+MKFIFO_ABS=$(command -v mkfifo)
 
 # --- cases -----------------------------------------------------------------------
 
@@ -934,11 +971,7 @@ printf '1\n' > "$CASE_DIR/status.child"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_has 'WARNING: status command timed out after 10s'
-if process_gone '[s]leep 42'; then
-  ok
-else
-  bad "descendant sleep 42 survived the timeout kill"
-fi
+assert_member_gone
 
 start_case adv2_descendant_killed_on_success
 standard_setup
@@ -948,11 +981,7 @@ printf '1\n' > "$CASE_DIR/status.child"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota +0.3 :arrow.up: | color=green'
-if process_gone '[s]leep 42'; then
-  ok
-else
-  bad "descendant sleep 42 survived a successful command"
-fi
+assert_member_gone
 
 # C3: row validity — contradictions and unsupported values warn and are
 # excluded from pace and unavailability decisions, while valid partial
@@ -1048,6 +1077,103 @@ doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_has '----Next reset: unknown'
+
+# Followup 1: a mkfifo capture-setup failure fails closed — the producer is
+# never started and both reads report the setup failure visibly.
+start_case fail1_mkfifo_fail_closed
+standard_setup
+FAILBIN="$CASE_DIR/failbin"
+mkdir -p "$FAILBIN"
+printf '#!/bin/sh\nexit 1\n' > "$FAILBIN/mkfifo"
+chmod +x "$FAILBIN/mkfifo"
+PATH_PREPEND="$FAILBIN"
+run_plugin "$CASE_DIR/plugin.conf"
+PATH_PREPEND=""
+assert_menu_ok
+if [ -f "$CASE_DIR/ran" ]; then
+  bad "quota CLI ran despite capture setup failure"
+else
+  ok
+fi
+assert_has 'WARNING: status capture setup failed — command not run'
+assert_has 'doctor capture setup failed — command not run'
+assert_lacks '--Provider: '
+assert_has 'Refresh status | refresh=true'
+
+# The same fail-closed rule applies to the jq passes: a setup failure after
+# the reads completed warns visibly and omits only the affected details.
+start_case fail2_mkfifo_jq_fail_closed
+standard_setup
+FAILBIN="$CASE_DIR/failbin"
+mkdir -p "$FAILBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'cf=%s/mkfifo.count\n' "$CASE_DIR"
+  printf 'c=$(cat "$cf" 2>/dev/null || echo 0)\n'
+  printf 'c=$((c + 1))\n'
+  printf 'echo "$c" > "$cf"\n'
+  printf '[ "$c" -ge 3 ] && exit 1\n'
+  printf 'exec %s "$@"\n' "$MKFIFO_ABS"
+} > "$FAILBIN/mkfifo"
+chmod +x "$FAILBIN/mkfifo"
+PATH_PREPEND="$FAILBIN"
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+PATH_PREPEND=""
+assert_menu_ok
+if [ -f "$CASE_DIR/ran" ]; then
+  ok
+else
+  bad "reads should have completed before the jq setup failure"
+fi
+assert_has 'jq capture setup failed — status details omitted'
+assert_has 'jq capture setup failed — diagnostics details omitted'
+assert_has 'Best available pace: unavailable — status exit 0 with unusable output'
+assert_occurrences 2 'capture setup failed'
+
+# Followup 2: the producer group is cleaned on EVERY exit. A partial report
+# (exit 1 or 2) whose child holds the FIFO write end must not stall the
+# runner, and the child must not survive.
+start_case lc_partial_exit1_with_child
+standard_setup
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+stub_rc status 1
+printf '1\n' > "$CASE_DIR/status.child"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_has 'WARNING: status exit 1 (partial projection report)'
+assert_has 'Best available pace: +0.3'
+assert_has '--Provider: a'
+assert_member_gone
+
+start_case lc_partial_exit2_with_child
+standard_setup
+status_fixture '{"as_of":"2026-09-21T10:00:00Z","routing_enabled":false,"provider_only":false,"last_checked":"2026-09-21T09:59:30Z","providers":[{"provider":"a","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":-0.2}],"routes":[],"pending_targets":[],"problem":true,"errors":[]}'
+stub_rc status 2
+printf '1\n' > "$CASE_DIR/status.child"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status exit 2 (quota problem report)'
+assert_has '--Provider: a'
+assert_member_gone
+
+start_case lc_termresist_member_killed
+# A SIGTERM-ignoring member survives the watchdog's TERM; the cleanup's KILL
+# escalation removes it while the partial exit status is preserved.
+standard_setup
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+stub_rc status 1
+printf '1\n' > "$CASE_DIR/status.termresist"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status exit 1 (partial projection report)'
+assert_has 'Best available pace: +0.3'
+assert_member_gone
 
 # Fixed footer always present; menu never blank.
 start_case footer_fixed
