@@ -46,8 +46,17 @@ type statusProviderJSON struct {
 	OffPeak  bool   `json:"off_peak"`
 	Eligible bool   `json:"eligible"`
 	Reason   string `json:"reason"`
-	Windows  []statusWindowJSON `json:"windows"`
-	NextResetAt string          `json:"next_reset_at,omitempty"`
+	// Freshness explicitly classifies the saved snapshot's age at as_of
+	// against the mapping's freshness TTL: fresh, stale, or missing (never
+	// observed).
+	Freshness string `json:"freshness"`
+	// Signal is the provider's current use-it-or-lose-it pace recomputed from
+	// the saved snapshot at as_of (routing.ComputeSignal, the ranking's own
+	// formula). Diagnostic-only — present whether or not any gate engages,
+	// omitted when not computable, and a real zero stays present.
+	Signal      *float64           `json:"signal,omitempty"`
+	Windows     []statusWindowJSON `json:"windows"`
+	NextResetAt string             `json:"next_reset_at,omitempty"`
 	// Condition names the adapter's sanitized out-of-quota condition behind a
 	// fail-closed snapshot, windowless or not; empty otherwise.
 	Condition string `json:"condition,omitempty"`
@@ -77,13 +86,17 @@ type statusRouteJSON struct {
 
 // statusJSON is the normative top-level merged status shape:
 //
-//	{"routing_enabled":true,"last_checked":"...Z","providers":[],"routes":[],
-//	 "pending_targets":[],"problem":false,"errors":[],"error":"optional"}
+//	{"as_of":"...Z","routing_enabled":true,"last_checked":"...Z","providers":[],
+//	 "routes":[],"pending_targets":[],"problem":false,"errors":[],"error":"optional"}
 type statusJSON struct {
 	RoutingEnabled bool `json:"routing_enabled"`
 	// ProviderOnly marks the opt-in provider-only policy mode: routes are
 	// empty by design, never because data was silently dropped.
-	ProviderOnly   bool                 `json:"provider_only"`
+	ProviderOnly bool `json:"provider_only"`
+	// AsOf identifies the evaluation instant every time-sensitive projection
+	// in the envelope was computed at (freshness, signal, next reset); omitted
+	// only when no diagnostic evaluation produced a clock sample.
+	AsOf           string               `json:"as_of,omitempty"`
 	LastChecked    string               `json:"last_checked,omitempty"`
 	Providers      []statusProviderJSON `json:"providers"`
 	Routes         []statusRouteJSON    `json:"routes"`
@@ -98,6 +111,9 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 		RoutingEnabled: r.RoutingEnabled, ProviderOnly: r.ProviderOnly, Problem: r.Problem,
 		PendingTargets: append([]string{}, r.PendingTargets...), Error: r.Error,
 	}
+	if !r.AsOf.IsZero() {
+		out.AsOf = r.AsOf.UTC().Format(time.RFC3339)
+	}
 	if !r.LastChecked.IsZero() {
 		out.LastChecked = r.LastChecked.UTC().Format(time.RFC3339)
 	}
@@ -105,7 +121,7 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 		pj := statusProviderJSON{
 			Provider: p.Provider, Status: p.Status, Rank: p.Rank,
 			OffPeak: p.OffPeak, Eligible: p.Eligible, Reason: p.Reason,
-			Condition: p.Condition,
+			Condition: p.Condition, Freshness: string(p.Freshness), Signal: p.Signal,
 		}
 		if !p.CheckedAt.IsZero() {
 			pj.CheckedAt = p.CheckedAt.UTC().Format(time.RFC3339)

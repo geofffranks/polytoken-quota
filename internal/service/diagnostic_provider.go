@@ -118,17 +118,24 @@ type ProviderProjection struct {
 	Availability state.Availability `json:"availability"`
 	// Quota is the row's aggregated quota axis, exposed so presentation can
 	// name a quota-exhausted cause instead of the generic disabled text.
-	Quota          state.Quota         `json:"quota,omitempty"`
-	EffectiveMode  state.Mode          `json:"effective_mode"`
-	ManualDisabled bool                `json:"manual_disabled"`
-	Reason         string              `json:"reason"`
-	CheckedAt      time.Time           `json:"checked_at,omitempty"`
-	Freshness      Freshness           `json:"freshness"`
-	Windows        []QuotaWindowReport `json:"windows,omitempty"`
-	NextResetAt    *time.Time          `json:"next_reset_at,omitempty"`
-	LatestAttempt  *QuotaAttemptReport `json:"latest_attempt,omitempty"`
-	Usage          *UsageSummaryReport `json:"usage,omitempty"`
-	ResetCredits   *ResetCreditReport  `json:"reset_credits,omitempty"`
+	Quota          state.Quota `json:"quota,omitempty"`
+	EffectiveMode  state.Mode  `json:"effective_mode"`
+	ManualDisabled bool        `json:"manual_disabled"`
+	Reason         string      `json:"reason"`
+	CheckedAt      time.Time   `json:"checked_at,omitempty"`
+	Freshness      Freshness   `json:"freshness"`
+	// Signal is the provider's current use-it-or-lose-it pace, computed from
+	// the saved quota snapshot at the projection's AsOf via
+	// routing.ComputeSignal — the same formula the ranking and the signal gate
+	// use, evaluated now. Diagnostic-only: it is computed whether or not any
+	// gate engages, and is nil (omitted) when no snapshot exists or no window
+	// qualifies, never fabricated as zero.
+	Signal        *float64            `json:"signal,omitempty"`
+	Windows       []QuotaWindowReport `json:"windows,omitempty"`
+	NextResetAt   *time.Time          `json:"next_reset_at,omitempty"`
+	LatestAttempt *QuotaAttemptReport `json:"latest_attempt,omitempty"`
+	Usage         *UsageSummaryReport `json:"usage,omitempty"`
+	ResetCredits  *ResetCreditReport  `json:"reset_credits,omitempty"`
 	// Gate carries the provider-only gate attribution; nil when quota holds
 	// no claim over this provider's enabled field (including legacy claims
 	// recorded before axis attribution, which keep today's presentation).
@@ -195,6 +202,10 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			entry.Freshness = classifyFreshness(ps.QuotaSnapshot.CheckedAt, ttl, asOf)
 			entry.Windows = windowsReport(ps.QuotaSnapshot)
 			entry.NextResetAt = quota.NextQuotaResetAt(ps.QuotaSnapshot.Windows, asOf)
+			if signal, ok := routing.ComputeSignal(ps.QuotaSnapshot, asOf); ok {
+				s := signal
+				entry.Signal = &s
+			}
 		}
 		if ps.QuotaAttempt != nil {
 			entry.LatestAttempt = &QuotaAttemptReport{
@@ -346,6 +357,7 @@ func cloneProviders(in []ProviderProjection) []ProviderProjection {
 		out[i] = in[i]
 		out[i].Windows = cloneWindows(in[i].Windows)
 		out[i].NextResetAt = cloneTime(in[i].NextResetAt)
+		out[i].Signal = cloneFloat(in[i].Signal)
 		if in[i].LatestAttempt != nil {
 			attempt := *in[i].LatestAttempt
 			out[i].LatestAttempt = &attempt

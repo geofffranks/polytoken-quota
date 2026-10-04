@@ -55,6 +55,18 @@ type MergedStatusProvider struct {
 	// Status: the fail-closed row axis collapses windowless snapshots to
 	// unavailable, losing the unknown distinction the QUOTA fallback needs.
 	Availability quota.QuotaAvailability `json:"availability,omitempty"`
+	// Freshness classifies the saved quota snapshot's age against the
+	// mapping's freshness TTL at the report's AsOf: fresh, stale, or missing
+	// (never observed). Always one of the three — never empty in a projected
+	// report.
+	Freshness Freshness `json:"freshness"`
+	// Signal is the provider's current use-it-or-lose-it pace recomputed from
+	// the saved quota snapshot at AsOf (routing.ComputeSignal — the ranking's
+	// own formula). Diagnostic-only: computed whether or not any gate engages
+	// the provider, and nil (omitted in JSON) when no snapshot exists or no
+	// window qualifies, never fabricated as zero. Distinct from Gate.Signal,
+	// which records the gate claim's observation.
+	Signal *float64 `json:"signal,omitempty"`
 	// Gate carries the provider-only gate attribution (axis, observed pace,
 	// threshold, engaged revision); nil when quota holds no attributed claim.
 	Gate *GateReport `json:"gate,omitempty"`
@@ -83,12 +95,15 @@ type SkippedModel struct {
 
 // MergedStatusReport is the result of the merged status command. LastChecked
 // is the max snapshot CheckedAt across providers (zero when never observed).
+// AsOf is the single clock sample every time-sensitive projection in the
+// report was evaluated at (freshness, signal, next reset).
 type MergedStatusReport struct {
 	RoutingEnabled bool `json:"routing_enabled"`
 	// ProviderOnly is true when the loaded policy is the opt-in provider-only
 	// mode: chain/route projections are not applicable and the routes section
 	// is empty by design, never because data was silently dropped.
 	ProviderOnly   bool                   `json:"provider_only"`
+	AsOf           time.Time              `json:"as_of,omitempty"`
 	LastChecked    time.Time              `json:"last_checked,omitempty"`
 	Providers      []MergedStatusProvider `json:"providers,omitempty"`
 	Routes         []MergedStatusRoute    `json:"routes,omitempty"`
@@ -102,7 +117,7 @@ type MergedStatusReport struct {
 // Like the other selectors it is read-only and returns copies of slice data.
 // A fatal error yields a report carrying only the sanitized error string.
 func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
-	report := MergedStatusReport{Error: s.fatalError}
+	report := MergedStatusReport{AsOf: s.asOf, Error: s.fatalError}
 	if s.fatalError != "" {
 		return report
 	}
@@ -153,6 +168,8 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 			Gate:         cloneGateReport(provider.Gate),
 			Condition:    provider.Condition,
 			Availability: provider.SnapshotAvailability,
+			Freshness:    provider.Freshness,
+			Signal:       cloneFloat(provider.Signal),
 		}
 		// Observed-ness rides checked_at: fall back to the latest attempt's
 		// time when no snapshot exists, so observed-but-failed rows stay
