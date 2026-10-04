@@ -33,7 +33,9 @@ set -u
 # --- tunables ---------------------------------------------------------------
 
 CMD_TIMEOUT=10          # seconds per subprocess (SIGTERM; SIGKILL 1s later)
-OUTPUT_LIMIT=262144     # bytes of subprocess stdout kept
+JQ_TIMEOUT=5            # seconds per jq pass
+OUTPUT_LIMIT=262144     # bytes of subprocess stdout kept (enforced during capture)
+BUDGET_SECONDS=50       # outer refresh budget; later stages skip when exhausted
 BAR_WIDTH=20            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
@@ -56,13 +58,14 @@ WARN_REASONS=""
 CONFIG_ERROR=""
 
 # status digest state (defaults keep `set -u` safe on every path)
-COMPAT=0; STPROBLEM=0; STTOPERR=0; STERRS=0; STPENDING=0
+COMPAT=0; STPROBLEM=0; STTOPERR=0; STERRS=0; STPENDING=0; STINVALID=0
 CAND=0; SIG=""; DIRV="none"; REDRULE=0; STATUS_OK=0; STATUS_PARSED=0
 D_FIND=0; D_ACT=0; D_REC=0; DOCTOR_OK=0; DOCTOR_PARSED=0
 QUOTA_BIN_CFG=""; POLYTOKEN_BIN_CFG=""; JQ_BIN_CFG=""
 QUOTA_BIN_CFG_SET=""; POLYTOKEN_BIN_CFG_SET=""; JQ_BIN_CFG_SET=""
 QUOTA_BIN=""; POLYTOKEN_BIN=""; JQ_BIN=""
 STATUS_RC=""; DOCTOR_RC=""
+BUDGET_DEADLINE=0
 
 warn() {
   WARN_REASONS="${WARN_REASONS:+$WARN_REASONS; }$1"
@@ -76,27 +79,35 @@ fail_config() {
 # --- temp workspace ---------------------------------------------------------
 
 TMPDIR_LOCAL="$(mktemp -d "${TMPDIR:-/tmp}/polytoken-quota-swiftbar.XXXXXX")" || TMPDIR_LOCAL=""
+OWNED_GROUPS_FILE="$TMPDIR_LOCAL/owned-groups"
 cleanup() {
+  # Plugin termination: kill every process group this run still owns (best
+  # effort; groups whose members already exited are gone), then remove the
+  # private workspace. SIGKILL of the plugin itself cannot be trapped — every
+  # trappable termination path goes through here.
+  if [ -n "$TMPDIR_LOCAL" ] && [ -f "$OWNED_GROUPS_FILE" ]; then
+    while IFS= read -r g; do
+      case "$g" in ''|*[!0-9]*) continue ;; esac
+      kill -KILL "-$g" 2>/dev/null
+    done < "$OWNED_GROUPS_FILE"
+  fi
   [ -n "$TMPDIR_LOCAL" ] && rm -rf "$TMPDIR_LOCAL"
 }
 trap cleanup EXIT
-
-# --- short sanitize for error lines (fixed labels always precede the result) --
-
-sanitize_short() {
-  printf '%s' "$1" | tr '\000-\037' ' ' | tr '\177|' ' ?' | cut -c 1-120
-}
 
 # --- config file (strict, never sourced) ------------------------------------
 # Optional sibling file `$CONFIG_NAME` (or the path in $POLYTOKEN_SWIFTBAR_CONFIG).
 # Format: `key=value` lines, `#` comments, blank lines. Allowed keys:
 #   quota_bin / polytoken_bin / jq_bin — executable name or absolute path.
-# Values are used only as quoted command words; the file is never sourced,
-# evaluated, or echoed raw, and an invalid entry fails visibly instead of
-# falling back.
+# Values are used only as quoted command words; the file is never sourced or
+# evaluated, and an invalid entry fails visibly instead of falling back.
+# Diagnostics use a fixed vocabulary: the line number and, for value problems,
+# the known key only. Rejected lines, unsupported key names, override values,
+# and file paths are never echoed — diagnostics are omission, not sanitized
+# echo, because sanitized output can still leak content.
 
 read_config() {
-  local conf="$1" line key val size
+  local conf="$1" line key val size n=0
   size=$(wc -c < "$conf" 2>/dev/null) || size=0
   case "$size" in ''|*[!0-9]*) size=0 ;; esac
   if [ "$size" -gt 65536 ]; then
@@ -104,34 +115,35 @@ read_config() {
     return 1
   fi
   while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
     case "$line" in
       ''|'#'*) continue ;;
     esac
     case "$line" in
       *=*) key=${line%%=*}; val=${line#*=} ;;
-      *) fail_config "config line without key=value: $(sanitize_short "$line")"; return 1 ;;
+      *) fail_config "config line $n is not in key=value form"; return 1 ;;
     esac
     key=${key#"${key%%[![:space:]]*}"}
     key=${key%"${key##*[![:space:]]}"}
     val=${val#"${val%%[![:space:]]*}"}
     val=${val%"${val##*[![:space:]]}"}
-    case "$val" in
-      *[[:cntrl:]]*) fail_config "config value for $(sanitize_short "$key") contains control characters"; return 1 ;;
-      '') fail_config "config value for $(sanitize_short "$key") is empty"; return 1 ;;
-    esac
     case "$key" in
       quota_bin|polytoken_bin|jq_bin) ;;
-      *) fail_config "unknown config key: $(sanitize_short "$key")"; return 1 ;;
+      *) fail_config "unsupported config key at line $n"; return 1 ;;
+    esac
+    case "$val" in
+      *[[:cntrl:]]*) fail_config "config value for $key at line $n contains control characters"; return 1 ;;
+      '') fail_config "config value for $key at line $n is empty"; return 1 ;;
     esac
     case "$key" in
       quota_bin)
-        if [ "$QUOTA_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key: quota_bin"; return 1; fi
+        if [ "$QUOTA_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key quota_bin at line $n"; return 1; fi
         QUOTA_BIN_CFG_SET=1; QUOTA_BIN_CFG=$val ;;
       polytoken_bin)
-        if [ "$POLYTOKEN_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key: polytoken_bin"; return 1; fi
+        if [ "$POLYTOKEN_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key polytoken_bin at line $n"; return 1; fi
         POLYTOKEN_BIN_CFG_SET=1; POLYTOKEN_BIN_CFG=$val ;;
       jq_bin)
-        if [ "$JQ_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key: jq_bin"; return 1; fi
+        if [ "$JQ_BIN_CFG_SET" = 1 ]; then fail_config "duplicate config key jq_bin at line $n"; return 1; fi
         JQ_BIN_CFG_SET=1; JQ_BIN_CFG=$val ;;
     esac
   done < "$conf"
@@ -173,40 +185,124 @@ resolve_exec_check() {
 }
 
 # --- bounded subprocess runner (no GNU timeout) -------------------------------
+# Each invocation runs inside a job-control subshell (`set -m`), so the
+# command and every descendant it spawns form one process group owned by this
+# plugin. The group — not a single PID — is signalled on deadline, and again
+# after a successful exit if descendants linger; the plugin's EXIT trap kills
+# any group still owned. The deadline is recorded in the private workspace
+# independent of the command's exit status: a command that traps SIGTERM and
+# exits 0 at the deadline is still reported as a timeout, and a command that
+# naturally exits 143/137 is not. stdout flows through a FIFO into a
+# `head -c` collector that stops reading one byte past the budget, so an
+# unlimited producer is stopped early by SIGPIPE and cannot fill the disk;
+# overflow beyond the budget is then reported visibly.
 
 run_bounded() {
   # $1 = timeout seconds, $2 = stdout capture file, rest = command.
-  # Returns 124 on timeout (SIGTERM or SIGKILL), else the command's status.
-  local t=$1 out=$2 rc pid watchdog
+  # Returns 124 when the deadline fired, else the command's status.
+  local t=$1 cap=$2 jpid coll pgid wpid outerpg rc fire fifo
   shift 2
-  : > "$out"
-  "$@" > "$out" 2>/dev/null < /dev/null &
-  pid=$!
-  # Watchdog: TERM at the deadline, KILL 1s later. stdio is detached so an
-  # orphaned watchdog sleep can never hold the caller's output pipe. If the
-  # command exits first the watchdog is killed; its sleeping child may still
-  # fire one no-op kill on a dead PID, which fails silently.
-  ( sleep "$t" && kill -TERM "$pid" 2>/dev/null
-    sleep 1 && kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
-  watchdog=$!
-  wait "$pid" 2>/dev/null
+  : > "$cap"
+  fire="$TMPDIR_LOCAL/fired.$RANDOM.$RANDOM.$RANDOM"
+  fifo="$TMPDIR_LOCAL/pipe.$RANDOM.$RANDOM"
+  if ! mkfifo "$fifo" 2>/dev/null; then
+    # No FIFOs: fall back to direct capture (still deadline-bounded).
+    "$@" > "$cap" 2>/dev/null < /dev/null
+    return $?
+  fi
+  (
+    set -m 2>/dev/null
+    exec 2>/dev/null    # silence job-control termination notices
+    # The producer, its FIFO reader (head, the in-flight byte cap), and the
+    # watchdog are separate jobs and therefore separate owned process groups.
+    # Waiting on the producer alone means a descendant that inherited the FIFO
+    # write end cannot stall the producer's exit status; the group kill below
+    # releases the reader.
+    "$@" < /dev/null > "$fifo" 2>/dev/null &
+    jpid=$!
+    head -c $((OUTPUT_LIMIT + 1)) "$fifo" > "$cap" 2>/dev/null &
+    coll=$!
+    # Under job control a simple background command leads its own process
+    # group named by the child's PID. ps cannot be queried for it: a fast
+    # producer may already have exited, so detect job control by comparing
+    # against the outer shell's group and confirming the group exists.
+    outerpg=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+    pgid=$jpid
+    case "$outerpg" in ''|*[!0-9]*) outerpg="" ;; esac
+    if [ -n "$outerpg" ] && [ "$pgid" = "$outerpg" ]; then
+      pgid=""
+    fi
+    if [ -n "$pgid" ] && ! kill -0 "-$pgid" 2>/dev/null; then
+      pgid=""
+    fi
+    if [ -n "$pgid" ]; then
+      printf '%s\n' "$pgid" >> "$OWNED_GROUPS_FILE"
+    fi
+    ( sleep "$t"
+      printf 'deadline-fired' > "$fire" 2>/dev/null
+      if [ -n "$pgid" ]; then kill -TERM "-$pgid" 2>/dev/null; else kill -TERM "$jpid" 2>/dev/null; fi
+      sleep 1
+      if [ -n "$pgid" ]; then kill -KILL "-$pgid" 2>/dev/null; else kill -KILL "$jpid" 2>/dev/null; fi
+    ) >/dev/null 2>&1 &
+    wpid=$!
+    wait "$jpid" 2>/dev/null
+    rc=$?
+    # The watchdog is never needed again: kill it and its whole group, which
+    # takes its sleeping child with it (deterministic cleanup, no orphans).
+    if kill -0 "$wpid" 2>/dev/null; then
+      if [ -n "$pgid" ]; then
+        kill -TERM "-$wpid" 2>/dev/null
+      else
+        kill -TERM "$wpid" 2>/dev/null
+      fi
+    fi
+    wait "$wpid" 2>/dev/null
+    # A successful producer may still have left descendants in the owned group
+    # (holding the FIFO write end or detached); clean the group up too, which
+    # also releases the collector.
+    if [ "$rc" -eq 0 ] && [ -n "$pgid" ] && kill -0 "-$pgid" 2>/dev/null; then
+      kill -TERM "-$pgid" 2>/dev/null
+      sleep 1
+      kill -KILL "-$pgid" 2>/dev/null
+    fi
+    wait "$coll" 2>/dev/null
+    exit "$rc"
+  ) 2>/dev/null
   rc=$?
-  kill "$watchdog" 2>/dev/null
-  wait "$watchdog" 2>/dev/null
-  if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then
+  if [ -s "$fire" ]; then
     return 124
   fi
   return "$rc"
 }
 
-cap_output() {
-  # Bound a capture file to $OUTPUT_LIMIT bytes.
+cap_check() {
+  # Truncate a capture file to OUTPUT_LIMIT after the run (head already
+  # stopped the producer at OUTPUT_LIMIT+1 during capture). Returns 0 when
+  # overflow occurred so the caller can report it visibly.
   local f=$1 size
   size=$(wc -c < "$f" 2>/dev/null) || size=0
   case "$size" in ''|*[!0-9]*) size=0 ;; esac
   if [ "$size" -gt "$OUTPUT_LIMIT" ]; then
     head -c "$OUTPUT_LIMIT" "$f" > "$f.bounded" && mv "$f.bounded" "$f"
+    return 0
   fi
+  return 1
+}
+
+# --- outer refresh budget ------------------------------------------------------
+
+budget_init() {
+  local now
+  now=$(date +%s 2>/dev/null) || now=0
+  case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  BUDGET_DEADLINE=$((now + BUDGET_SECONDS))
+}
+
+budget_remaining() {
+  local now
+  now=$(date +%s 2>/dev/null) || now=0
+  case "$now" in ''|*[!0-9]*) now=0 ;; esac
+  echo $((BUDGET_DEADLINE - now))
 }
 
 # --- jq programs ---------------------------------------------------------------
@@ -250,21 +346,49 @@ def window_pct($w):
             or ( $w.used != null and isnum($w.used) and $w.used < 0 )
             or ( $w.limit != null and (isnum($w.limit)|not) )
             or ( $w.limit != null and isnum($w.limit) and $w.limit <= 0 )) };
-def candidates($ps):
+# Row validity: typed/enum checks for the fields pace and unavailability
+# decisions rely on. $compat suppresses the freshness check when the connected
+# CLI predates the additive fields (their absence is expected there, not a
+# data error). A list of problem strings; empty means the row is valid.
+def row_problems($compat):
+  [ (if ((.provider|type) == "string" and (.provider|length) > 0)
+     then empty else "missing provider name" end),
+    (if .status == null then "missing consolidated status"
+     elif .status == "enabled" or .status == "gated" or .status == "disabled" or .status == "available" or .status == "unavailable"
+     then empty else "unsupported consolidated status" end),
+    (if $compat or .freshness == "fresh" or .freshness == "stale" or .freshness == "missing"
+     then empty else "missing or unsupported freshness" end),
+    (if .availability == null then empty
+     elif .availability == "available" or .availability == "unavailable" or .availability == "unknown"
+     then empty else "unsupported availability" end),
+    (if .status == "unavailable" and .availability == "available"
+     then "consolidated status contradicts availability" else empty end),
+    (if (.eligible|type) == "boolean" then empty else "missing or non-boolean eligibility" end),
+    (if (.rank|type) == "number" then empty else "missing or non-numeric rank" end),
+    (if .signal == null or ((.signal|type) == "number") then empty else "non-numeric signal" end)];
+def row_valid($compat): ((row_problems($compat)) | length) == 0;
+def compat_mode($r):
+  ([$r.providers[]? | select((.freshness|type) == "string")] | length) as $freshrows
+  | (($r.providers|length) > 0 and $freshrows == 0)
+    or ($freshrows == 0 and ($r.providers|length) == 0
+        and (($r.as_of // "") == "") and (($r.error // "") == ""));
+def candidates($ps; $compat):
   [$ps[]?
-   | select(.freshness == "fresh"
+   | select(.status == "available"
             and .availability == "available"
             and .eligible == true
-            and .status != "disabled"
-            and .status != "gated"
-            and isnum(.signal))]
+            and isnum(.signal)
+            and .freshness == "fresh"
+            and row_valid($compat))]
   | sort_by([(-.signal), .rank, .provider]);
-def red_rule($ps):
-  (([$ps[]? | select(.status != "disabled")] | length) > 0)
+def red_rule($ps; $compat):
+  (([$ps[]? | select(row_valid($compat) and .status != "disabled")] | length) > 0)
   and (([$ps[]?
-         | select(.status != "disabled"
+         | select(row_valid($compat)
+                  and .status != "disabled"
                   and (.freshness != "fresh" or .availability != "unavailable"))]
-        | length) == 0);
+        | length) == 0)
+  and (([$ps[]? | select(row_valid($compat)|not)] | length) == 0);
 def kind($c):
   if $c == "target-pending" or $c == "quota-reconcile-pending" then "reconciliation/pending"
   elif $c == "journal-incomplete" then "journal/publication"
@@ -279,13 +403,14 @@ JQ_STATUS_DIGEST="$JQ_HELPERS"'
 | if ($r|type) != "object" or ($r.providers|type) != "array"
   then "shape=bad"
   else
-    ([$r.providers[]? | select((.freshness|type) == "string")] | length) as $freshrows
-    | (if ($r.providers|length) > 0 and $freshrows == 0 then "compat=1" else "compat=0" end),
+    compat_mode($r) as $compat
+    | (if $compat then "compat=1" else "compat=0" end),
       (if $r.problem == true then "problem=1" else "problem=0" end),
       (if (($r.error // "") != "") then "toperr=1" else "toperr=0" end),
       "errs=\([$r.errors[]?] | length)",
       "pending=\([$r.pending_targets[]?] | length)",
-      (candidates($r.providers)) as $cands
+      "invalid=\([$r.providers[]? | select(row_valid($compat)|not)] | length)",
+      (candidates($r.providers; $compat)) as $cands
       | (if ($cands|length) > 0 then
            "cand=1",
            "sig=\(fmtsig($cands[0].signal))",
@@ -293,7 +418,7 @@ JQ_STATUS_DIGEST="$JQ_HELPERS"'
          else
            "cand=0", "sig=unknown", "dir=none"
          end),
-      (if red_rule($r.providers) then "red=1" else "red=0" end)
+      (if red_rule($r.providers; $compat) then "red=1" else "red=0" end)
   end
 '
 
@@ -302,8 +427,10 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
 | if ($r|type) != "object" or ($r.providers|type) != "array" then "Status output has an unexpected shape.\(lit)"
   else
     ($r.providers // []) as $ps
-    | (candidates($ps)) as $cands
-    | (red_rule($ps)) as $isred
+    | compat_mode($r) as $compat
+    | ([$ps[]? | select(row_valid($compat)|not)] | length) as $invrows
+    | (candidates($ps; $compat)) as $cands
+    | (red_rule($ps; $compat)) as $isred
     | (if ($r.as_of|s2) != "unknown" then "Signals as of: \(($r.as_of|safe)) (UTC)\(lit)" else empty end),
       "---",
       (if ($cands|length) > 0 then
@@ -317,10 +444,16 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          | ([$ps[]? | select(.freshness == "stale")] | length) as $stale
          | ([$ps[]? | select(.freshness == "missing")] | length) as $miss
          | ([$ps[]? | select(isnum(.signal)|not)] | length) as $nosig
-         | "Best available pace: unavailable — no fresh, available, eligible provider with a computable signal (gated: \($g); disabled: \($d); unavailable: \($u); stale: \($stale); never observed: \($miss); no signal: \($nosig))\(lit)"
+         | "Best available pace: unavailable — no fresh, available, eligible provider with a computable signal (gated: \($g); disabled: \($d); unavailable: \($u); stale: \($stale); never observed: \($miss); no signal: \($nosig); invalid rows: \($invrows))\(lit)"
        end),
       (if $isred then
          "Observed unavailability: every quota-observed, non-disabled provider is fresh and explicitly unavailable — observed state, not necessarily quota exhaustion.\(lit)"
+       else empty end),
+      (if $compat then
+         "Note: connected CLI does not expose signal/freshness fields; provider details are shown, pace is unavailable.\(lit)"
+       else empty end),
+      (if $invrows > 0 then
+         "Row validity: \($invrows) provider row(s) with invalid or contradictory data are excluded from pace and unavailability decisions; valid details still show.\(lit)"
        else empty end),
       "---",
       "Providers: \($ps|length)\(lit)",
@@ -328,10 +461,13 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
       ($ps[]? | . as $p
        | "--Provider: \(($p.provider|safe))\(lit)",
          "----State: \(($p.status|s2))\(if (($p.reason // "")|safe) != "" then " — \(($p.reason|safe))" else "" end)\(lit)",
+         (if row_valid($compat)|not then
+            "----Validity: invalid row (\([row_problems($compat)[]|safe]|join("; "))) — excluded from pace and unavailability decisions\(lit)"
+          else empty end),
          "----Availability: \(($p.availability|s2)) (observed snapshot availability, distinct from routing eligibility)\(lit)",
          (if (($p.condition // "")|safe) != "" then "----Condition: \(($p.condition|safe))\(lit)" else empty end),
          "----Checked: \(($p.checked_at|s2)) — freshness \(($p.freshness|s2))\(lit)",
-         (if ($p.next_reset_at|s2) != "unknown" then "----Next reset: \(($p.next_reset_at|safe)) (UTC)\(lit)" else empty end),
+         "----Next reset: \(($p.next_reset_at|s2))\(if ($p.next_reset_at|s2) != "unknown" then " (UTC)" else "" end)\(lit)",
          "----Rank: \(($p.rank|s2)) — off-peak: \(if $p.off_peak == true then "yes" elif $p.off_peak == false then "no" else "unknown" end)\(lit)",
          "----Routing eligibility: \(if $p.eligible == true then "eligible" elif $p.eligible == false then "not eligible" else "unknown" end)\(lit)",
          (if isnum($p.signal) then
@@ -341,17 +477,17 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
           end),
          (($p.windows // [])[]? | . as $w
           | window_pct($w) as $wp
-          | (if $wp.pct == null then "unknown" else "\(fmt2($wp.pct))%" end) as $vispct
-          | (if $wp.pct != null and $wp.pct > 100 then " (over limit; raw value retained above)" else "" end) as $over
+          | (if $wp.pct == null then "unknown" else "\($wp.pct|tostring)%" end) as $vispct
+          | (if $wp.pct != null and $wp.pct > 100 then " (over limit; raw value retained)" else "" end) as $over
           | (if $wp.bad then " (invalid supplied numbers ignored)" else "" end) as $badnote
           | (if isnum($w.usage_percent) and isnum($w.used) and isnum($w.limit) and $w.limit > 0 and $w.used >= 0
                and ((($w.usage_percent) - (($w.used/$w.limit)*100))|fabs) > '$PCT_DIFF_LIMIT'
              then " (reported percent disagrees with used/limit)" else "" end) as $disagree
-          | "----Window: \(($w.name|s2)) [\(if $wp.pct == null then " unknown " else bar($wp.pct) end)] \($vispct)\($over)\($badnote)\(lit)",
+          | "----Window: \(($w.name|s2)) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \($vispct)\($over)\($badnote)\(lit)",
             "------Window name: \(($w.name|s2))\(lit)",
             "------Used: \(if isnum($w.used) then ($w.used|tostring) elif $w.used == null then "unknown" else "\(($w.used|safe)) (non-numeric)" end)\(lit)",
             "------Limit: \(if isnum($w.limit) then ($w.limit|tostring) elif $w.limit == null then "unknown" else "\(($w.limit|safe)) (non-numeric)" end)\(lit)",
-            "------Usage: \(if isnum($w.usage_percent) then "\(fmt2($w.usage_percent))% (reported)" elif $wp.src == "derived from used/limit" then "\(fmt2($wp.pct))% (derived from used/limit)" else "unknown" end)\($disagree)\(lit)",
+            "------Usage: \(if isnum($w.usage_percent) then "\($w.usage_percent|tostring)% (reported)" elif $wp.src == "derived from used/limit" then "\($wp.pct|tostring)% (derived from used/limit)" else "unknown" end)\($disagree)\(lit)",
             (if ($w.reset_at|s2) != "unknown" then "------Resets: \(($w.reset_at|safe)) (UTC)\(lit)" else "------Resets: unknown\(lit)" end))),
       "---",
       (if ($r.provider_only == true) then
@@ -416,7 +552,7 @@ JQ_DOCTOR_BODY="$JQ_HELPERS"'
 CONFIG_PATH="${POLYTOKEN_SWIFTBAR_CONFIG:-}"
 if [ -n "$CONFIG_PATH" ]; then
   if [ ! -f "$CONFIG_PATH" ] || [ ! -r "$CONFIG_PATH" ]; then
-    fail_config "override configuration file not readable: $(sanitize_short "$CONFIG_PATH")"
+    fail_config "override configuration file is not readable"
   fi
 else
   SCRIPT_PATH=${BASH_SOURCE[0]:-$0}
@@ -441,23 +577,34 @@ fi
 
 # quota CLI
 if [ -n "$QUOTA_BIN_CFG" ]; then
-  QUOTA_BIN=$(resolve_exec_check "$QUOTA_BIN_CFG") || warn "configured quota_bin override is not executable: $(sanitize_short "$QUOTA_BIN_CFG")"
+  QUOTA_BIN=$(resolve_exec_check "$QUOTA_BIN_CFG") || warn "configured quota_bin override is not executable"
 else
   QUOTA_BIN=$(resolve_exec_check "polytoken-quota") || warn "polytoken-quota CLI not found (install it or set quota_bin)"
 fi
 # jq
 if [ -n "$JQ_BIN_CFG" ]; then
-  JQ_BIN=$(resolve_exec_check "$JQ_BIN_CFG") || warn "configured jq_bin override is not executable: $(sanitize_short "$JQ_BIN_CFG")"
+  JQ_BIN=$(resolve_exec_check "$JQ_BIN_CFG") || warn "configured jq_bin override is not executable"
 else
   JQ_BIN=$(resolve_exec_check "jq") || warn "required dependency not found: jq"
 fi
-# polytoken prerequisite (mandatory for the quota CLI at startup)
+# polytoken prerequisite (mandatory for the quota CLI at startup). The quota
+# CLI resolves Polytoken itself from POLYTOKEN_BINARY or PATH, so the plugin
+# exports the resolved path for both reads. Precedence: the config override
+# wins over an inherited POLYTOKEN_BINARY, which is validated and passed
+# through unchanged; with neither set, the search result is exported so a
+# minimal GUI PATH still works.
 if [ -n "$POLYTOKEN_BIN_CFG" ]; then
-  POLYTOKEN_BIN=$(resolve_exec_check "$POLYTOKEN_BIN_CFG") || warn "configured polytoken_bin override is not executable: $(sanitize_short "$POLYTOKEN_BIN_CFG")"
+  POLYTOKEN_BIN=$(resolve_exec_check "$POLYTOKEN_BIN_CFG") || warn "configured polytoken_bin override is not executable"
+  if [ -n "$POLYTOKEN_BIN" ]; then
+    export POLYTOKEN_BINARY="$POLYTOKEN_BIN"
+  fi
 elif [ -n "${POLYTOKEN_BINARY:-}" ]; then
-  POLYTOKEN_BIN=$(resolve_exec_check "$POLYTOKEN_BINARY") || warn "POLYTOKEN_BINARY override is not executable: $(sanitize_short "$POLYTOKEN_BINARY")"
+  POLYTOKEN_BIN=$(resolve_exec_check "$POLYTOKEN_BINARY") || warn "POLYTOKEN_BINARY override is not executable"
 else
   POLYTOKEN_BIN=$(resolve_exec_check "polytoken") || warn "polytoken prerequisite not found (the quota CLI requires it at startup; set polytoken_bin)"
+  if [ -n "$POLYTOKEN_BIN" ]; then
+    export POLYTOKEN_BINARY="$POLYTOKEN_BIN"
+  fi
 fi
 
 # --- reads ---------------------------------------------------------------------
@@ -465,19 +612,35 @@ fi
 STATUS_FILE="$TMPDIR_LOCAL/status.json"
 DOCTOR_FILE="$TMPDIR_LOCAL/doctor.json"
 
+budget_init
+
 if [ -n "$QUOTA_BIN" ] && [ -n "$JQ_BIN" ] && [ -n "$POLYTOKEN_BIN" ]; then
-  if run_bounded "$CMD_TIMEOUT" "$STATUS_FILE" "$QUOTA_BIN" status --json; then
-    STATUS_RC=0
+  if [ "$(budget_remaining)" -ge $((CMD_TIMEOUT + 2)) ]; then
+    if run_bounded "$CMD_TIMEOUT" "$STATUS_FILE" "$QUOTA_BIN" status --json; then
+      STATUS_RC=0
+    else
+      STATUS_RC=$?
+    fi
   else
-    STATUS_RC=$?
+    STATUS_RC=nobudget
+    warn "refresh budget exhausted before the status read"
   fi
-  cap_output "$STATUS_FILE"
-  if run_bounded "$CMD_TIMEOUT" "$DOCTOR_FILE" "$QUOTA_BIN" doctor --json; then
-    DOCTOR_RC=0
+  if cap_check "$STATUS_FILE"; then
+    warn "status output exceeded the capture limit and was truncated"
+  fi
+  if [ "$STATUS_RC" != nobudget ] && [ "$(budget_remaining)" -ge $((CMD_TIMEOUT + 2)) ]; then
+    if run_bounded "$CMD_TIMEOUT" "$DOCTOR_FILE" "$QUOTA_BIN" doctor --json; then
+      DOCTOR_RC=0
+    else
+      DOCTOR_RC=$?
+    fi
   else
-    DOCTOR_RC=$?
+    DOCTOR_RC=nobudget
+    warn "refresh budget exhausted before the diagnostics read"
   fi
-  cap_output "$DOCTOR_FILE"
+  if cap_check "$DOCTOR_FILE"; then
+    warn "diagnostics output exceeded the capture limit and was truncated"
+  fi
 else
   STATUS_RC="skipped"
   DOCTOR_RC="skipped"
@@ -492,6 +655,7 @@ rc_text() {
     2) printf 'exit 2 (quota problem report)' ;;
     124) printf 'timed out' ;;
     skipped) printf 'not run (missing dependency)' ;;
+    nobudget) printf 'not run (refresh budget exhausted)' ;;
     *) printf 'unexpected exit %s' "$1" ;;
   esac
 }
@@ -502,15 +666,15 @@ case "$STATUS_RC" in
   1) warn "status $(rc_text 1)" ;;
   2) warn "status $(rc_text 2)" ;;
   124) warn "status command timed out after ${CMD_TIMEOUT}s" ;;
-  0|skipped) : ;;
+  0|skipped|nobudget) : ;;
   *) warn "status command failed ($(rc_text "$STATUS_RC"))" ;;
 esac
 
 STATUS_DIGEST="$TMPDIR_LOCAL/status.digest"
 STATUS_BODY="$TMPDIR_LOCAL/status.body"
 
-if [ "$STATUS_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
-  if run_bounded 5 "$STATUS_DIGEST" "$JQ_BIN" -r "$JQ_STATUS_DIGEST" "$STATUS_FILE" 2>/dev/null && [ -s "$STATUS_DIGEST" ]; then
+if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+  if run_bounded "$JQ_TIMEOUT" "$STATUS_DIGEST" "$JQ_BIN" -r "$JQ_STATUS_DIGEST" "$STATUS_FILE" 2>/dev/null && [ -s "$STATUS_DIGEST" ]; then
     BADSHAPE=0
     while IFS= read -r dline; do
       case "$dline" in
@@ -520,6 +684,7 @@ if [ "$STATUS_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
         toperr=1) STTOPERR=1 ;;
         errs=*) STERRS=${dline#errs=} ;;
         pending=*) STPENDING=${dline#pending=} ;;
+        invalid=*) STINVALID=${dline#invalid=} ;;
         cand=1) CAND=1 ;;
         sig=*) SIG=${dline#sig=} ;;
         dir=*) DIRV=${dline#dir=} ;;
@@ -529,6 +694,7 @@ if [ "$STATUS_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
     done < "$STATUS_DIGEST"
     case "$STERRS" in ''|*[!0-9]*) STERRS=0 ;; esac
     case "$STPENDING" in ''|*[!0-9]*) STPENDING=0 ;; esac
+    case "$STINVALID" in ''|*[!0-9]*) STINVALID=0 ;; esac
     case "$SIG" in 0|'~+0'|'~-0'|+*|-*) : ;; *) SIG="" ;; esac
     case "$DIRV" in up|down|right|none) : ;; *) DIRV="none" ;; esac
     if [ "$BADSHAPE" = 1 ]; then
@@ -540,10 +706,15 @@ if [ "$STATUS_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
       [ "$STTOPERR" = 1 ] && warn "status reported an error"
       [ "$STERRS" -gt 0 ] && warn "status reported $STERRS diagnostic error(s)"
       [ "$STPENDING" -gt 0 ] && warn "$STPENDING pending reconciler target(s)"
-      if run_bounded 5 "$STATUS_BODY" "$JQ_BIN" -r "$JQ_STATUS_BODY" "$STATUS_FILE" 2>/dev/null; then
-        STATUS_PARSED=1
+      [ "$STINVALID" -gt 0 ] && warn "status contained $STINVALID invalid or contradictory provider row(s)"
+      if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+        if run_bounded "$JQ_TIMEOUT" "$STATUS_BODY" "$JQ_BIN" -r "$JQ_STATUS_BODY" "$STATUS_FILE" 2>/dev/null; then
+          STATUS_PARSED=1
+        else
+          warn "status output could not be rendered"
+        fi
       else
-        warn "status output could not be rendered"
+        warn "refresh budget exhausted; status details omitted"
       fi
     fi
   else
@@ -565,15 +736,15 @@ fi
 case "$DOCTOR_RC" in
   0|1) : ;; # findings parsed independently below; the actionable count decides
   124) warn "doctor command timed out after ${CMD_TIMEOUT}s" ;;
-  skipped) : ;;
+  skipped|nobudget) : ;;
   *) warn "doctor command failed ($(rc_text "$DOCTOR_RC"))" ;;
 esac
 
 DOCTOR_DIGEST="$TMPDIR_LOCAL/doctor.digest"
 DOCTOR_BODY="$TMPDIR_LOCAL/doctor.body"
 
-if [ "$DOCTOR_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
-  if run_bounded 5 "$DOCTOR_DIGEST" "$JQ_BIN" -r '
+if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+  if run_bounded "$JQ_TIMEOUT" "$DOCTOR_DIGEST" "$JQ_BIN" -r '
       . as $r
       | if ($r|type) != "object" or ($r.findings|type) != "array" then "shape=bad"
         else "find=\([$r.findings[]?] | length)",
@@ -600,10 +771,14 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ -n "$JQ_BIN" ]; then
     else
       DOCTOR_OK=1
       [ "$D_ACT" -gt 0 ] && warn "doctor reported $D_ACT actionable finding(s)"
-      if run_bounded 5 "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null; then
-        DOCTOR_PARSED=1
+      if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
+        if run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null; then
+          DOCTOR_PARSED=1
+        else
+          warn "doctor output could not be rendered"
+        fi
       else
-        warn "doctor output could not be rendered"
+        warn "refresh budget exhausted; diagnostics details omitted"
       fi
     fi
   else

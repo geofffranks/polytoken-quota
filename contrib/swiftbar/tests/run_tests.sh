@@ -37,6 +37,9 @@ start_case() {
 }
 
 # Fixture-driven stub: reads $STUB_DIR/<cmd>.json, <cmd>.rc, <cmd>.sleep.
+# Optional per-command flags: <cmd>.trapterm (trap SIGTERM and exit 0),
+# <cmd>.flood (emit output forever until SIGPIPE), <cmd>.child (spawn a
+# long-lived sleep 42 child so process-group cleanup is observable).
 write_stub_quota() {
   cat > "$CASE_DIR/bin/polytoken-quota" <<'STUB'
 #!/bin/sh
@@ -45,8 +48,20 @@ c="$1"
 if [ "$#" -ne 2 ] || [ "$2" != "--json" ]; then
   exit 64
 fi
+printf '%s' "${POLYTOKEN_BINARY-}" > "$d/polytoken_seen"
+if [ -f "$d/$c.trapterm" ]; then
+  trap 'exit 0' TERM
+fi
+if [ -f "$d/$c.child" ]; then
+  sh -c 'exec sleep 42' &
+fi
 if [ -f "$d/$c.sleep" ]; then
   sleep "$(cat "$d/$c.sleep")"
+fi
+if [ -f "$d/$c.flood" ]; then
+  while :; do
+    printf '0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789\n'
+  done
 fi
 if [ -f "$d/$c.json" ]; then
   cat "$d/$c.json"
@@ -83,9 +98,21 @@ run_plugin() {
   if [ -n "$conf" ]; then
     envs=(POLYTOKEN_SWIFTBAR_CONFIG="$conf")
   fi
+  if [ -n "${PLUGIN_ENV_POLYTOKEN_BINARY:-}" ]; then
+    envs=("${envs[@]+"${envs[@]}"}" POLYTOKEN_BINARY="$PLUGIN_ENV_POLYTOKEN_BINARY")
+  fi
   OUT=$(env -i PATH="/usr/bin:/bin:$JQ_DIR" HOME="$CASE_DIR" STUB_DIR="$CASE_DIR" \
     "${envs[@]+"${envs[@]}"}" "$PLUGIN_BASH" "$PLUGIN" 2>/dev/null)
   RC=$?
+}
+
+process_gone() {
+  # $1 = pattern; succeeds when no live process matches it.
+  sleep 1
+  if ps -eo args= 2>/dev/null | grep -q -- "$1"; then
+    return 1
+  fi
+  return 0
 }
 
 # --- assertions ----------------------------------------------------------------
@@ -301,7 +328,7 @@ assert_lacks 'WARNING:'
 start_case not_red_gated_plus_unknown
 standard_setup
 G1='{"provider":"g","status":"gated","rank":1,"off_peak":false,"eligible":false,"reason":"quota gate","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh"}'
-UNK='{"provider":"k","status":"unavailable","rank":2,"off_peak":false,"eligible":false,"reason":"never observed","windows":[],"freshness":"missing"}'
+UNK='{"provider":"k","status":"unavailable","rank":2,"off_peak":false,"eligible":false,"reason":"never observed","windows":[],"freshness":"missing","signal":null}'
 status_fixture "$(wrap_status "$G1,$UNK")"
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
@@ -324,7 +351,7 @@ assert_lacks 'WARNING:'
 start_case only_disabled_no_warning
 # A single disabled unmetered provider neither warns nor turns red.
 standard_setup
-status_fixture "$(wrap_status '{"provider":"off","status":"disabled","rank":1,"off_peak":false,"eligible":false,"reason":"manual disable","windows":[],"freshness":"missing"}')"
+status_fixture "$(wrap_status '{"provider":"off","status":"disabled","rank":1,"off_peak":false,"eligible":false,"reason":"manual disable","windows":[],"freshness":"missing","signal":null}')"
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
@@ -383,7 +410,7 @@ status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"of
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has '----Window: w [####################] 150% (over limit; raw value retained above)'
+assert_has '----Window: w [####################] 150% (over limit; raw value retained)'
 assert_has '------Used: 150'
 assert_has '------Limit: 100'
 assert_has '------Usage: 150% (reported)'
@@ -405,7 +432,7 @@ status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"of
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has '----Window: w [ unknown ] unknown (invalid supplied numbers ignored)'
+assert_has '----Window: w [unknown             ] unknown (invalid supplied numbers ignored)'
 assert_has '------Limit: 0'
 
 start_case bars_negative_used_invalid
@@ -414,7 +441,7 @@ status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"of
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has '----Window: w [ unknown ] unknown (invalid supplied numbers ignored)'
+assert_has '----Window: w [unknown             ] unknown (invalid supplied numbers ignored)'
 assert_has '------Used: -1'
 
 start_case bars_missing_all_unknown
@@ -423,7 +450,7 @@ status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"of
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has '----Window: w [ unknown ] unknown'
+assert_has '----Window: w [unknown             ] unknown'
 assert_has '------Used: unknown'
 assert_has '------Limit: unknown'
 assert_has '------Usage: unknown'
@@ -614,15 +641,28 @@ assert_menu_ok
 assert_has 'WARNING: doctor reported an error'
 assert_has '--Finding: orphaned-provider-state [severity: info] — kind: persisted state'
 
-start_case doctor_timeout_rc143
+start_case doctor_natural_rc143_not_timeout
+# A doctor that naturally exits 143 with usable output must not be reported
+# as a timeout (deadline detection is sentinel-based, not exit-status based).
 standard_setup
 status_fixture "$(wrap_status "")"
+doctor_fixture "$(empty_doctor)"
 stub_rc doctor 143
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'WARNING: doctor command timed out after 10s'
-assert_has 'Diagnostics: unavailable — doctor timed out with unusable output'
+assert_has 'WARNING: doctor command failed (unexpected exit 143)'
+assert_lacks 'timed out'
+assert_has 'Diagnostics: 0 finding(s), 0 actionable, 0 recovered'
+
+start_case doctor_natural_rc137_not_timeout
+standard_setup
+status_fixture "$(wrap_status "")"
+doctor_fixture "$(empty_doctor)"
+stub_rc doctor 137
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: doctor command failed (unexpected exit 137)'
+assert_lacks 'timed out'
 
 # One read succeeding cannot conceal the other's failure.
 start_case one_source_failure_concealed_not
@@ -647,15 +687,15 @@ printf 'quota_bin=%s/bin/polytoken-quota\npolytoken_bin=%s/bin/polytoken\njq_bin
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'WARNING: configured jq_bin override is not executable: /nonexistent/jq'
+assert_has 'WARNING: configured jq_bin override is not executable'
 assert_has 'Best available pace: unavailable — status was not run (missing dependency)'
 
 start_case dep_missing_quota_bin
 standard_setup
-printf 'quota_bin=/nonexistent/polytoken-quota\npolytoken_bin=%s/bin/polytoken\njq_bin=jq\n' "$CASE_DIR" > "$CASE_DIR/plugin.conf"
+printf 'quota_bin=/nonexistent/polytoken-quota\npolytoken_bin=%s/bin/polytoken\njq_bin=%s\n' "$CASE_DIR" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'WARNING: configured quota_bin override is not executable: /nonexistent/polytoken-quota'
+assert_has 'WARNING: configured quota_bin override is not executable'
 assert_has 'Best available pace: unavailable — status was not run (missing dependency)'
 
 start_case dep_missing_polytoken
@@ -730,37 +770,284 @@ assert_count 1 'Pending: 1 outstanding target(s)'
 # Colon sequences must stay literal on flagged lines (no emoji substitution).
 assert_has 'codex/new line ctrl :arrow.up: :mushroom:'
 
-# Config errors fail visibly with no fallback.
+# Config errors fail visibly with fixed-vocabulary diagnostics: line numbers
+# and known keys only — never rejected lines, unsupported key names, override
+# values, or file paths (synthetic secret markers prove it).
 start_case config_unknown_key
 standard_setup
-printf 'bogus=1\n' > "$CASE_DIR/plugin.conf"
+printf 'bogus=SECRET_VALUE_X\n' > "$CASE_DIR/plugin.conf"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
 assert_has 'Plugin configuration error — override ignored, no fallback'
-assert_has 'Reason: unknown config key: bogus'
-assert_lacks 'Providers:'
+assert_has 'Reason: unsupported config key at line 1'
+assert_lacks 'SECRET_VALUE_X'
+assert_lacks 'bogus'
+
+start_case config_malformed_line_secret
+standard_setup
+printf 'quota_bin=%s/bin/polytoken-quota\nSECRET_TOKEN_LINE\n' "$CASE_DIR" > "$CASE_DIR/plugin.conf"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'Reason: config line 2 is not in key=value form'
+assert_lacks 'SECRET_TOKEN_LINE'
+
+start_case config_bad_override_value_secret
+standard_setup
+printf 'quota_bin=/nonexistent/SECRET_PATH_X\npolytoken_bin=%s/bin/polytoken\njq_bin=%s\n' "$CASE_DIR" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: configured quota_bin override is not executable'
+assert_lacks 'SECRET_PATH_X'
+
+start_case config_missing_explicit_file_secret
+standard_setup
+run_plugin "$ROOT/SECRET_DIR_X/does-not-exist.conf"
+assert_menu_ok
+assert_has 'Plugin configuration error — override ignored, no fallback'
+assert_has 'Reason: override configuration file is not readable'
+assert_lacks 'SECRET_DIR_X'
 
 start_case config_duplicate_key
 standard_setup
-printf 'jq_bin=jq\njq_bin=jq\n' > "$CASE_DIR/plugin.conf"
+printf 'jq_bin=%s\njq_bin=%s\n' "$JQ_ABS" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'Reason: duplicate config key: jq_bin'
-
-start_case config_missing_explicit_file
-standard_setup
-run_plugin "$ROOT/does-not-exist.conf"
-assert_menu_ok
-assert_has 'Plugin configuration error — override ignored, no fallback'
-assert_has 'Reason: override configuration file not readable:'
+assert_has 'Reason: duplicate config key jq_bin at line 2'
 
 start_case config_empty_value
 standard_setup
 printf 'quota_bin=\n' > "$CASE_DIR/plugin.conf"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'Reason: config value for quota_bin is empty'
+assert_has 'Reason: config value for quota_bin at line 1 is empty'
+
+# C1: the resolved Polytoken path is exported as POLYTOKEN_BINARY for both
+# reads, with config override > inherited env > search precedence.
+start_case c1_export_config_override
+standard_setup
+SPACED="$ROOT/$CASE_N spaced polytoken"
+mkdir -p "$SPACED"
+printf '#!/bin/sh\nexit 0\n' > "$SPACED/polytoken"
+chmod +x "$SPACED/polytoken"
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+doctor_fixture "$(empty_doctor)"
+printf 'quota_bin=%s/bin/polytoken-quota\npolytoken_bin=%s/polytoken\njq_bin=%s\n' "$CASE_DIR" "$SPACED" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota +0.3 :arrow.up: | color=green'
+assert_has "Best available pace: +0.3"
+if [ -f "$CASE_DIR/polytoken_seen" ] && [ "$(cat "$CASE_DIR/polytoken_seen")" = "$SPACED/polytoken" ]; then
+  ok
+else
+  bad "POLYTOKEN_BINARY not exported from config override (saw: $(cat "$CASE_DIR/polytoken_seen" 2>/dev/null))"
+fi
+
+start_case c1_env_conflict_config_wins
+standard_setup
+SPACED="$ROOT/$CASE_N spaced polytoken cfg"
+mkdir -p "$SPACED"
+printf '#!/bin/sh\nexit 0\n' > "$SPACED/polytoken"
+chmod +x "$SPACED/polytoken"
+ENVFAKE="$ROOT/$CASE_N env-fake"
+mkdir -p "$ENVFAKE"
+printf '#!/bin/sh\nexit 0\n' > "$ENVFAKE/polytoken"
+chmod +x "$ENVFAKE/polytoken"
+PLUGIN_ENV_POLYTOKEN_BINARY="$ENVFAKE/polytoken"
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+doctor_fixture "$(empty_doctor)"
+printf 'quota_bin=%s/bin/polytoken-quota\npolytoken_bin=%s/polytoken\njq_bin=%s\n' "$CASE_DIR" "$SPACED" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+if [ -f "$CASE_DIR/polytoken_seen" ] && [ "$(cat "$CASE_DIR/polytoken_seen")" = "$SPACED/polytoken" ]; then
+  ok
+else
+  bad "config override must win over inherited POLYTOKEN_BINARY"
+fi
+PLUGIN_ENV_POLYTOKEN_BINARY=""
+
+start_case c1_env_passthrough_unchanged
+standard_setup
+SPACED="$ROOT/$CASE_N spaced polytoken env"
+mkdir -p "$SPACED"
+printf '#!/bin/sh\nexit 0\n' > "$SPACED/polytoken"
+chmod +x "$SPACED/polytoken"
+PLUGIN_ENV_POLYTOKEN_BINARY="$SPACED/polytoken"
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+doctor_fixture "$(empty_doctor)"
+printf 'quota_bin=%s/bin/polytoken-quota\njq_bin=%s\n' "$CASE_DIR" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+if [ -f "$CASE_DIR/polytoken_seen" ] && [ "$(cat "$CASE_DIR/polytoken_seen")" = "$SPACED/polytoken" ]; then
+  ok
+else
+  bad "validated inherited POLYTOKEN_BINARY must be passed through unchanged"
+fi
+PLUGIN_ENV_POLYTOKEN_BINARY=""
+
+start_case c1_env_bad_override_fails
+standard_setup
+printf 'quota_bin=%s/bin/polytoken-quota\njq_bin=%s\n' "$CASE_DIR" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
+PLUGIN_ENV_POLYTOKEN_BINARY="/nonexistent/SECRET_ENV_PATH"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: POLYTOKEN_BINARY override is not executable'
+assert_lacks 'SECRET_ENV_PATH'
+assert_has 'Best available pace: unavailable — status was not run (missing dependency)'
+PLUGIN_ENV_POLYTOKEN_BINARY=""
+
+# C2: a command that traps SIGTERM and exits 0 at the deadline is still a
+# timeout; deadline detection is independent of the exit status.
+start_case c2_term_trap_exit0_is_timeout
+standard_setup
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+stub_sleep status 12
+printf '1\n' > "$CASE_DIR/status.trapterm"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_has 'WARNING: status command timed out after 10s'
+assert_has 'Best available pace: unavailable — status timed out with unusable output'
+
+# ADV1: output is capped during capture; overflow is reported visibly.
+start_case adv1_overflow_large_truncated
+standard_setup
+yes '0123456789012345678901234567890123456789012345678901234567890123456789' | head -c 400000 > "$CASE_DIR/status.json"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_has 'WARNING: status output exceeded the capture limit and was truncated'
+
+start_case adv1_overflow_continuous_producer
+standard_setup
+printf '1\n' > "$CASE_DIR/status.flood"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status output exceeded the capture limit and was truncated'
+assert_has 'Best available pace: unavailable'
+
+# ADV2: the owned process group is killed completely — timeout and success.
+start_case adv2_descendant_killed_on_timeout
+standard_setup
+stub_sleep status 12
+printf '1\n' > "$CASE_DIR/status.child"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status command timed out after 10s'
+if process_gone '[s]leep 42'; then
+  ok
+else
+  bad "descendant sleep 42 survived the timeout kill"
+fi
+
+start_case adv2_descendant_killed_on_success
+standard_setup
+status_fixture "$(wrap_status "$(prov_base a available 0.3)")"
+doctor_fixture "$(empty_doctor)"
+printf '1\n' > "$CASE_DIR/status.child"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota +0.3 :arrow.up: | color=green'
+if process_gone '[s]leep 42'; then
+  ok
+else
+  bad "descendant sleep 42 survived a successful command"
+fi
+
+# C3: row validity — contradictions and unsupported values warn and are
+# excluded from pace and unavailability decisions, while valid partial
+# details still render.
+start_case c3_contradictory_row_excluded
+standard_setup
+status_fixture "$(wrap_status '{"provider":"x","status":"unavailable","rank":1,"off_peak":false,"eligible":true,"reason":"odd","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":0.3}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_lacks 'Best available pace: +0.3'
+assert_has 'Best available pace: unavailable'
+assert_has 'WARNING: status contained 1 invalid or contradictory provider row(s)'
+assert_has '----Validity: invalid row'
+assert_has '--Provider: x'
+
+start_case c3_freshness_banana_blocks_red
+standard_setup
+status_fixture "$(wrap_status '{"provider":"x","status":"unavailable","rank":1,"off_peak":false,"eligible":false,"reason":"odd","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"unavailable","freshness":"banana"}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_lacks 'Observed unavailability:'
+assert_has 'WARNING: status contained 1 invalid or contradictory provider row(s)'
+
+start_case c3_unsupported_status_warns
+standard_setup
+status_fixture "$(wrap_status '{"provider":"x","status":"banana","rank":1,"off_peak":false,"eligible":true,"reason":"odd","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":9}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_has 'WARNING: status contained 1 invalid or contradictory provider row(s)'
+assert_lacks 'Best available pace: +9'
+
+start_case c3_nonboolean_eligibility_warns
+standard_setup
+status_fixture "$(wrap_status '{"provider":"x","status":"available","rank":1,"off_peak":false,"eligible":"yes","reason":"odd","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":9}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status contained 1 invalid or contradictory provider row(s)'
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+
+start_case c3_empty_older_cli_notice
+# An older CLI with an empty provider list and no as_of still gets the
+# compatibility notice; a newer no-clock error envelope has an error field
+# instead and must not be misread as an old CLI.
+standard_setup
+status_fixture '{"routing_enabled":false,"provider_only":false,"providers":[],"routes":[],"pending_targets":[],"problem":false,"errors":[]}'
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: older polytoken-quota CLI without signal/freshness fields — pace unavailable'
+assert_has 'Note: connected CLI does not expose signal/freshness fields; provider details are shown, pace is unavailable.'
+
+start_case c3_no_clock_error_not_compat
+standard_setup
+status_fixture '{"routing_enabled":false,"provider_only":false,"providers":[],"routes":[],"pending_targets":[],"problem":false,"errors":[],"error":"clock unavailable"}'
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status reported an error'
+assert_lacks 'older polytoken-quota CLI'
+
+# C4: raw reported usage keeps unrounded values; rounding exists only where
+# labeled (the ~-prefixed pace signal).
+start_case c4_tiny_reported_percent_raw
+standard_setup
+status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[{"name":"w","usage_percent":0.0001,"reset_at":"2026-09-25T00:00:00Z"}],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":0.1}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has '------Usage: 0.0001% (reported)'
+assert_has '----Window: w [....................] 0.0001%'
+
+start_case c4_over_limit_fraction_raw
+standard_setup
+status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[{"name":"w","used":1000,"limit":1000,"usage_percent":100.0001,"reset_at":"2026-09-25T00:00:00Z"}],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":-0.1}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has '------Usage: 100.0001% (reported)'
+assert_has '----Window: w [####################] 100.0001% (over limit; raw value retained)'
+
+# Minor: an absent next reset is shown explicitly as unknown.
+start_case minor_next_reset_unknown_explicit
+standard_setup
+status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":0.1}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has '----Next reset: unknown'
 
 # Fixed footer always present; menu never blank.
 start_case footer_fixed

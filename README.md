@@ -64,6 +64,10 @@ install -m 0755 polytoken-quota ~/.local/bin/polytoken-quota
 
 Release builds embed the `vX.Y.Z` release tag in the executable, and the same tag is recorded in `VERSION`; `--version` reports that embedded version. No release is assumed to exist yet: if no release download is available, build from the repository with the commands above.
 
+## Menu-bar status with SwiftBar
+
+A read-only macOS menu-bar plugin (provider states, quota bars, resets, diagnostics, best available pace) lives in [contrib/swiftbar](contrib/swiftbar/README.md). The plugin is not part of the release archives; copy it from this repository into your SwiftBar plugin folder. That README covers prerequisites (`jq`, the CLI, macOS 11+ for SF Symbols), overrides, display meanings, and uninstall steps.
+
 ## Configuration
 
 All `polytoken-quota` configuration lives in:

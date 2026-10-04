@@ -79,12 +79,18 @@ Rules:
 - An explicit override that does not resolve to an executable fails visibly
   with its own warning line. The plugin never silently falls back past a bad
   override.
+- Configuration diagnostics name the line number and, for value problems, the
+  known key only. Rejected lines, unsupported key names, override values, and
+  file paths are never echoed anywhere in the menu.
 - The quota CLI inherits your environment, so `POLYTOKEN_QUOTA_HOME`,
   `POLYTOKEN_CONFIG_DIR`, and `POLYTOKEN_BINARY` work as documented by the
-  CLI. If `POLYTOKEN_BINARY` is set, the plugin checks that exact path at
-  startup and reports it when it is not executable. Setting policy roots in a
-  GUI context usually requires `launchctl setenv` or the config file above,
-  because a plain GUI launch does not read your shell profile.
+  CLI. The quota CLI itself resolves `polytoken` from `POLYTOKEN_BINARY` or
+  `PATH`, so the plugin exports the path it resolved for both reads: a
+  `polytoken_bin` config override wins, an inherited `POLYTOKEN_BINARY` is
+  checked and passed through unchanged, and with neither set the plugin's own
+  search result is exported so a minimal GUI PATH still works. Setting policy
+  roots in a GUI context usually requires `launchctl setenv` or the config
+  file above, because a plain GUI launch does not read your shell profile.
 
 ## Reading the display
 
@@ -155,9 +161,16 @@ observation across providers, not proof that every provider is fresh.
   data line.
 - The only action is the fixed `Refresh status | refresh=true` line. No
   command, URL, or eval can be injected through data or config values.
-- stderr is never printed; failures render as sanitized fixed-vocabulary
-  warnings with exit codes. No credentials, raw config, or secrets are
-  displayed.
+- stderr is never printed; failures render as fixed-vocabulary warnings with
+  exit codes. No credentials, raw config, or secrets are displayed, and
+  configuration problems never echo the rejected content.
+- Each subprocess runs in a process group owned by the plugin: on a deadline,
+  an output overflow, or plugin termination the whole group (descendants
+  included) is signalled and reaped, and a producer that leaves children
+  behind after a clean exit is cleaned up too.
+- Captured output is capped while the command runs, not afterwards; a
+  producer that writes past the cap is stopped early and the truncation is
+  reported in the menu.
 
 ## Host and container notes
 
@@ -177,6 +190,9 @@ POSIX-ish environment with Bash and `jq`; repository CI runs it on Linux.
 - The icon, submenu layout, colors in light/dark mode, and the refresh action
   are verified against SwiftBar's documented behavior and source, but only
   rendered checks on a real Mac confirm the visual result.
-- The plugin bounds each subprocess (SIGTERM after 10 seconds, SIGKILL one
-  second later) and bounds captured output, but SwiftBar itself has no
-  plugin-wide timeout; total worst-case refresh is roughly 22 seconds.
+- Each quota-CLI subprocess is bounded at 10 seconds (SIGKILL one second
+  later) and each jq pass at 5 seconds; an outer 50-second budget skips
+  whichever stages remain once it runs out. With every bound exhausted the
+  worst case is about 46 seconds of subprocess time plus the outer cap, which
+  still stays inside SwiftBar's 60-second refresh interval. SwiftBar itself
+  has no plugin-wide timeout, so the budget is the plugin's own.
