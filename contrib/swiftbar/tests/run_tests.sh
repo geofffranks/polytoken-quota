@@ -57,8 +57,10 @@ if [ -f "$d/$c.termresist" ]; then
   # TERM-resistant member: SIG_IGN survives exec, so only the group's KILL
   # escalation can remove it.
   sh -c 'trap "" TERM; exec sleep 42' &
+  echo $! > "$d/child.pid"
 elif [ -f "$d/$c.child" ]; then
   sh -c 'exec sleep 42' &
+  echo $! > "$d/child.pid"
 fi
 if [ -f "$d/$c.sleep" ]; then
   sleep "$(cat "$d/$c.sleep")"
@@ -115,30 +117,42 @@ run_plugin() {
   RC=$?
 }
 
-process_gone() {
-  # $1 = ps args pattern. Polls up to ~6s so slow reaping never flaps the
-  # result, and ignores zombie states (stat Z): an unreaped corpse is not a
-  # live descendant. Succeeds only when nothing alive matches.
-  local i=0
-  while [ "$i" -lt 12 ]; do
-    if ps -eo stat=,args= 2>/dev/null | grep -- "$1" | grep -v '^Z' >/dev/null 2>&1; then
-      sleep 0.5
-      i=$((i + 1))
-    else
+pid_gone() {
+  # $1 = exact PID recorded by this fixture in its private staging. True when
+  # the PID no longer exists or is a zombie (stat Z): an unreaped corpse is
+  # not a live descendant. A live non-zombie match keeps polling up to ~4s
+  # before being declared a survivor.
+  local pid=$1 stat i=0
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  while [ "$i" -lt 8 ]; do
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ -z "$stat" ] || [ "${stat#Z}" != "$stat" ]; then
       return 0
     fi
+    sleep 0.5
+    i=$((i + 1))
   done
   return 1
 }
 
 assert_member_gone() {
-  # The owned invocation must be fully finished before this assertion: the
-  # menu under test already rendered, and any sleep-42 survivor is reported
-  # with its actual ps state (zombies are not survivors).
-  if process_gone '[s]leep 42'; then
+  # Inspects ONLY the PID the fixture stub recorded in its private staging —
+  # never a global process-table search, which races concurrently running
+  # suites and matches unrelated command lines. Strict: any live non-zombie
+  # match of the recorded PID is a survivor and fails the case.
+  local pid stat
+  pid=$(cat "$CASE_DIR/child.pid" 2>/dev/null)
+  if [ -z "$pid" ]; then
+    bad "fixture recorded no child pid to inspect"
+    return
+  fi
+  if pid_gone "$pid"; then
     ok
   else
-    bad "sleep-42 descendant still alive: $(ps -eo stat=,args= 2>/dev/null | grep '[s]leep 42' | head -n 2 | tr '\n' ' ')"
+    stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    bad "recorded child pid $pid still alive (stat: ${stat:-unknown})"
   fi
 }
 
