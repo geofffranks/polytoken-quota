@@ -215,7 +215,7 @@ assert_layout_compact() {
   # 2. concise root — root-level (non-child) titles stay within 60 chars;
   #    child titles within 85 (the SwiftBar length cap then only ever clips
   #    redundant text, with the full value in the tooltip).
-  local viol tover rootover line title
+  local viol treeviol tover rootover line title
   viol=$(printf '%s\n' "$OUT" | awk '
     /^Quota / { next }
     /^---$/ { next }
@@ -227,7 +227,28 @@ assert_layout_compact() {
     $0 !~ /\| emojize=false symbolize=false length=85$/ { c++ }
     END { print c + 0 }')
   if [ "$viol" = 0 ]; then ok; else bad "$viol informational line(s) missing literal flags/length or unsafe parent metadata"; fi
-  for parent in 'Providers:' '--Provider:' '----Window:' '--Route:' '--Finding:' 'Findings:' 'Recovered:' 'Diagnostics:' 'About this status'; do
+  treeviol=$(printf '%s\n' "$OUT" | awk '
+    /^Quota / || /^Refresh status / { next }
+    {
+      lines[NR] = $0
+      depth[NR] = 0
+      while (substr($0, depth[NR] + 1, 1) == "-") depth[NR]++
+      count = NR
+    }
+    END {
+      for (i = 1; i <= count; i++) {
+        if (lines[i] ~ /^---$/ || lines[i] ~ /color=black,white$/) continue
+        for (j = i + 1; j <= count; j++) {
+          if (lines[j] ~ /^---$/) break
+          if (depth[j] <= depth[i]) break
+          if (depth[j] > depth[i]) { bad++; break }
+        }
+      }
+      print bad + 0
+    }')
+  if [ "$treeviol" = 0 ]; then ok; else bad "$treeviol generated menu parent(s) with deeper descendants missing fixed appearance colors"; fi
+  if [ "$(printf '%s\n' "$OUT" | grep -c 'refresh=true')" = 1 ] && ! printf '%s\n' "$OUT" | grep 'color=black,white' | grep -qE ' (refresh|href|bash)='; then ok; else bad "submenu display metadata added an action or refresh is not unique"; fi
+  for parent in 'Best available pace:' 'Observed unavailability:' 'Row validity:' 'Providers:' '--Provider:' '----Window:' 'Routing:' '--Route:' 'Pending:' '--Error:' '--Finding:' 'Findings:' 'Recovered:' '--Recovered:' 'Diagnostics:' 'About this status'; do
     if printf '%s\n' "$OUT" | grep -F -- "$parent" | grep -vq 'color=black,white'; then
       bad "submenu parent [$parent] missing fixed appearance colors"
     else
@@ -628,6 +649,7 @@ assert_has 'WARNING: 1 pending reconciler target(s)'
 assert_has 'Pending target: t-abc'
 assert_has '--Pending detail: outstanding reconciler work.'
 assert_has '--Pending detail: reported routing may not yet be applied.'
+assert_has '--Pending target: t-abc | emojize=false symbolize=false length=85'
 
 start_case status_errors_warning
 standard_setup
@@ -641,6 +663,7 @@ assert_has 'Errors: 2 reported'
 assert_has '--Error scopes: provider = provider/quota projection; route = route projection'
 assert_has '--Error: provider — target global'
 assert_has '----Summary: provider projection failed'
+assert_has '----Mapping:'
 assert_has '--Error: route — target proj'
 
 start_case status_exit2_partial_rendered
@@ -650,8 +673,8 @@ stub_rc status 2
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_header 'Quota +0.2 :arrow.up: | color=green'
-assert_lacks 'WARNING: quota issues reported'
+assert_header 'Quota :exclamationmark.triangle: | color=orange'
+assert_count 1 'WARNING: quota issues reported'
 assert_lacks 'WARNING: status exit 2 (quota problem report)'
 assert_has '--Provider: a'
 assert_has 'Best available pace: +0.2'
@@ -751,6 +774,7 @@ assert_menu_ok
 assert_has 'Recovered: 1'
 assert_has '--Recovered: proj-1 — stage reconcile'
 assert_has '----Summary: recovered from incomplete journal'
+assert_has '--Recovered: proj-1 — stage reconcile | emojize=false symbolize=false length=85 color=black,white'
 
 start_case doctor_error_field_warns_but_finding_shown
 standard_setup
@@ -1332,7 +1356,7 @@ assert_menu_ok
 assert_has 'WARNING: status output is malformed or unparseable'
 assert_has 'About this status'
 assert_has '--Status and diagnostics are independent reads and may differ.'
-assert_has '--Pace is a projection from saved quota evidence, not live traffic.'
+assert_has '--Pace projects saved quota; details remain below warnings when available.'
 
 # Fixed footer always present; menu never blank.
 start_case footer_fixed
@@ -1341,7 +1365,7 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_count 1 'Refresh status | refresh=true'
 assert_has 'About this status'
-assert_has '--Pace is a projection from saved quota evidence, not live traffic.'
+assert_has '--Pace projects saved quota; details remain below warnings when available.'
 assert_has '--Status and diagnostics are independent reads and may differ.'
 assert_has '--Newest observation is not proof every provider is fresh.'
 assert_lacks 'gated is a quota-gate claim'

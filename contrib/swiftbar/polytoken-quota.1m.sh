@@ -481,14 +481,14 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
            "--Pace unavailable counts: no signal \($nosig); invalid rows \($invrows)\(lit)"
        end),
       (if $isred then
-         "Observed unavailability: observed state, not necessarily exhaustion\(lit)",
+         "Observed unavailability: observed state, not necessarily exhaustion\(parentlit)",
          "--Unavailability detail: every quota-observed, non-disabled provider is fresh\(lit)"
        else empty end),
       (if $compat then
          "Note: connected CLI lacks signal/freshness fields — pace unavailable\(lit)"
        else empty end),
       (if $invrows > 0 then
-         "Row validity: \($invrows) invalid row(s) excluded from pace\(lit)",
+         "Row validity: \($invrows) invalid row(s) excluded from pace\(parentlit)",
          "--Validity detail: invalid or contradictory rows are excluded from pace\(lit)",
          "--Validity detail: and from unavailability decisions; valid details still show.\(lit)"
        else empty end),
@@ -538,10 +538,10 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
             (if ($w.reset_at|s2) != "unknown" then "------Resets: \(($w.reset_at|safe))\(tz($w.reset_at))\(lit)" else "------Resets: unknown\(lit)" end))),
       "---",
       (if ($r.provider_only == true) then
-         "Routing: provider-only mode — routes are not applicable in this mode.\(lit)"
-       elif $r.routing_enabled == true then "Routing: enabled\(lit)"
-       elif $r.routing_enabled == false then "Routing: disabled\(lit)"
-       else "Routing: unknown\(lit)" end),
+         "Routing: provider-only mode — routes are not applicable in this mode.\(parentlit)"
+       elif $r.routing_enabled == true then "Routing: enabled\(parentlit)"
+       elif $r.routing_enabled == false then "Routing: disabled\(parentlit)"
+       else "Routing: unknown\(parentlit)" end),
       (($r.routes // [])[]? | . as $rt
        | "--Route: \(($rt.name|safe))\(parentlit)",
          (if ($rt.target_id|s2) != "" then "----Target: \(($rt.target_id|safe))\(lit)" else empty end),
@@ -552,15 +552,15 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          "----Projection error: \(if $rt.projection_error == true then "yes" else "no" end)\(lit)"),
       (if (($r.pending_targets // [])|length) > 0 then
          "Pending: \(($r.pending_targets|length)) outstanding target(s)\(parentlit)",
-         (($r.pending_targets // [])[]? | "Pending target: \(safe)\(lit)"),
          "--Pending detail: outstanding reconciler work.\(lit)",
-         "--Pending detail: reported routing may not yet be applied.\(lit)"
+         "--Pending detail: reported routing may not yet be applied.\(lit)",
+         (($r.pending_targets // [])[]? | "--Pending target: \(safe)\(lit)")
        else empty end),
       (if (($r.errors // [])|length) > 0 then
          "Errors: \(($r.errors|length)) reported\(parentlit)",
          "--Error scopes: provider = provider/quota projection; route = route projection\(lit)",
          (($r.errors // [])[]? | . as $e
-          | "--Error: \(($e.scope|s2))\(if (($e.target_id // "")|safe) != "" then " — target \(($e.target_id|safe))" else "" end)\(lit)",
+          | "--Error: \(($e.scope|s2))\(if (($e.target_id // "")|safe) != "" then " — target \(($e.target_id|safe))" else "" end)\(parentlit)",
             (if ($e.mapping_id|s2) != "" then "----Mapping: \(($e.mapping_id|safe))\(lit)" else empty end),
             (if ($e.source_path|s2) != "" then "----File: \(($e.source_path|safe))\(lit)" else empty end),
             "----Summary: \(($e.summary|safe))\(lit)")
@@ -753,7 +753,9 @@ if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ "$STATUS_R
     else
       STATUS_OK=1
       [ "$COMPAT" = 1 ] && warn "older polytoken-quota CLI: no signal/freshness fields — pace unavailable"
-      [ "$STPROBLEM" = 1 ] && warn "quota issues reported"
+      if [ "$STPROBLEM" = 1 ] || [ "$STATUS_RC" = 2 ]; then
+        warn "quota issues reported"
+      fi
       [ "$STTOPERR" = 1 ] && warn "status reported an error"
       [ "$STERRS" -gt 0 ] && warn "status reported $STERRS diagnostic error(s)"
       [ "$STPENDING" -gt 0 ] && warn "$STPENDING pending reconciler target(s)"
@@ -882,7 +884,6 @@ if [ -n "$WARN_REASONS" ]; then
   printf '%s\n' "$WARN_REASONS" | while IFS= read -r wr; do
     [ -n "$wr" ] && printf '%s | %s\n' "WARNING: $wr" "$LIT"
   done
-  printf '%s | %s\n' "--Note: pace details remain below when the underlying read succeeded." "$LIT"
   printf '%s\n' "---"
 fi
 
@@ -915,7 +916,7 @@ fi
 
 # Short interpretation notes live in a submenu and survive either read failing.
 printf '%s | %s\n' "About this status" "$PARENT_LIT"
-printf '%s | %s\n' "--Pace is a projection from saved quota evidence, not live traffic." "$LIT"
+printf '%s | %s\n' "--Pace projects saved quota; details remain below warnings when available." "$LIT"
 printf '%s | %s\n' "--Status and diagnostics are independent reads and may differ." "$LIT"
 printf '%s | %s\n' "--Newest observation is not proof every provider is fresh." "$LIT"
 printf '%s\n' "Refresh status | refresh=true"
