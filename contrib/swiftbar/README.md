@@ -10,8 +10,8 @@ stores credentials.
 
 ## Requirements
 
-- macOS 11 (Big Sur) or newer. The menu-bar icon uses SF Symbols, which
-  require macOS 11+.
+- macOS 12 (Monterey) or newer, and SwiftBar 2.1.0 or newer. Explicit
+  light/dark text colors use SwiftBar 2.1.0's native menu-row styling.
 - [SwiftBar](https://github.com/swiftbar/SwiftBar).
 - `jq` 1.6 or newer, for example via `brew install jq`.
 - The `polytoken-quota` CLI built from the same revision as this plugin on
@@ -107,27 +107,31 @@ Rules:
 
 ## Reading the display
 
-Opening the menu shows timing, data problems, pending work, doctor errors,
-and every configured provider and quota window directly. There are no provider
-or diagnostic submenus and no Option-only details. Long causes and remediation
-are split into continued root rows rather than hidden in tooltips. Routing
-chains, ranking internals, ordinary doctor info/warning findings, and recovered
-history stay available through the CLI rather than in this dashboard.
+The root menu is a compact dashboard: latest quota observation age, actionable
+errors/data issues and pending work, then every configured provider and quota
+window. There are no provider or diagnostic submenus and no hidden Option-only
+details. Long causes and remediation are split into continued root rows rather
+than tooltips. Ranking internals, routine healthy evidence, ordinary doctor
+info/warning findings, and recovered history stay available through the CLI.
 
-Informational rows use the system appearance; only quota bars use a fixed-width
-font. Disabled providers are status information, not clickable disabled controls.
-Actual inactive-row contrast still needs inspection in SwiftBar on a Mac in
-both light and dark appearances. The plugin adds no dummy action to force styling.
+Informational rows explicitly specify black text in light appearance and white
+text in dark appearance, including bars; SwiftBar 2.1.0 applies this foreground
+color to otherwise actionless menu items. SwiftBar internally uses a no-op handler
+for colored rows to avoid disabled-grey rendering; the plugin adds no dummy
+action. This behavior is documented in the [2.1.0 release notes](https://github.com/swiftbar/SwiftBar/releases/tag/v2.1.0)
+and implemented in its [menu-item renderer](https://github.com/swiftbar/SwiftBar/blob/v2.1.0/SwiftBar/MenuBar/MenuBarItem.swift).
+Disabled providers are status information, not clickable disabled controls.
+Native visual confirmation in both appearances remains pending.
 
 ### Timing and problems
 
-`Latest quota observation` is the newest saved quota snapshot across providers,
-not a successful whole-check result. `Evaluation time` is when the CLI evaluates
-saved evidence, not a provider request or the display refresh time. Latest known
-per-provider failed/partial attempts remain visible even if an older saved
-snapshot is still fresh. Missing evidence is not a healthy zero. Polling labels
-use explicit configuration/support evidence; absent evidence says `status unknown`,
-not that a check failed.
+`Latest quota observation` shows a relative age when timestamps parse, otherwise
+the supplied timestamp (or `time unknown`). It is the newest saved quota
+snapshot across providers, not a successful whole-check result or display refresh
+time. A failed/partial latest attempt appears as a concise data issue even if an
+older saved snapshot is still fresh; its sanitized error appears once. Missing
+evidence is not a healthy zero. Routine healthy polling and attempt details are
+omitted.
 
 Pending targets always show `duration unknown`. Their latest reconciliation
 attempt time/age, when supplied, is not the duration of continuous pending work.
@@ -136,43 +140,35 @@ Doctor-only pending reports lack structured timing and say time unknown; the
 plugin does not extract timestamps from prose. Reported fields may not yet be
 reconciled while work is pending.
 
-The doctor count includes only error-level findings. Each error shows target
-context, cause, and remediation when supplied. Collection/data problems and
-interrupted reconciliation are shown independently even if doctor classifies
-them as info or warning. Ordinary omitted warnings alone do not cause an amber
-icon. Doctor exits 0 and 1 with valid diagnostic JSON are accepted reports.
+Each doctor error shows target context, cause, and remediation when supplied.
+Collection/data problems and interrupted reconciliation remain visible even if
+doctor classifies them as info or warning. Duplicate status/doctor records are
+collapsed only when their structured condition identity matches; ordinary
+omitted warnings alone do not cause an amber icon. Doctor exits 0 and 1 with
+valid diagnostic JSON are accepted reports.
 
 Status and doctor are independent reads, not an atomic snapshot or a record of
-one complete check. Supplied RFC3339 timestamps retain their zone: trailing `Z`
-is labeled `(UTC)`, while explicit offsets are shown as-is. Relative times are
-computed against the status evaluation time when both timestamps are parseable.
+one complete check. Relative age uses status timestamps when parseable; otherwise
+the supplied timestamp is retained as fallback. Reset times show a concise
+countdown in days/hours when parseable, without changing the stored data.
 
 ### Providers and quota bars
 
-The list is labeled `Ordered by available pace`, not routing priority:
+Providers retain the shared three-tier ordering: usable fresh/available/eligible
+providers first by unrounded pace, other enabled providers by rank/name, then
+gated, unavailable, and manually disabled providers. Headers show the provider
+name, human-readable state, and pace when meaningful. Material reasons remain
+distinct; routine eligibility, polling, ranking, and healthy evidence details are
+omitted. Ineligibility continues to affect whether a provider can lead.
 
-1. Fresh, explicitly available, eligible providers with a finite computable
-   signal come first, ordered by unrounded signal descending, then routing rank
-   and provider name ascending.
-2. Other enabled providers follow by rank and name, including stale/missing
-   evidence and unknown signals. Unknown signal is never zero.
-3. Gated, unavailable, and manually disabled providers follow by status and name.
-   A positive signal cannot move them above usable providers.
-
-A header shows consolidated status and pace. Non-usable signals are qualified;
-reasons and evidence keep manual disable, quota exhaustion, policy gates,
-availability, and eligibility distinct. If an older CLI lacks required fields,
-all providers instead use deterministic rank/name order with an explicit
-compatibility warning and no pace candidate.
-
-Each supplied window has a fixed-width text bar, used percentage, and reset
-row with time/countdown when available. Bars prefer the reported percentage;
-otherwise they derive it from nonnegative used and positive limit. Missing or
-invalid numbers render `No data` with an unknown bar. Only visual fill is
-clamped, so over-limit percentages stay visible and real zero remains zero.
-If reported percent differs from used/limit by more than 5 percentage points,
-a compact raw-data row retains both and marks the disagreement. Invalid
-supplied numbers also retain a raw-data row.
+Each quota window is a compact 10-cell bar, exact used percentage, and concise
+reset countdown when parseable. Common window identifiers use human-readable
+labels (for example, `subscription_kwh` becomes `Subscription`). Bars prefer
+the reported percentage; otherwise they derive it from nonnegative used and
+positive limit. Missing or invalid numbers render `No data` with an unknown bar.
+Only visual fill is clamped, so over-limit percentages and real zero remain
+visible. Percentage conflicts and invalid supplied numbers retain a compact raw
+data row.
 
 ### Menu-bar icon
 

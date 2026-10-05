@@ -37,11 +37,11 @@ CMD_TIMEOUT=10          # seconds per subprocess (SIGTERM; SIGKILL 1s later)
 JQ_TIMEOUT=5            # seconds per jq pass
 OUTPUT_LIMIT=262144     # bytes of subprocess stdout kept (enforced during capture)
 BUDGET_SECONDS=50       # outer refresh budget; later stages skip when exhausted
-BAR_WIDTH=20            # characters in each quota window bar
+BAR_WIDTH=10            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
 # Use the system appearance for every informational row, never dummy actions.
-LIT="emojize=false symbolize=false"
+LIT="emojize=false symbolize=false color=black,white"
 
 # Fallback search dirs (newline-separated) for minimal GUI PATH environments.
 SEARCH_DIRS="/opt/homebrew/bin
@@ -333,13 +333,14 @@ def safe: if . == null then "" else (tostring
   | gsub("^ +| +$"; "")
   | .[0:240]) end;
 def s2: if . == null then "unknown" else safe end;
-def lit: " | emojize=false symbolize=false";
+def lit: " | emojize=false symbolize=false color=black,white";
 # Split sanitized essential details into root rows, never tooltip-only text.
 def detail($label; $text):
   ($text|tostring|gsub("[\\x00-\\x1f\\x7f\\x{0085}\\x{2028}\\x{2029}|]"; " ")) as $s
   | if ($s|length) == 0 then "\($label): unknown\(lit)"
-    else range(0; ($s|length); 64) as $i
-      | "\($label|safe)\(if $i > 0 then " (continued)" else "" end): \($s[$i:$i+64])\(lit)" end;
+    else ($s | [scan(".{1,64}(?= +|$)|.{1,64}")]) as $parts
+      | range(0; ($parts|length)) as $i
+      | "\($label|safe)\(if $i > 0 then " (continued)" else "" end): \($parts[$i]|gsub("^ +| +$"; ""))\(lit)" end;
 def epoch($ts):
   try ((($ts | capture("^(?<date>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.[0-9]+)?(?<zone>Z|[+-][0-9]{2}:[0-9]{2})$")) // error("invalid timestamp")) as $m
     | ($m.date + "Z" | fromdateiso8601) -
@@ -349,15 +350,16 @@ def epoch($ts):
   catch null;
 def span($s):
   if $s < 60 then "\($s|floor)s" elif $s < 3600 then "\($s/60|floor)m"
-  elif $s < 86400 then "\($s/3600|floor)h" else "\($s/86400|floor)d" end;
+  elif $s < 86400 then "\($s/3600|floor)h" else "\($s/86400|floor)d \(($s%86400/3600)|floor)h" end;
+def countdown($s):
+  if $s < 0 then "now" else "\($s/86400|floor)d \(($s%86400/3600)|floor)h" end;
 def tz($ts): ($ts|tostring) as $s | if ($s|endswith("Z") or ($s|endswith("z"))) then " (UTC)" else "" end;
 def stamp($ts; $asof):
   if $ts == null or $ts == "" then "time unknown"
   else epoch($ts) as $t | epoch($asof) as $n
-    | ($ts|safe) + tz($ts) +
-      (if $t != null and $n != null then
-         " · " + (if $n >= $t then span($n-$t) + " ago" else "in " + span($t-$n) end)
-       else "" end) end;
+    | if $t != null and $n != null then
+        (if $n >= $t then span($n-$t) + " ago" else "in " + span($t-$n) end)
+      else ($ts|safe) + tz($ts) end end;
 def fmt2($n): ((($n*100)|round)/100) | tostring;
 def fmtsig($s):
   if isnum($s) then
@@ -369,7 +371,7 @@ def fmtsig($s):
 def bar($pct):
   (if $pct < 0 then 0 elif $pct > 100 then 100 else $pct end) as $v
   | ((($v/100)*'$BAR_WIDTH')|round) as $n
-  | ((("#"*$n) + ("."*('$BAR_WIDTH'-$n))));
+  | ((("█"*$n) + ("░"*('$BAR_WIDTH'-$n))));
 def window_pct($w):
   (isnum($w.usage_percent)) as $has_rep
   | (isnum($w.used) and ($w.used >= 0) and isnum($w.limit) and ($w.limit > 0)) as $can_derive
@@ -423,13 +425,23 @@ def ordered($ps; $compat):
           (if tier($compat) == 2 then (.status|s2) else "" end),
           (if tier($compat) == 2 then 0 elif isnum(.rank) then .rank else 1e99 end), (.provider|s2)] end);
 def reason:
-  (if .status == "disabled" then "manually disabled"
-   elif .freshness == "missing" then "quota evidence unavailable/unknown"
-   elif .status == "gated" then "policy gate holds provider off"
-   elif .status == "unavailable" then "quota unavailable (not necessarily exhausted)"
-   elif .freshness == "stale" then "saved quota evidence stale"
-   else "" end) as $prefix
-  | $prefix + (if (.reason // "") != "" then (if $prefix == "" then "" else "; " end) + .reason else "" end);
+  if .status == "disabled" then "manually disabled"
+  elif .status == "gated" then
+    if ((.reason // "")|startswith("signal-gated")) then "usage ahead of configured pace"
+    elif ((.reason // "")|contains("out of quota")) then "out of quota"
+    elif .freshness == "missing" then "quota evidence unavailable/unknown"
+    else "policy gate holds provider off" end
+  elif .status == "unavailable" then "quota unavailable (not necessarily exhausted)"
+  elif .freshness == "missing" then "quota evidence unavailable/unknown"
+  elif .freshness == "stale" then "saved quota evidence stale"
+  elif .eligible == false then "not eligible for routing"
+  else "" end;
+def title_safe: safe | if startswith("-") then "· " + . else . end;
+def reset_label($ts; $asof):
+  epoch($ts) as $t | epoch($asof) as $n
+  | if $t != null and $n != null then
+      if $t <= $n then "Reset due" else "Resets in " + span($t-$n) end
+    elif $ts == null then "" else "Reset: " + stamp($ts; $asof) end;
 def data_problems:
   [ (if .latest_attempt != null and (.latest_attempt.status != "fresh")
        then "latest quota attempt \((.latest_attempt.status|s2))" + (if (.latest_attempt.error // "") != "" then " — " + .latest_attempt.error else "" end) else empty end),
@@ -487,39 +499,33 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
   else
     $r.providers as $ps | compat_mode($r) as $compat
     | "Latest quota observation: \(stamp($r.last_checked; $r.as_of))\(lit)",
-      "Evaluation time: \(($r.as_of|s2))\(tz($r.as_of))\(lit)",
-      (if $compat then "Compatibility: required pace fields missing — ordered by rank/name, pace unavailable\(lit)" else empty end),
-      (if (($r.error // "")|safe) != "" then detail("Status error"; $r.error) else empty end),
+      (if (($r.error // "")|safe) != "" then detail("Status"; $r.error) else empty end),
       ($ps[]? | . as $p | data_problems as $problems
-       | (if ($problems|length) > 0 and $p.latest_attempt != null then
-            "Attempt problem: \(($p.provider|safe)) — latest known attempt \(stamp($p.latest_attempt.checked_at; $r.as_of))\(lit)"
-          else empty end),
-         ($problems[] | detail("Data issue: \(($p.provider|safe))"; .))),
-      ($ps[]? | select(row_valid($compat)|not) | detail("Invalid provider: \((.provider|s2))"; (row_problems($compat)|join("; ")))),
-      (($r.pending_targets // [])[]? | . as $id
-       | ([$r.pending_details[]? | select(.target_id == $id)][0] // {}) as $d
-       | "Pending: \(($id|safe)) — duration unknown; last attempt \(stamp($d.last_attempt_at; $r.as_of))\(lit)"),
-      (if (($r.pending_targets // [])|length) > 0 then "Pending work: reported fields may not yet be reconciled.\(lit)" else empty end),
+       | ($problems[] | detail("Data issue: \(($p.provider|safe))"; .))),
+      (if (($r.pending_targets // [])|length) > 0 then
+        (($r.pending_targets // [])[]? | . as $id
+         | ([$r.pending_details[]? | select(.target_id == $id)][0] // {}) as $d
+         | "Pending: \(($id|safe)) — duration unknown; last attempt \(stamp($d.last_attempt_at; $r.as_of))\(lit)")
+       else empty end),
       (($r.errors // [])[]? | . as $e
        | detail("Error: \(($e.scope|s2))\(if ($e.target_id // "") != "" then " — \(($e.target_id|safe))" else "" end)\(if ($e.mapping_id // "") != "" then " / \(($e.mapping_id|safe))" else "" end)"; $e.summary)),
+      ($ps[]? | select(row_valid($compat)|not) | detail("Invalid provider: \((.provider|s2))"; (row_problems($compat)|join("; ")))),
       "===PROVIDERS===",
       "Ordered by available pace\(lit)",
       (if ($ps|length) == 0 then "No providers are configured or projected.\(lit)" else empty end),
       (ordered($ps; $compat)[] | . as $p
        | "---",
-         "Provider: \(($p.provider|s2)) — \(($p.status|s2)) · Pace \(if isnum($p.signal) and ($compat|not) then fmtsig($p.signal) + (if usable($compat) then "" else " (not usable)" end) else "unknown" end)\(lit)",
-         detail("Reason"; reason),
-         "Evidence: \(($p.freshness|s2)); availability \(($p.availability|s2)); \(if $p.eligible == true then "eligible" elif $p.eligible == false then "not eligible" else "eligibility unknown" end)\(lit)",
-         "Observation: \(stamp($p.observation_at // (if $p.freshness == "fresh" or $p.freshness == "stale" then $p.checked_at else null end); $r.as_of))\(lit)",
-         "Polling: \(if $p.polling_status == "enabled" then "enabled" elif $p.polling_status == "disabled" then "disabled" elif $p.polling_status == "unsupported" then "unsupported" else "status unknown" end)\(lit)",
-         (if $p.latest_attempt != null then "Latest attempt: \(($p.latest_attempt.status|s2)) · \(stamp($p.latest_attempt.checked_at; $r.as_of))\(lit)" else empty end),
-         (if (($p.condition // "")|safe) != "" then detail("Condition"; $p.condition) else empty end),
-         (if (($p.windows // [])|length) == 0 then "Quota: No data\(lit)" else empty end),
+         "\(($p.provider|title_safe)) — \(if $p.status == "available" then "Available" elif $p.status == "enabled" then "Enabled (quota unknown)" elif $p.status == "gated" then "Gated" elif $p.status == "unavailable" then "Unavailable" elif $p.status == "disabled" then "Disabled" else "Status unknown" end)\(if isnum($p.signal) and ($compat|not) then " · Pace " + fmtsig($p.signal) + (if usable($compat) then "" else " (not usable)" end) else "" end)\(lit)",
+         (if (reason|length) > 0 then detail("Reason"; reason) else empty end),
+         (if (($p.condition // "")|safe) != "" and ($p.status == "unavailable" or $p.status == "gated") then detail("Condition"; $p.condition) else empty end),
+         (if (($p.windows // [])|length) == 0 then
+            "Quota: No data\(if $p.polling_status == "disabled" then " (polling disabled)" elif $p.polling_status == "unsupported" then " (polling unsupported)" elif $p.polling_status == null or $p.polling_status == "unknown" then " (polling status unknown)" else "" end)\(lit)"
+          else empty end),
          (($p.windows // [])[]? | . as $w | window_pct($w) as $wp
           | (isnum($w.usage_percent) and isnum($w.used) and $w.used >= 0 and isnum($w.limit) and $w.limit > 0
               and ((($w.usage_percent) - (($w.used/$w.limit)*100))|fabs) > '$PCT_DIFF_LIMIT') as $conflict
-          | "Window: \(($w.name|s2)) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \(if $wp.pct == null then "No data" else "\($wp.pct)% used" end)\(if $wp.pct != null and $wp.pct > 100 then " (over limit)" else "" end) | emojize=false symbolize=false font=Menlo",
-            "Reset: \(stamp($w.reset_at; $r.as_of))\(lit)",
+          | "\(if $w.name == "subscription_kwh" then "Subscription" elif $w.name == "rolling" then "Rolling" elif $w.name == "session" then "Session" elif $w.name == "weekly" then "Weekly" elif $w.name == "daily" then "Daily" else ($w.name|title_safe) end) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \(if $wp.pct == null then "No data" else "\($wp.pct)% used" end)\(if $wp.pct != null and $wp.pct > 100 then " (over limit)" else "" end) | emojize=false symbolize=false color=black,white font=Menlo",
+            (reset_label($w.reset_at; $r.as_of) as $label | if $label != "" then "\($label)\(lit)" else empty end),
             (if $wp.bad or $conflict then
                "Raw quota: used \(($w.used|s2)) / limit \(($w.limit|s2)); percent \(($w.usage_percent|s2))\(lit)",
                (if $conflict then "Data note: reported percentage disagrees with used/limit; both retained.\(lit)" else "Data note: invalid supplied numbers ignored for bar.\(lit)" end)
@@ -531,14 +537,19 @@ JQ_DOCTOR_BODY="$JQ_HELPERS"'
 . as $r
 | if ($r|type) != "object" or ($r.findings|type) != "array" then "Diagnostics output has an unexpected shape.\(lit)"
   else
-    (if (($r.error // "")|safe) != "" then detail("Doctor error"; $r.error) else empty end),
-    "Doctor errors: \([$r.findings[]? | select(.severity == "error")]|length)\(lit)",
-    ($r.findings[]? | select(.severity == "error" or independent_problem) | . as $f
-     | "\(if .severity == "error" then "Error" elif .code == "target-pending" or .code == "quota-reconcile-pending" then "Pending" else "Data issue" end): \(($f.target_id // "global"|safe)) — \(($f.code|s2))\(lit)",
+    (if (($r.error // "")|safe) != "" then detail("Doctor"; $r.error) else empty end),
+    (try ($status[0].providers // []) catch []) as $ps
+    | ($r.findings[]? | select(.severity == "error" or independent_problem) | . as $f
+     | ([$ps[]? | select(.provider == $f.target_id)][0] // {}) as $p
+     | (if $f.code == "quota-attempt-failed" and $p.latest_attempt.status == "failed" and (($p.latest_attempt.error // "") != "")
+           and $f.message == ("provider " + $p.provider + " quota attempt failed: " + $p.latest_attempt.error) then true
+         else false end) as $overlap
+     | (if $overlap then empty else
+       "\(if .severity == "error" then "Error" elif .code == "target-pending" or .code == "quota-reconcile-pending" then "Pending" else "Data issue" end): \(($f.target_id // "global"|safe)) — \(($f.code|s2))\(lit)",
        (if .code == "target-pending" or .code == "quota-reconcile-pending" then "Pending timing: duration unknown; last attempt time unknown in doctor report.\(lit)" else empty end),
        detail("Cause"; $f.message),
        (if (($f.file // "")|safe) != "" then detail("File"; $f.file) else empty end),
-       (if (($f.chain // "")|safe) != "" then detail("Chain"; $f.chain) else empty end),
+       (if (($f.chain // "")|safe) != "" then detail("Chain"; $f.chain) else empty end) end),
        (if (($f.remediation // "")|safe) != "" then detail("Remediation"; $f.remediation) else empty end))
   end
 '
@@ -789,7 +800,13 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ "$DOCTOR_R
       [ "$D_FIND" -gt 0 ] && warn "doctor error-level findings: $D_FIND"
       [ "$D_ACT" -gt "$D_FIND" ] && warn "doctor reports independent data/pending problems"
       if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-        run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null
+        if [ "$STATUS_PARSED" = 1 ]; then
+          STATUS_FOR_DOCTOR=$STATUS_FILE
+        else
+          STATUS_FOR_DOCTOR="$TMPDIR_LOCAL/empty-status"
+          printf '%s\n' '{}' > "$STATUS_FOR_DOCTOR"
+        fi
+        run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" --slurpfile status "$STATUS_FOR_DOCTOR" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null
         jqrc=$?
         if cap_check "$DOCTOR_BODY"; then
           warn "doctor rendered details exceeded the capture limit — details omitted"
@@ -839,9 +856,17 @@ printf '%s\n' "---"
 
 if [ -n "$WARN_REASONS" ]; then
   printf '%s\n' "$WARN_REASONS" | while IFS= read -r wr; do
+    # Detailed report rows already explain these icon reasons; do not repeat counts.
+    case "$wr" in
+      'provider collection/data problems:'*|'status reported an error'|'status reported '*diagnostic*|'status contained '*|*' pending reconciler target(s)')
+        [ "$STATUS_PARSED" != 1 ] || continue ;;
+      'doctor reported an error'|'doctor error-level findings:'*|'doctor reports independent data/pending problems')
+        [ "$DOCTOR_PARSED" != 1 ] || continue ;;
+      'quota issues reported')
+        if [ "$STATUS_PARSED" = 1 ] && { [ "$STDATA" -gt 0 ] || [ "$STERRS" -gt 0 ] || [ "$STPENDING" -gt 0 ] || [ "$D_ACT" -gt 0 ]; }; then continue; fi ;;
+    esac
     [ -n "$wr" ] && printf '%s | %s\n' "WARNING: $wr" "$LIT"
   done
-  printf '%s\n' "---"
 fi
 
 # Emit timing/status problems first; defer provider rows until after doctor.
@@ -866,11 +891,11 @@ else
   printf '%s | %s\n' "Diagnostics: unavailable — doctor $(rc_text "$DOCTOR_RC") with unusable output" "$LIT"
 fi
 
-printf '%s\n' "---"
 if [ "$REDRULE" = 1 ]; then
   printf '%s | %s\n' "Observed unavailability: every observed non-disabled provider is fresh and unavailable." "$LIT"
 fi
 if [ "$STATUS_PARSED" = 1 ]; then
+  printf '%s\n' '---'
   providers=0
   while IFS= read -r line; do
     if [ "$line" = '===PROVIDERS===' ]; then providers=1; continue; fi
@@ -878,7 +903,5 @@ if [ "$STATUS_PARSED" = 1 ]; then
   done < "$STATUS_BODY"
 fi
 printf '%s\n' "---"
-printf '%s | %s\n' "Pace is a saved-quota projection, not routing priority." "$LIT"
-printf '%s | %s\n' "Status and doctor are independent reads; not a whole-check result." "$LIT"
 printf '%s\n' "Refresh status | refresh=true"
 exit 0
