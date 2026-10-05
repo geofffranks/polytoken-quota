@@ -14,10 +14,25 @@ stores credentials.
   require macOS 11+.
 - [SwiftBar](https://github.com/swiftbar/SwiftBar).
 - `jq` 1.6 or newer, for example via `brew install jq`.
-- The `polytoken-quota` CLI on the Mac (build with `go install`
-  `./cmd/polytoken-quota` or install a published release archive as described
-  in the repository `README.md`). The quota CLI requires a `polytoken`
-  executable at startup even for `status` and `doctor`, so both must resolve.
+- The `polytoken-quota` CLI **built from this same branch** on the Mac. The
+  pace signal and freshness labels come from additive `status --json` fields
+  that only this branch's CLI emits, so the branch CLI is required for the
+  first install. If your Mac already runs a CLI built from this branch,
+  copying the updated plugin alone is enough to get this menu layout — the
+  plugin does not require a CLI upgrade just for the layout, and an older
+  CLI shows the built-in compatibility warning (details still render; pace
+  does not). Build it on the Mac from your checkout of this branch:
+
+  ```sh
+  cd /path/to/polytoken-quota
+  go build -o "$HOME/.local/bin/polytoken-quota" ./cmd/polytoken-quota
+  ```
+
+  Then point the plugin at that exact path with `quota_bin` (see
+  Configuration and overrides). Quote the path as shown. This repository
+  never executes a host install for you; the build and copy happen on your
+  Mac. The quota CLI requires a `polytoken` executable at startup even for
+  `status` and `doctor`, so both must resolve.
 - Stock Bash 3.2 (the macOS system shell) runs the plugin; no newer Bash and
   no GNU `timeout` are needed.
 
@@ -94,6 +109,22 @@ Rules:
 
 ## Reading the display
 
+The menu stays concise by design: the root shows one-line summaries, and
+longer explanations live in submenus (pace details under the pace line,
+per-provider and per-route rows, and an `About this status` section that
+groups every disclaimer). Every informational line carries SwiftBar's
+`length=85` cap — verified against SwiftBar's source, a set `length` shorter
+than the text truncates the visible row and moves the full text into the
+row's tooltip — so no line can grow to screen width. Crucial raw values are
+not left to truncation alone: used/limit/usage numbers, reset times, and
+warning reasons each get their own line. Informational rows without actions
+may appear dimmed in SwiftBar; that is normal, and no click actions were
+added to change it.
+
+Timestamps are shown exactly as the CLI supplied them, RFC3339 with their own
+zone: a trailing `Z` is labeled `(UTC)`, and an explicit offset such as
+`-04:00` is shown as-is without a UTC label.
+
 The menu-bar icon shows the best available pace, not fleet health:
 
 - `+N.NN` with an up arrow (green): the projection says unused quota
@@ -130,8 +161,9 @@ availability distinct from routing eligibility, checked time with freshness
 (`fresh`, `stale`, `missing`), rank, off-peak, eligibility, next reset, and
 its pace signal with meaning. A signal is shown even when a quota gate holds
 the provider off; the row says so. Each quota window shows a fixed-width bar
-plus every supplied raw number: used, limit, and usage percent, with reset
-time in UTC. Bars prefer a reported percent, otherwise derive from
+plus every supplied raw number: used, limit, and usage percent, with the
+reset time exactly as supplied (a `Z` value is UTC). Bars prefer a reported
+percent, otherwise derive from
 nonnegative used and positive limit; a missing or invalid denominator renders
 an unknown bar. Only the visual fill is clamped at 100%, so over-limit raw
 values stay visible. When a reported percent disagrees with `used/limit` by

@@ -39,7 +39,7 @@ BUDGET_SECONDS=50       # outer refresh budget; later stages skip when exhausted
 BAR_WIDTH=20            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
-LIT="emojize=false symbolize=false"
+LIT="emojize=false symbolize=false length=85"
 
 # Fallback search dirs (newline-separated) for minimal GUI PATH environments.
 SEARCH_DIRS="/opt/homebrew/bin
@@ -68,7 +68,10 @@ STATUS_RC=""; DOCTOR_RC=""
 BUDGET_DEADLINE=0
 
 warn() {
-  WARN_REASONS="${WARN_REASONS:+$WARN_REASONS; }$1"
+  # Reasons are kept one per line: the menu renders each on its own bounded
+  # line instead of one near-screenwidth joined line.
+  WARN_REASONS="${WARN_REASONS:+$WARN_REASONS
+}$1"
 }
 
 fail_config() {
@@ -328,7 +331,14 @@ def safe: if . == null then "" else (tostring
   | gsub("^ +| +$"; "")
   | .[0:240]) end;
 def s2: if . == null then "unknown" else safe end;
-def lit: " | emojize=false symbolize=false";
+# Every informational data line carries the SwiftBar length cap: first-party
+# source (MenuBarItem.patchMenuItem) shows a set length shorter than the
+# title truncates the visible text and moves the full text into the tooltip.
+def lit: " | emojize=false symbolize=false length=85";
+# Label a supplied RFC3339 timestamp with its own zone: a trailing Z is UTC;
+# any explicit offset (e.g. -04:00) is already shown by the value itself, so
+# no annotation is added.
+def tz($ts): ($ts|tostring) as $s | if ($s|endswith("Z") or ($s|endswith("z"))) then " (UTC)" else "" end;
 def fmt2($n): ((($n*100)|round)/100) | tostring;
 def fmtsig($s):
   if isnum($s) then
@@ -443,12 +453,16 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
     | ([$ps[]? | select(row_valid($compat)|not)] | length) as $invrows
     | (candidates($ps; $compat)) as $cands
     | (red_rule($ps; $compat)) as $isred
-    | (if ($r.as_of|s2) != "unknown" then "Signals as of: \(($r.as_of|safe)) (UTC)\(lit)" else empty end),
+    | (if ($r.as_of|s2) != "unknown" then "Signals as of: \(($r.as_of|safe))\(tz($r.as_of))\(lit)" else empty end),
       "---",
       (if ($cands|length) > 0 then
          $cands[0] as $b
-         | "Best available pace: \(fmtsig($b.signal)) — \(pace_meaning($b.signal)) (provider \(($b.provider|safe)); fresh; available; deterministic tie-break by signal, then rank, then name)\(lit)",
-           "Pace: use-it-or-lose-it projection recomputed from saved quota evidence at as_of; not live traffic, fleet health, or a token balance guarantee.\(lit)"
+         | "Best available pace: \(fmtsig($b.signal)) — provider \(($b.provider|safe))\(lit)",
+           "--Pace meaning: \(pace_meaning($b.signal))\(lit)",
+           "--Pace basis: fresh; available; eligible\(lit)",
+           "--Pace tie-break: deterministic, by signal then rank then name\(lit)",
+           "--Pace scope: use-it-or-lose-it projection from saved quota evidence at as_of\(lit)",
+           "--Pace limits: not live traffic, fleet health, or a token balance guarantee\(lit)"
        else
          ([$ps[]? | select(.status == "gated")] | length) as $g
          | ([$ps[]? | select(.status == "disabled")] | length) as $d
@@ -456,19 +470,31 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          | ([$ps[]? | select(.freshness == "stale")] | length) as $stale
          | ([$ps[]? | select(.freshness == "missing")] | length) as $miss
          | ([$ps[]? | select(isnum(.signal)|not)] | length) as $nosig
-         | "Best available pace: unavailable — no fresh, available, eligible provider with a computable signal (gated: \($g); disabled: \($d); unavailable: \($u); stale: \($stale); never observed: \($miss); no signal: \($nosig); invalid rows: \($invrows))\(lit)"
+         | "Best available pace: unavailable\(lit)",
+           "--Pace unavailable detail: no fresh, available, eligible provider\(lit)",
+           "--Pace unavailable detail: no provider with a computable signal (counts below)\(lit)",
+           "--Pace unavailable counts: gated \($g); disabled \($d)\(lit)",
+           "--Pace unavailable counts: unavailable \($u); stale \($stale); never observed \($miss)\(lit)",
+           "--Pace unavailable counts: no signal \($nosig); invalid rows \($invrows)\(lit)"
        end),
       (if $isred then
-         "Observed unavailability: every quota-observed, non-disabled provider is fresh and explicitly unavailable — observed state, not necessarily quota exhaustion.\(lit)"
+         "Observed unavailability: observed state, not necessarily exhaustion\(lit)",
+         "--Unavailability detail: every quota-observed, non-disabled provider is fresh\(lit)"
        else empty end),
       (if $compat then
-         "Note: connected CLI does not expose signal/freshness fields; provider details are shown, pace is unavailable.\(lit)"
+         "Note: connected CLI lacks signal/freshness fields — pace unavailable\(lit)"
        else empty end),
       (if $invrows > 0 then
-         "Row validity: \($invrows) provider row(s) with invalid or contradictory data are excluded from pace and unavailability decisions; valid details still show.\(lit)"
+         "Row validity: \($invrows) invalid row(s) excluded from pace\(lit)",
+         "--Validity detail: invalid or contradictory rows are excluded from pace\(lit)",
+         "--Validity detail: and from unavailability decisions; valid details still show.\(lit)"
        else empty end),
       "---",
       "Providers: \($ps|length)\(lit)",
+      (if (($r.last_checked|s2) != "unknown") then
+         "--Newest observation: \(($r.last_checked|safe))\(lit)",
+         "--Newest observation: newest across providers, not proof every provider is fresh.\(lit)"
+       else empty end),
       (if ($ps|length) == 0 then "No providers are configured or projected.\(lit)" else empty end),
       ($ps[]? | . as $p
        | "--Provider: \(($p.provider|safe))\(lit)",
@@ -476,16 +502,22 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          (if row_valid($compat)|not then
             "----Validity: invalid row (\([row_problems($compat)[]|safe]|join("; "))) — excluded from pace and unavailability decisions\(lit)"
           else empty end),
-         "----Availability: \(($p.availability|s2)) (observed snapshot availability, distinct from routing eligibility)\(lit)",
+         "----Availability: \(($p.availability|s2))\(lit)",
+         "----Availability note: snapshot availability, distinct from routing eligibility\(lit)",
          (if (($p.condition // "")|safe) != "" then "----Condition: \(($p.condition|safe))\(lit)" else empty end),
          "----Checked: \(($p.checked_at|s2)) — freshness \(($p.freshness|s2))\(lit)",
-         "----Next reset: \(($p.next_reset_at|s2))\(if ($p.next_reset_at|s2) != "unknown" then " (UTC)" else "" end)\(lit)",
+         "----Next reset: \(($p.next_reset_at|s2))\(tz($p.next_reset_at))\(lit)",
          "----Rank: \(($p.rank|s2)) — off-peak: \(if $p.off_peak == true then "yes" elif $p.off_peak == false then "no" else "unknown" end)\(lit)",
          "----Routing eligibility: \(if $p.eligible == true then "eligible" elif $p.eligible == false then "not eligible" else "unknown" end)\(lit)",
          (if isnum($p.signal) then
-            "----Pace signal: \(fmtsig($p.signal)) — \(pace_meaning($p.signal))\(if ($p.freshness|s2) != "unknown" then " (freshness: \(($p.freshness|safe)))" else "" end)\(if $p.status == "gated" then " — computed despite the quota gate; the gate holds routing off" elif $p.status == "disabled" then " — provider manually disabled; shown for information only" else "" end)\(lit)"
+            "----Pace signal: \(fmtsig($p.signal)) (freshness: \(($p.freshness|safe)))\(lit)",
+            "----Pace signal meaning: \(pace_meaning($p.signal))\(lit)",
+            (if $p.status == "gated" then "----Pace signal note: computed despite the quota gate; the gate holds routing off\(lit)"
+             elif $p.status == "disabled" then "----Pace signal note: provider manually disabled; shown for information only\(lit)"
+             else empty end)
           else
-            "----Pace signal: unavailable (not computable from saved evidence; a real zero is shown as 0)\(lit)"
+            "----Pace signal: unavailable\(lit)",
+            "----Pace signal note: not computable from saved evidence; a real zero is shown as 0\(lit)"
           end),
          (($p.windows // [])[]? | . as $w
           | window_pct($w) as $wp
@@ -500,7 +532,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
             "------Used: \(if isnum($w.used) then ($w.used|tostring) elif $w.used == null then "unknown" else "\(($w.used|safe)) (non-numeric)" end)\(lit)",
             "------Limit: \(if isnum($w.limit) then ($w.limit|tostring) elif $w.limit == null then "unknown" else "\(($w.limit|safe)) (non-numeric)" end)\(lit)",
             "------Usage: \(if isnum($w.usage_percent) then "\($w.usage_percent|tostring)% (reported)" elif $wp.src == "derived from used/limit" then "\($wp.pct|tostring)% (derived from used/limit)" else "unknown" end)\($disagree)\(lit)",
-            (if ($w.reset_at|s2) != "unknown" then "------Resets: \(($w.reset_at|safe)) (UTC)\(lit)" else "------Resets: unknown\(lit)" end))),
+            (if ($w.reset_at|s2) != "unknown" then "------Resets: \(($w.reset_at|safe))\(tz($w.reset_at))\(lit)" else "------Resets: unknown\(lit)" end))),
       "---",
       (if ($r.provider_only == true) then
          "Routing: provider-only mode — routes are not applicable in this mode.\(lit)"
@@ -515,17 +547,15 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          "----Effective: \(if (($rt.effective // [])|length) > 0 then [($rt.effective[]?)|safe]|join(", ") else "(none)" end)\(lit)",
          (($rt.skipped // [])[]? | "----Skipped: \((.model|safe)) — \((.reason|safe))\(lit)"),
          "----Projection error: \(if $rt.projection_error == true then "yes" else "no" end)\(lit)"),
-      "---",
-      (if (($r.last_checked|s2) != "unknown") then
-         "Note: \(($r.last_checked|safe)) is the newest observation across providers, not proof every provider is fresh.\(lit)"
-       else empty end),
       (if (($r.pending_targets // [])|length) > 0 then
          "Pending: \(($r.pending_targets|length)) outstanding target(s)\(lit)",
          (($r.pending_targets // [])[]? | "Pending target: \(safe)\(lit)"),
-         "Note: pending means outstanding reconciler work; reported routing may not yet be applied.\(lit)"
+         "--Pending detail: outstanding reconciler work.\(lit)",
+         "--Pending detail: reported routing may not yet be applied.\(lit)"
        else empty end),
       (if (($r.errors // [])|length) > 0 then
-         "Errors: \(($r.errors|length)) reported (scope provider = provider/quota projection, route = route projection)\(lit)",
+         "Errors: \(($r.errors|length)) reported\(lit)",
+         "--Error scopes: provider = provider/quota projection; route = route projection\(lit)",
          (($r.errors // [])[]? | . as $e
           | "--Error: \(($e.scope|s2))\(if (($e.target_id // "")|safe) != "" then " — target \(($e.target_id|safe))" else "" end)\(lit)",
             (if ($e.mapping_id|s2) != "" then "----Mapping: \(($e.mapping_id|safe))\(lit)" else empty end),
@@ -539,23 +569,24 @@ JQ_DOCTOR_BODY="$JQ_HELPERS"'
 . as $r
 | if ($r|type) != "object" or ($r.findings|type) != "array" then "Diagnostics output has an unexpected shape.\(lit)"
   else
-    "Doctor as of: \(($r.as_of|s2)) (UTC) — actionable: \(if $r.actionable == true then "yes" else "no" end)\(lit)",
+    "Doctor as of: \(($r.as_of|s2))\(tz($r.as_of)) — actionable: \(if $r.actionable == true then "yes" else "no" end)\(lit)",
     ([$r.findings[]?]) as $fs
     | (if ($fs|length) == 0 then "Findings: none reported\(lit)" else "Findings: \(($fs|length))\(lit)" end),
     ($fs[]? | . as $f
      | "--Finding: \(($f.code|s2)) [severity: \(($f.severity|s2))] — kind: \(kind($f.code))\(lit)",
        "----Message: \(($f.message|safe))\(lit)",
-       (if ($f.target_id|s2) != "" then "----Target: \(($f.target_id|safe))\(lit)" else empty end),
-       (if ($f.file|s2) != "" then "----File: \(($f.file|safe))\(lit)" else empty end),
-       (if ($f.chain|s2) != "" then "----Chain: \(($f.chain|safe))\(lit)" else empty end),
-       (if ($f.remediation|s2) != "" then "----Remediation (informational; the plugin performs no actions): \(($f.remediation|safe))\(lit)" else empty end)),
+       (if (($f.target_id // "")|safe) != "" then "----Target: \(($f.target_id|safe))\(lit)" else empty end),
+       (if (($f.file // "")|safe) != "" then "----File: \(($f.file|safe))\(lit)" else empty end),
+       (if (($f.chain // "")|safe) != "" then "----Chain: \(($f.chain|safe))\(lit)" else empty end),
+       (if (($f.remediation // "")|safe) != "" then "----Remediation (informational; the plugin performs no actions): \(($f.remediation|safe))\(lit)" else empty end)),
     (($r.recovered // []) as $rec
      | if ($rec|length) > 0 then
          "Recovered: \($rec|length)\(lit)",
          ($rec[]? | "--Recovered: \((.target_id|safe)) — stage \((.stage|safe))\(lit)",
                     "----Summary: \((.summary|safe))\(lit)")
        else empty end),
-    "Note: doctor reports persisted/reported findings, not a complete historical error log or an exact unapplied field diff.\(lit)"
+    "--Note: doctor reports persisted/reported findings.\(lit)",
+    "--Note: not a complete historical error log or an exact unapplied field diff.\(lit)"
   end
 '
 
@@ -613,7 +644,7 @@ if [ -n "$POLYTOKEN_BIN_CFG" ]; then
 elif [ -n "${POLYTOKEN_BINARY:-}" ]; then
   POLYTOKEN_BIN=$(resolve_exec_check "$POLYTOKEN_BINARY") || warn "POLYTOKEN_BINARY override is not executable"
 else
-  POLYTOKEN_BIN=$(resolve_exec_check "polytoken") || warn "polytoken prerequisite not found (the quota CLI requires it at startup; set polytoken_bin)"
+  POLYTOKEN_BIN=$(resolve_exec_check "polytoken") || warn "polytoken prerequisite not found — set polytoken_bin"
   if [ -n "$POLYTOKEN_BIN" ]; then
     export POLYTOKEN_BINARY="$POLYTOKEN_BIN"
   fi
@@ -717,7 +748,7 @@ if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ "$STATUS_R
       warn "status output has an unexpected shape"
     else
       STATUS_OK=1
-      [ "$COMPAT" = 1 ] && warn "older polytoken-quota CLI without signal/freshness fields — pace unavailable"
+      [ "$COMPAT" = 1 ] && warn "older polytoken-quota CLI: no signal/freshness fields — pace unavailable"
       [ "$STPROBLEM" = 1 ] && warn "status reported quota problems"
       [ "$STTOPERR" = 1 ] && warn "status reported an error"
       [ "$STERRS" -gt 0 ] && warn "status reported $STERRS diagnostic error(s)"
@@ -844,13 +875,16 @@ printf '%s\n' "$HEADER"
 printf '%s\n' "---"
 
 if [ -n "$WARN_REASONS" ]; then
-  printf '%s | %s\n' "WARNING: $WARN_REASONS" "$LIT"
-  printf '%s | %s\n' "Pace details below are still shown when the underlying read succeeded." "$LIT"
+  printf '%s\n' "$WARN_REASONS" | while IFS= read -r wr; do
+    [ -n "$wr" ] && printf '%s | %s\n' "WARNING: $wr" "$LIT"
+  done
+  printf '%s | %s\n' "--Note: pace details remain below when the underlying read succeeded." "$LIT"
   printf '%s\n' "---"
 fi
 
 if [ "$STATUS_PARSED" = 1 ]; then
   cat "$STATUS_BODY"
+  printf '%s\n' "---"
 elif [ "$STATUS_RC" = "skipped" ]; then
   printf '%s | %s\n' "Best available pace: unavailable — status was not run (missing dependency)" "$LIT"
   printf '%s | %s\n' "Quota status: unavailable — fix the missing dependency and refresh" "$LIT"
@@ -875,8 +909,17 @@ else
   printf '%s\n' "---"
 fi
 
-printf '%s | %s\n' "Note: the menu-bar icon is best available pace, not fleet health, a token balance, or actual serving." "$LIT"
-printf '%s | %s\n' "Note: status and diagnostics are two independent reads and may observe different state revisions." "$LIT"
-printf '%s | %s\n' "Note: gated is a quota-gate claim on the enabled field, not observed exhaustion." "$LIT"
+# Static disclaimers live in one submenu so they survive even when a read
+# fails; the menu stays concise without losing the required disclosures.
+printf '%s\n' "About this status"
+printf '%s | %s\n' "--Note: the menu-bar icon is best available pace." "$LIT"
+printf '%s | %s\n' "--Note: it is not fleet health, a token balance, or actual serving." "$LIT"
+printf '%s | %s\n' "--Note: status and diagnostics are two independent reads." "$LIT"
+printf '%s | %s\n' "--Note: they may observe different state revisions." "$LIT"
+printf '%s | %s\n' "--Note: gated is a quota-gate claim on the enabled field, not observed exhaustion." "$LIT"
+printf '%s | %s\n' "--Note: pace is a use-it-or-lose-it projection from saved quota evidence." "$LIT"
+printf '%s | %s\n' "--Note: it is not live traffic or a guarantee." "$LIT"
+printf '%s | %s\n' "--Note: pending means outstanding reconciler work." "$LIT"
+printf '%s | %s\n' "--Note: reported routing may not yet be applied." "$LIT"
 printf '%s\n' "Refresh status | refresh=true"
 exit 0

@@ -208,6 +208,51 @@ assert_no_stderr_leak() {
   fi
 }
 
+assert_layout_compact() {
+  # Two structural guarantees on the rendered menu:
+  # 1. flag/length safety — every informational line (everything except the
+  #    header, separators, the About parent, and the fixed Refresh action)
+  #    ends with the literal-parser flags AND the length=85 cap.
+  # 2. concise root — root-level (non-child) titles stay within 60 chars;
+  #    child titles within 85 (the SwiftBar length cap then only ever clips
+  #    redundant text, with the full value in the tooltip).
+  local viol tover rootover line title
+  viol=$(printf '%s\n' "$OUT" | awk '
+    /^Quota / { next }
+    /^---$/ { next }
+    /^About this status$/ { next }
+    /^Refresh status \| refresh=true$/ { next }
+    $0 !~ /\| emojize=false symbolize=false length=85$/ { c++ }
+    END { print c + 0 }')
+  if [ "$viol" = 0 ]; then ok; else bad "$viol informational line(s) missing literal flags or length=85"; fi
+  rootover=$(printf '%s\n' "$OUT" | awk '
+    /^---$/ { next }
+    /^Quota / { next }
+    /^Refresh status / { next }
+    /^About this status$/ { next }
+    {
+      line = $0
+      sub(/\| emojize.*$/, "", line)
+      sub(/[ \t]+$/, "", line)
+      if (line !~ /^-/) c += (length(line) > 60)
+    }
+    END { print c + 0 }')
+  if [ "$rootover" = 0 ]; then ok; else bad "$rootover root line(s) exceed 60 chars"; fi
+  tover=$(printf '%s\n' "$OUT" | awk '
+    /^---$/ { next }
+    /^Quota / { next }
+    /^Refresh status / { next }
+    /^About this status$/ { next }
+    {
+      line = $0
+      sub(/\| emojize.*$/, "", line)
+      sub(/[ \t]+$/, "", line)
+      if (line ~ /^-/) c += (length(line) > 85)
+    }
+    END { print c + 0 }')
+  if [ "$tover" = 0 ]; then ok; else bad "$tover child line(s) exceed 85 chars"; fi
+}
+
 # --- preflight ------------------------------------------------------------------
 
 if [ ! -f "$PLUGIN" ]; then
@@ -267,8 +312,10 @@ doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota +0.42 :arrow.up: | color=green'
-assert_has 'Best available pace: +0.42 — unused quota accumulating toward reset (projection) (provider alpha'
+assert_has 'Best available pace: +0.42 — provider alpha'
+assert_has '--Pace meaning: unused quota accumulating toward reset (projection)'
 assert_lacks 'WARNING:'
+assert_layout_compact
 
 start_case pace_zero
 standard_setup
@@ -323,14 +370,14 @@ status_fixture "$(wrap_status "$(prov_base lowrank available 0.5),$(prov_base mi
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_header 'Quota +0.5 :arrow.up: | color=green'
-assert_has 'Best available pace: +0.5 — unused quota accumulating toward reset (projection) (provider lowrank'
+assert_has 'Best available pace: +0.5 — provider lowrank'
 
 start_case tie_by_name
 standard_setup
 status_fixture '{"as_of":"2026-09-21T10:00:00Z","routing_enabled":true,"provider_only":false,"last_checked":"2026-09-21T09:59:30Z","providers":[{"provider":"zeta","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":0.5},{"provider":"alpha","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[],"checked_at":"2026-09-21T09:59:30Z","availability":"available","freshness":"fresh","signal":0.5}],"routes":[],"pending_targets":[],"problem":false,"errors":[]}'
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
-assert_has 'Best available pace: +0.5 — unused quota accumulating toward reset (projection) (provider alpha'
+assert_has 'Best available pace: +0.5 — provider alpha'
 
 # Exclusions: none of these may supply pace; pure exclusion is not a warning.
 start_case exclusions_all
@@ -346,10 +393,14 @@ doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :questionmark.circle:'
-assert_has 'Best available pace: unavailable — no fresh, available, eligible provider with a computable signal'
+assert_has 'Best available pace: unavailable'
+assert_has '--Pace unavailable detail: no fresh, available, eligible provider'
+assert_has '--Pace unavailable counts: gated 1; disabled 1'
 assert_lacks 'WARNING:'
-assert_has '----Pace signal: +9.9 — unused quota accumulating toward reset (projection) (freshness: fresh) — computed despite the quota gate; the gate holds routing off'
-assert_has '— provider manually disabled; shown for information only'
+assert_has '----Pace signal: +9.9 (freshness: fresh)'
+assert_has '----Pace signal meaning: unused quota accumulating toward reset (projection)'
+assert_has '----Pace signal note: computed despite the quota gate; the gate holds routing off'
+assert_has '----Pace signal note: provider manually disabled; shown for information only'
 assert_count 6 '--Provider: '
 
 start_case no_signal_fresh_available
@@ -360,7 +411,9 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :questionmark.circle:'
 assert_has 'Best available pace: unavailable'
-assert_has '----Pace signal: unavailable (not computable from saved evidence; a real zero is shown as 0)'
+assert_has '--Pace unavailable detail: no fresh, available, eligible provider'
+assert_has '----Pace signal: unavailable'
+assert_has '----Pace signal note: not computable from saved evidence; a real zero is shown as 0'
 assert_lacks 'WARNING:'
 
 # Red only when every non-disabled quota-observed provider is fresh + unavailable.
@@ -373,7 +426,8 @@ doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :xmark.circle: | color=red'
-assert_has 'Observed unavailability: every quota-observed, non-disabled provider is fresh and explicitly unavailable — observed state, not necessarily quota exhaustion.'
+assert_has 'Observed unavailability: observed state, not necessarily exhaustion'
+assert_has '--Unavailability detail: every quota-observed, non-disabled provider is fresh'
 assert_lacks 'WARNING:'
 
 start_case not_red_gated_plus_unknown
@@ -418,10 +472,11 @@ doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'WARNING: older polytoken-quota CLI without signal/freshness fields — pace unavailable'
+assert_has 'WARNING: older polytoken-quota CLI: no signal/freshness fields — pace unavailable'
 assert_has '--Provider: legacy'
 assert_has '----Window: weekly'
 assert_has 'Best available pace: unavailable'
+assert_has 'Note: connected CLI lacks signal/freshness fields — pace unavailable'
 
 # Bars and raw numbers.
 start_case bars_percent_only
@@ -523,7 +578,8 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_has '----Next reset: 2026-10-01T00:00:00Z (UTC)'
 assert_has '----Checked: 2026-09-21T09:59:30Z — freshness fresh'
-assert_has 'Note: 2026-09-21T09:59:30Z is the newest observation across providers, not proof every provider is fresh.'
+assert_has '--Newest observation: 2026-09-21T09:59:30Z'
+assert_has '--Newest observation: newest across providers, not proof every provider is fresh.'
 assert_has 'Signals as of: 2026-09-21T10:00:00Z (UTC)'
 
 # Routing.
@@ -561,7 +617,8 @@ assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
 assert_has 'WARNING: 1 pending reconciler target(s)'
 assert_has 'Pending target: t-abc'
-assert_has 'Note: pending means outstanding reconciler work; reported routing may not yet be applied.'
+assert_has '--Pending detail: outstanding reconciler work.'
+assert_has '--Pending detail: reported routing may not yet be applied.'
 
 start_case status_errors_warning
 standard_setup
@@ -571,7 +628,8 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
 assert_has 'WARNING: status reported 2 diagnostic error(s)'
-assert_has 'Errors: 2 reported (scope provider = provider/quota projection, route = route projection)'
+assert_has 'Errors: 2 reported'
+assert_has '--Error scopes: provider = provider/quota projection; route = route projection'
 assert_has '--Error: provider — target global'
 assert_has '----Summary: provider projection failed'
 assert_has '--Error: route — target proj'
@@ -755,7 +813,7 @@ rm -f "$CASE_DIR/bin/polytoken"
 printf 'quota_bin=%s/bin/polytoken-quota\njq_bin=%s\n' "$CASE_DIR" "$JQ_ABS" > "$CASE_DIR/plugin.conf"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'WARNING: polytoken prerequisite not found (the quota CLI requires it at startup; set polytoken_bin)'
+assert_has 'WARNING: polytoken prerequisite not found — set polytoken_bin'
 assert_has 'Best available pace: unavailable — status was not run (missing dependency)'
 
 start_case deps_via_home_search
@@ -808,8 +866,8 @@ assert_menu_ok
 assert_count_re 1 'refresh=true$'
 # Any data-borne action syntax must sit before the literal flags, i.e. inside
 # the title, never in the attribute position.
-if printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -qvE 'emojize=false symbolize=false$'; then
-  bad "action syntax outside title: $(printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -vE 'emojize=false symbolize=false$' | head -n 1)"
+if printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -qvE 'length=85$'; then
+  bad "action syntax outside title: $(printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -vE 'length=85$' | head -n 1)"
 else
   ok
 fi
@@ -1051,8 +1109,8 @@ status_fixture '{"routing_enabled":false,"provider_only":false,"providers":[],"r
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'WARNING: older polytoken-quota CLI without signal/freshness fields — pace unavailable'
-assert_has 'Note: connected CLI does not expose signal/freshness fields; provider details are shown, pace is unavailable.'
+assert_has 'WARNING: older polytoken-quota CLI: no signal/freshness fields — pace unavailable'
+assert_has 'Note: connected CLI lacks signal/freshness fields — pace unavailable'
 
 start_case c3_no_clock_error_not_compat
 standard_setup
@@ -1189,14 +1247,75 @@ assert_has 'WARNING: status exit 1 (partial projection report)'
 assert_has 'Best available pace: +0.3'
 assert_member_gone
 
+# Screenshot-driven layout regression: the root menu stays concise (long
+# explanations live in submenus/About), every informational line carries the
+# literal flags and the length=85 cap, and timestamps keep their supplied
+# RFC3339 zone (Z labeled UTC, explicit offsets never mislabeled UTC).
+start_case root_layout_concise
+standard_setup
+status_fixture "$(wrap_status "$(prov_base alpha available 0.42)")"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_layout_compact
+assert_count 1 'Best available pace:'
+assert_has '--Pace tie-break: deterministic, by signal then rank then name'
+if printf '%s\n' "$OUT" | awk '
+    /^---$/ { next }
+    /^Quota / { next }
+    /^Refresh status / { next }
+    /^About this status$/ { next }
+    { line = $0; sub(/\| emojize.*$/, "", line); sub(/[ \t]+$/, "", line)
+      if (line !~ /^-/ && line ~ /tie-break|not fleet health|independent reads/) bad = 1 }
+    END { exit !bad }'; then
+  bad "long explanation found at root level instead of a submenu"
+else
+  ok
+fi
+
+start_case tz_doctor_offset_as_of
+standard_setup
+status_fixture "$(wrap_status "")"
+doctor_fixture '{"as_of":"2026-10-04T19:26:47.033928-04:00","actionable":true,"findings":[{"code":"quota-stale-snapshot","severity":"error","target_id":"codex","message":"snapshot is stale"}],"recovered":[]}'
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'Doctor as of: 2026-10-04T19:26:47.033928-04:00 — actionable: yes'
+assert_lacks '033928-04:00 (UTC)'
+
+start_case tz_status_timestamps_offset
+standard_setup
+status_fixture "$(wrap_status '{"provider":"a","status":"available","rank":1,"off_peak":false,"eligible":true,"reason":"ok","windows":[{"name":"w","used":1,"limit":2,"usage_percent":50,"reset_at":"2026-09-25T12:00:00+02:00"}],"next_reset_at":"2026-09-25T12:00:00+02:00","checked_at":"2026-09-21T09:59:30-04:00","availability":"available","freshness":"fresh","signal":0.1}')"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has '----Next reset: 2026-09-25T12:00:00+02:00'
+assert_has '------Resets: 2026-09-25T12:00:00+02:00'
+assert_has '----Checked: 2026-09-21T09:59:30-04:00 — freshness fresh'
+assert_lacks '+02:00 (UTC)'
+assert_lacks '-04:00 (UTC)'
+
+start_case about_survives_unusable_status
+standard_setup
+printf 'not json {{{' > "$CASE_DIR/status.json"
+doctor_fixture "$(empty_doctor)"
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_has 'WARNING: status output is malformed or unparseable'
+assert_has 'About this status'
+assert_has '--Note: status and diagnostics are two independent reads.'
+assert_has '--Note: the menu-bar icon is best available pace.'
+
 # Fixed footer always present; menu never blank.
 start_case footer_fixed
 standard_setup
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_count 1 'Refresh status | refresh=true'
-assert_has 'Note: the menu-bar icon is best available pace, not fleet health, a token balance, or actual serving.'
-assert_has 'Note: status and diagnostics are two independent reads and may observe different state revisions.'
+assert_has 'About this status'
+assert_has '--Note: the menu-bar icon is best available pace.'
+assert_has '--Note: it is not fleet health, a token balance, or actual serving.'
+assert_has '--Note: status and diagnostics are two independent reads.'
+assert_has '--Note: gated is a quota-gate claim on the enabled field, not observed exhaustion.'
 assert_no_stderr_leak
 
 # --- summary -----------------------------------------------------------------------
