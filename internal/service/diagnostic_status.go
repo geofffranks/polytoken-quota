@@ -49,6 +49,14 @@ type MergedStatusProvider struct {
 	// otherwise the latest attempt's — so an observed-but-failed row stays
 	// distinguishable from a never-observed one even when both read `gated`.
 	CheckedAt time.Time `json:"checked_at,omitempty"`
+	// LatestAttempt preserves attempt provenance independently from the snapshot.
+	LatestAttempt *QuotaAttemptReport `json:"latest_attempt,omitempty"`
+	// ObservationAt is the timestamp of the last quota snapshot only; unlike
+	// CheckedAt, it never falls back to an attempt time.
+	ObservationAt time.Time `json:"observation_at,omitempty"`
+	// PollingStatus reports whether quota polling is configured and supported.
+	// Empty means no quota polling configuration is present.
+	PollingStatus string `json:"polling_status,omitempty"`
 	// Availability is the stored quota snapshot's own availability
 	// (available/unavailable/unknown), read from the raw pre-aggregation
 	// snapshot; empty when never observed. Distinct from the consolidated
@@ -93,6 +101,13 @@ type SkippedModel struct {
 	Reason string `json:"reason"`
 }
 
+// PendingTargetDetail carries only bounded pending-target identity and its last
+// attempted time; a first-pending duration is intentionally not inferred.
+type PendingTargetDetail struct {
+	TargetID      string    `json:"target_id"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+}
+
 // MergedStatusReport is the result of the merged status command. LastChecked
 // is the max snapshot CheckedAt across providers (zero when never observed).
 // AsOf is the single clock sample every time-sensitive projection in the
@@ -108,6 +123,7 @@ type MergedStatusReport struct {
 	Providers      []MergedStatusProvider `json:"providers,omitempty"`
 	Routes         []MergedStatusRoute    `json:"routes,omitempty"`
 	PendingTargets []string               `json:"pending_targets,omitempty"`
+	PendingDetails []PendingTargetDetail  `json:"pending_details,omitempty"`
 	Problem        bool                   `json:"problem"`
 	Errors         []DiagnosticError      `json:"errors,omitempty"`
 	Error          string                 `json:"error,omitempty"`
@@ -125,6 +141,7 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	report.ProviderOnly = s.providerOnly
 	report.Problem = s.problem
 	report.PendingTargets = append([]string(nil), s.pendingTargets...)
+	report.PendingDetails = append([]PendingTargetDetail(nil), s.pendingDetails...)
 	report.Errors = cloneDiagnosticErrors(s.providerErrors)
 	report.Errors = append(report.Errors, cloneDiagnosticErrors(s.routeErrors)...)
 
@@ -175,6 +192,12 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		// time when no snapshot exists, so observed-but-failed rows stay
 		// distinguishable from never-observed ones.
 		row.CheckedAt = provider.CheckedAt
+		if provider.LatestAttempt != nil {
+			attempt := *provider.LatestAttempt
+			row.LatestAttempt = &attempt
+		}
+		row.ObservationAt = provider.CheckedAt
+		row.PollingStatus = providerPollingStatus(provider, s.asOf, s.evidence, s.pollerEnabled)
 		if row.CheckedAt.IsZero() && provider.LatestAttempt != nil {
 			row.CheckedAt = provider.LatestAttempt.CheckedAt
 		}
@@ -203,6 +226,19 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		report.Routes = append(report.Routes, row)
 	}
 	return report
+}
+
+func providerPollingStatus(provider ProviderProjection, asOf time.Time, evidence *quota.EvidenceRegistry, pollerEnabled bool) string {
+	if provider.Adapter == "" {
+		return "unknown"
+	}
+	if !pollerEnabled {
+		return "disabled"
+	}
+	if adapterSupport(provider.Adapter, asOf, evidence).Supported {
+		return "enabled"
+	}
+	return "unsupported"
 }
 
 // failedRouteKeys indexes the route-scope projection errors by target and

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	sanitizepkg "github.com/geofffranks/polytoken-quota/internal/sanitize"
 	"github.com/geofffranks/polytoken-quota/internal/selection"
 	"github.com/geofffranks/polytoken-quota/internal/service"
 	"github.com/geofffranks/polytoken-quota/internal/validate"
@@ -38,6 +39,17 @@ type statusWindowJSON struct {
 	ResetAt      string   `json:"reset_at,omitempty"`
 }
 
+type statusAttemptJSON struct {
+	Status    string `json:"status"`
+	CheckedAt string `json:"checked_at,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+type pendingDetailJSON struct {
+	TargetID      string `json:"target_id"`
+	LastAttemptAt string `json:"last_attempt_at,omitempty"`
+}
+
 // statusProviderJSON is one provider row in the status JSON envelope.
 type statusProviderJSON struct {
 	Provider string `json:"provider"`
@@ -61,7 +73,10 @@ type statusProviderJSON struct {
 	// fail-closed snapshot, windowless or not; empty otherwise.
 	Condition string `json:"condition,omitempty"`
 	// CheckedAt is the last observation time (snapshot, else latest attempt).
-	CheckedAt string `json:"checked_at,omitempty"`
+	CheckedAt     string             `json:"checked_at,omitempty"`
+	LatestAttempt *statusAttemptJSON `json:"latest_attempt,omitempty"`
+	ObservationAt string             `json:"observation_at,omitempty"`
+	PollingStatus string             `json:"polling_status,omitempty"`
 	// Availability is the stored snapshot's own availability
 	// (available/unavailable/unknown); omitted when never observed.
 	Availability string `json:"availability,omitempty"`
@@ -101,6 +116,7 @@ type statusJSON struct {
 	Providers      []statusProviderJSON `json:"providers"`
 	Routes         []statusRouteJSON    `json:"routes"`
 	PendingTargets []string             `json:"pending_targets"`
+	PendingDetails []pendingDetailJSON  `json:"pending_details,omitempty"`
 	Problem        bool                 `json:"problem"`
 	Errors         []diagErrorJSON      `json:"errors"`
 	Error          string               `json:"error,omitempty"`
@@ -126,6 +142,17 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 		if !p.CheckedAt.IsZero() {
 			pj.CheckedAt = p.CheckedAt.UTC().Format(time.RFC3339)
 		}
+		if p.LatestAttempt != nil {
+			aj := &statusAttemptJSON{Status: string(p.LatestAttempt.Status), Error: validate.DefaultSanitize([]byte(p.LatestAttempt.Error))}
+			if !p.LatestAttempt.CheckedAt.IsZero() {
+				aj.CheckedAt = p.LatestAttempt.CheckedAt.UTC().Format(time.RFC3339)
+			}
+			pj.LatestAttempt = aj
+		}
+		if !p.ObservationAt.IsZero() {
+			pj.ObservationAt = p.ObservationAt.UTC().Format(time.RFC3339)
+		}
+		pj.PollingStatus = p.PollingStatus
 		if p.Availability != "" {
 			pj.Availability = string(p.Availability)
 		}
@@ -163,6 +190,13 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 	}
 	if out.PendingTargets == nil {
 		out.PendingTargets = []string{}
+	}
+	for _, detail := range r.PendingDetails {
+		pj := pendingDetailJSON{TargetID: sanitizepkg.Identifier(detail.TargetID)}
+		if !detail.LastAttemptAt.IsZero() {
+			pj.LastAttemptAt = detail.LastAttemptAt.UTC().Format(time.RFC3339)
+		}
+		out.PendingDetails = append(out.PendingDetails, pj)
 	}
 	for _, e := range r.Errors {
 		out.Errors = append(out.Errors, diagErrorJSON{Scope: string(e.Scope), MappingID: e.MappingID, TargetID: e.TargetID, SourcePath: e.SourcePath, Summary: e.Summary})

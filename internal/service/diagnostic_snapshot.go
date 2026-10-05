@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
+	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/routing"
 	sanitizepkg "github.com/geofffranks/polytoken-quota/internal/sanitize"
 	"github.com/geofffranks/polytoken-quota/internal/state"
@@ -42,6 +43,7 @@ type DiagnosticSnapshot struct {
 	// instead of rendering them as silently empty.
 	providerOnly   bool
 	providers      []ProviderProjection
+	pendingDetails []PendingTargetDetail
 	ranks          []RankEntryReport
 	routes         []RouteProjection
 	explainRoutes  []ExplainRouteProjection
@@ -59,7 +61,9 @@ type DiagnosticSnapshot struct {
 	// observed carries the raw observed state loaded exactly once, so downstream
 	// consumers (doctor) can read pending targets and recovered history without a
 	// duplicate load.
-	observed state.State
+	observed      state.State
+	evidence      *quota.EvidenceRegistry
+	pollerEnabled bool
 	// desired carries the raw desired policy loaded exactly once, so downstream
 	// consumers can build quota probes without a duplicate load.
 	desired policy.Desired
@@ -109,6 +113,12 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 		return snapshot
 	}
 	snapshot.observed = observed
+	if c.QuotaPoller != nil {
+		snapshot.pollerEnabled = true
+	}
+	if provider, ok := c.QuotaPoller.(quotaEvidenceProvider); ok {
+		snapshot.evidence = provider.EvidenceRegistry()
+	}
 	if c.Targets == nil {
 		snapshot.fatalError = "resolve targets failed"
 		return snapshot
@@ -125,6 +135,7 @@ func (c *Coordinator) BuildDiagnosticSnapshot(_ context.Context) DiagnosticSnaps
 	snapshot.revision = observed.Revision
 	snapshot.targets, snapshot.pending, snapshot.drift = projectLegacyTargets(observed)
 	snapshot.pendingTargets = projectPendingTargets(observed)
+	snapshot.pendingDetails = projectPendingDetails(observed)
 	snapshot.legacyQuota, snapshot.problem = projectLegacyQuota(desired, observed, snapshot.asOf)
 	ranks, ranking := ComputeRanking(desired, observed, snapshot.asOf)
 	snapshot.ranks = completeRankProjection(desired, ranking.Entries)
@@ -242,6 +253,24 @@ func projectPendingTargets(observed state.State) []string {
 		out = append(out, id)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func projectPendingDetails(observed state.State) []PendingTargetDetail {
+	ids := make([]string, 0, len(observed.Targets))
+	for id, target := range observed.Targets {
+		if target.Pending != nil {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	out := make([]PendingTargetDetail, 0, len(ids))
+	for _, id := range ids {
+		target := observed.Targets[id]
+		out = append(out, PendingTargetDetail{
+			TargetID: sanitizepkg.Identifier(id), LastAttemptAt: target.AttemptedAt,
+		})
+	}
 	return out
 }
 

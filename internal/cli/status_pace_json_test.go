@@ -88,6 +88,49 @@ func TestStatusJSONSignalZeroPresentAbsentOmitted(t *testing.T) {
 // the envelope's evaluation instant in RFC3339 UTC, and that envelopes without
 // an evaluation instant (e.g. a fatal error) keep the previous shape with no
 // as_of key at all.
+func TestStatusJSONAttemptAndObservationAreIndependentAndSanitized(t *testing.T) {
+	observedAt := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	attemptedAt := observedAt.Add(time.Hour)
+	raw := runStatusJSON(t, 0, service.MergedStatusReport{
+		AsOf: observedAt.Add(2 * time.Hour),
+		Providers: []service.MergedStatusProvider{{
+			Provider: "gp", Status: service.StatusUnavailable, CheckedAt: observedAt,
+			ObservationAt: observedAt, PollingStatus: "unsupported",
+			LatestAttempt: &service.QuotaAttemptReport{Status: "failed", CheckedAt: attemptedAt, Error: "request failed api_key=CANARY"},
+		}},
+		PendingDetails: []service.PendingTargetDetail{{TargetID: "safe-id", LastAttemptAt: attemptedAt}},
+	})
+	var parsed struct {
+		Providers []struct {
+			CheckedAt     string `json:"checked_at"`
+			ObservationAt string `json:"observation_at"`
+			PollingStatus string `json:"polling_status"`
+			LatestAttempt struct {
+				Status    string `json:"status"`
+				CheckedAt string `json:"checked_at"`
+				Error     string `json:"error"`
+			} `json:"latest_attempt"`
+		} `json:"providers"`
+		PendingDetails []struct {
+			TargetID      string `json:"target_id"`
+			LastAttemptAt string `json:"last_attempt_at"`
+		} `json:"pending_details"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, raw)
+	}
+	p := parsed.Providers[0]
+	if p.CheckedAt != observedAt.Format(time.RFC3339) || p.ObservationAt != observedAt.Format(time.RFC3339) || p.LatestAttempt.CheckedAt != attemptedAt.Format(time.RFC3339) || p.PollingStatus != "unsupported" {
+		t.Fatalf("provider provenance = %+v", p)
+	}
+	if strings.Contains(p.LatestAttempt.Error, "CANARY") {
+		t.Fatalf("attempt error leaked secret marker: %q", p.LatestAttempt.Error)
+	}
+	if len(parsed.PendingDetails) != 1 || parsed.PendingDetails[0].TargetID != "safe-id" || parsed.PendingDetails[0].LastAttemptAt != attemptedAt.Format(time.RFC3339) {
+		t.Fatalf("pending detail = %+v", parsed.PendingDetails)
+	}
+}
+
 func TestStatusJSONAsOfIdentifiesEvaluationInstant(t *testing.T) {
 	asOf := time.Date(2026, 10, 2, 12, 30, 0, 0, time.FixedZone("shifted", 2*3600))
 	raw := runStatusJSON(t, 0, service.MergedStatusReport{AsOf: asOf})
