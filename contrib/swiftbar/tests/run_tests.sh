@@ -210,9 +210,8 @@ assert_no_stderr_leak() {
 
 assert_layout_compact() {
   # Two structural guarantees on the rendered menu:
-  # 1. flag/length safety — every informational line (everything except the
-  #    header, separators, the About parent, and the fixed Refresh action)
-  #    ends with the literal-parser flags AND the length=85 cap.
+  # 1. flag/length safety — every informational line ends with the literal
+  #    parser flags and length cap; submenu parents also carry a fixed color.
   # 2. concise root — root-level (non-child) titles stay within 60 chars;
   #    child titles within 85 (the SwiftBar length cap then only ever clips
   #    redundant text, with the full value in the tooltip).
@@ -220,11 +219,21 @@ assert_layout_compact() {
   viol=$(printf '%s\n' "$OUT" | awk '
     /^Quota / { next }
     /^---$/ { next }
-    /^About this status$/ { next }
     /^Refresh status \| refresh=true$/ { next }
+    $0 ~ /color=black,white/ {
+      if ($0 !~ /\| emojize=false symbolize=false length=85 color=black,white$/ || $0 ~ / (refresh|href|bash)=/) c++
+      next
+    }
     $0 !~ /\| emojize=false symbolize=false length=85$/ { c++ }
     END { print c + 0 }')
-  if [ "$viol" = 0 ]; then ok; else bad "$viol informational line(s) missing literal flags or length=85"; fi
+  if [ "$viol" = 0 ]; then ok; else bad "$viol informational line(s) missing literal flags/length or unsafe parent metadata"; fi
+  for parent in 'Providers:' '--Provider:' '----Window:' '--Route:' '--Finding:' 'Findings:' 'Recovered:' 'Diagnostics:' 'About this status'; do
+    if printf '%s\n' "$OUT" | grep -F -- "$parent" | grep -vq 'color=black,white'; then
+      bad "submenu parent [$parent] missing fixed appearance colors"
+    else
+      ok
+    fi
+  done
   rootover=$(printf '%s\n' "$OUT" | awk '
     /^---$/ { next }
     /^Quota / { next }
@@ -641,8 +650,9 @@ stub_rc status 2
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'WARNING: status exit 2 (quota problem report)'
+assert_header 'Quota +0.2 :arrow.up: | color=green'
+assert_lacks 'WARNING: quota issues reported'
+assert_lacks 'WARNING: status exit 2 (quota problem report)'
 assert_has '--Provider: a'
 assert_has 'Best available pace: +0.2'
 
@@ -693,7 +703,8 @@ status_fixture '{"as_of":"2026-09-21T10:00:00Z","routing_enabled":false,"provide
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'WARNING: status reported quota problems'
+assert_has 'WARNING: quota issues reported'
+assert_count 1 'WARNING: quota issues reported'
 
 # Doctor: parsed independently of exit status; classification; precedence.
 start_case doctor_actionable_warning
@@ -703,8 +714,9 @@ doctor_fixture '{"as_of":"2026-09-21T10:00:00Z","actionable":true,"findings":[{"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'WARNING: doctor reported 1 actionable finding(s)'
-assert_has 'Diagnostics: 1 finding(s), 1 actionable, 0 recovered'
+assert_has 'WARNING: diagnostics need attention: 1 of 1'
+assert_has 'Diagnostics: 1 need attention · 1 total · 0 recovered'
+assert_has 'Findings: 1 total; 1 need attention'
 assert_has '--Finding: quota-stale-snapshot [severity: error] — kind: quota evidence'
 assert_has '----Remediation (informational; the plugin performs no actions): run check to refresh the snapshot'
 assert_lacks 'WARNING: status'
@@ -726,7 +738,7 @@ status_fixture "$(wrap_status "")"
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'Diagnostics: 0 finding(s), 0 actionable, 0 recovered'
+assert_has 'Diagnostics: 0 need attention · 0 total · 0 recovered'
 assert_has 'Findings: none reported'
 assert_lacks 'WARNING:'
 
@@ -761,7 +773,7 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_has 'WARNING: doctor command failed (unexpected exit 143)'
 assert_lacks 'timed out'
-assert_has 'Diagnostics: 0 finding(s), 0 actionable, 0 recovered'
+assert_has 'Diagnostics: 0 need attention · 0 total · 0 recovered'
 
 start_case doctor_natural_rc137_not_timeout
 standard_setup
@@ -787,7 +799,23 @@ assert_has 'Best available pace: +0.2'
 assert_has '--Provider: a'
 # Findings are parsed independently of the problem exit: usable doctor output
 # still renders its tables even though the failure warns.
-assert_has 'Diagnostics: 0 finding(s), 0 actionable, 0 recovered'
+assert_has 'Diagnostics: 0 need attention · 0 total · 0 recovered'
+
+# Screenshot-shaped regression: status exit 2 and problem flag produce one
+# quota warning; doctor count clearly separates actionable findings from total.
+start_case screenshot_warning_and_doctor_counts
+standard_setup
+status_fixture '{"as_of":"2026-09-21T10:00:00Z","routing_enabled":false,"provider_only":false,"providers":[],"routes":[],"pending_targets":[],"problem":true,"errors":[]}'
+stub_rc status 2
+doctor_fixture '{"as_of":"2026-09-21T10:00:00Z","actionable":true,"findings":[{"code":"quota-stale-snapshot","severity":"error","message":"stale evidence"},{"code":"target-pending","severity":"warning","message":"pending work"},{"code":"journal-incomplete","severity":"info","message":"journal information"},{"code":"orphaned-provider-state","severity":"info","message":"persisted information"},{"code":"policy-schema","severity":"info","message":"policy information"},{"code":"misc-a","severity":"info","message":"info a"},{"code":"misc-b","severity":"info","message":"info b"},{"code":"misc-c","severity":"info","message":"info c"}],"recovered":[]} '
+run_plugin "$CASE_DIR/plugin.conf"
+assert_menu_ok
+assert_count 1 'WARNING: quota issues reported'
+assert_count 1 'WARNING: diagnostics need attention: 2 of 8'
+assert_has 'Diagnostics: 2 need attention · 8 total · 0 recovered'
+assert_has 'Findings: 8 total; 2 need attention'
+assert_has '--Finding: journal-incomplete [severity: info] — kind: journal/publication'
+assert_has '----Message: journal information'
 
 # Dependencies: missing/bad jq, quota CLI, polytoken prerequisite.
 start_case dep_missing_jq
@@ -866,8 +894,8 @@ assert_menu_ok
 assert_count_re 1 'refresh=true$'
 # Any data-borne action syntax must sit before the literal flags, i.e. inside
 # the title, never in the attribute position.
-if printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -qvE 'length=85$'; then
-  bad "action syntax outside title: $(printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -vE 'length=85$' | head -n 1)"
+if printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -qvE 'length=85( color=black,white)?$'; then
+  bad "action syntax outside title: $(printf '%s\n' "$OUT" | grep 'href=\|bash=\|terminal=\|params0' | grep -vE 'length=85( color=black,white)?$' | head -n 1)"
 else
   ok
 fi
@@ -1229,7 +1257,8 @@ printf '1\n' > "$CASE_DIR/status.child"
 doctor_fixture "$(empty_doctor)"
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'WARNING: status exit 2 (quota problem report)'
+assert_lacks 'WARNING: status exit 2 (quota problem report)'
+assert_count 1 'WARNING: quota issues reported'
 assert_has '--Provider: a'
 assert_member_gone
 
@@ -1279,7 +1308,7 @@ status_fixture "$(wrap_status "")"
 doctor_fixture '{"as_of":"2026-10-04T19:26:47.033928-04:00","actionable":true,"findings":[{"code":"quota-stale-snapshot","severity":"error","target_id":"codex","message":"snapshot is stale"}],"recovered":[]}'
 run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
-assert_has 'Doctor as of: 2026-10-04T19:26:47.033928-04:00 — actionable: yes'
+assert_has 'Doctor as of: 2026-10-04T19:26:47.033928-04:00'
 assert_lacks '033928-04:00 (UTC)'
 
 start_case tz_status_timestamps_offset
@@ -1302,8 +1331,8 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_has 'WARNING: status output is malformed or unparseable'
 assert_has 'About this status'
-assert_has '--Note: status and diagnostics are two independent reads.'
-assert_has '--Note: the menu-bar icon is best available pace.'
+assert_has '--Status and diagnostics are independent reads and may differ.'
+assert_has '--Pace is a projection from saved quota evidence, not live traffic.'
 
 # Fixed footer always present; menu never blank.
 start_case footer_fixed
@@ -1312,10 +1341,10 @@ run_plugin "$CASE_DIR/plugin.conf"
 assert_menu_ok
 assert_count 1 'Refresh status | refresh=true'
 assert_has 'About this status'
-assert_has '--Note: the menu-bar icon is best available pace.'
-assert_has '--Note: it is not fleet health, a token balance, or actual serving.'
-assert_has '--Note: status and diagnostics are two independent reads.'
-assert_has '--Note: gated is a quota-gate claim on the enabled field, not observed exhaustion.'
+assert_has '--Pace is a projection from saved quota evidence, not live traffic.'
+assert_has '--Status and diagnostics are independent reads and may differ.'
+assert_has '--Newest observation is not proof every provider is fresh.'
+assert_lacks 'gated is a quota-gate claim'
 assert_no_stderr_leak
 
 # --- summary -----------------------------------------------------------------------

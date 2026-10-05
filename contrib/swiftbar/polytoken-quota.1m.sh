@@ -40,6 +40,8 @@ BAR_WIDTH=20            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
 LIT="emojize=false symbolize=false length=85"
+# Fixed adaptive color routes submenu parents through SwiftBar without an action.
+PARENT_LIT="emojize=false symbolize=false length=85 color=black,white"
 
 # Fallback search dirs (newline-separated) for minimal GUI PATH environments.
 SEARCH_DIRS="/opt/homebrew/bin
@@ -335,6 +337,7 @@ def s2: if . == null then "unknown" else safe end;
 # source (MenuBarItem.patchMenuItem) shows a set length shorter than the
 # title truncates the visible text and moves the full text into the tooltip.
 def lit: " | emojize=false symbolize=false length=85";
+def parentlit: " | emojize=false symbolize=false length=85 color=black,white";
 # Label a supplied RFC3339 timestamp with its own zone: a trailing Z is UTC;
 # any explicit offset (e.g. -04:00) is already shown by the value itself, so
 # no annotation is added.
@@ -457,7 +460,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
       "---",
       (if ($cands|length) > 0 then
          $cands[0] as $b
-         | "Best available pace: \(fmtsig($b.signal)) — provider \(($b.provider|safe))\(lit)",
+         | "Best available pace: \(fmtsig($b.signal)) — provider \(($b.provider|safe))\(parentlit)",
            "--Pace meaning: \(pace_meaning($b.signal))\(lit)",
            "--Pace basis: fresh; available; eligible\(lit)",
            "--Pace tie-break: deterministic, by signal then rank then name\(lit)",
@@ -470,7 +473,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          | ([$ps[]? | select(.freshness == "stale")] | length) as $stale
          | ([$ps[]? | select(.freshness == "missing")] | length) as $miss
          | ([$ps[]? | select(isnum(.signal)|not)] | length) as $nosig
-         | "Best available pace: unavailable\(lit)",
+         | "Best available pace: unavailable\(parentlit)",
            "--Pace unavailable detail: no fresh, available, eligible provider\(lit)",
            "--Pace unavailable detail: no provider with a computable signal (counts below)\(lit)",
            "--Pace unavailable counts: gated \($g); disabled \($d)\(lit)",
@@ -490,14 +493,14 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          "--Validity detail: and from unavailability decisions; valid details still show.\(lit)"
        else empty end),
       "---",
-      "Providers: \($ps|length)\(lit)",
+      "Providers: \($ps|length)\(parentlit)",
       (if (($r.last_checked|s2) != "unknown") then
          "--Newest observation: \(($r.last_checked|safe))\(lit)",
          "--Newest observation: newest across providers, not proof every provider is fresh.\(lit)"
        else empty end),
       (if ($ps|length) == 0 then "No providers are configured or projected.\(lit)" else empty end),
       ($ps[]? | . as $p
-       | "--Provider: \(($p.provider|safe))\(lit)",
+       | "--Provider: \(($p.provider|safe))\(parentlit)",
          "----State: \(($p.status|s2))\(if (($p.reason // "")|safe) != "" then " — \(($p.reason|safe))" else "" end)\(lit)",
          (if row_valid($compat)|not then
             "----Validity: invalid row (\([row_problems($compat)[]|safe]|join("; "))) — excluded from pace and unavailability decisions\(lit)"
@@ -527,7 +530,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
           | (if isnum($w.usage_percent) and isnum($w.used) and isnum($w.limit) and $w.limit > 0 and $w.used >= 0
                and ((($w.usage_percent) - (($w.used/$w.limit)*100))|fabs) > '$PCT_DIFF_LIMIT'
              then " (reported percent disagrees with used/limit)" else "" end) as $disagree
-          | "----Window: \(($w.name|s2)) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \($vispct)\($over)\($badnote)\(lit)",
+          | "----Window: \(($w.name|s2)) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \($vispct)\($over)\($badnote)\(parentlit)",
             "------Window name: \(($w.name|s2))\(lit)",
             "------Used: \(if isnum($w.used) then ($w.used|tostring) elif $w.used == null then "unknown" else "\(($w.used|safe)) (non-numeric)" end)\(lit)",
             "------Limit: \(if isnum($w.limit) then ($w.limit|tostring) elif $w.limit == null then "unknown" else "\(($w.limit|safe)) (non-numeric)" end)\(lit)",
@@ -540,7 +543,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
        elif $r.routing_enabled == false then "Routing: disabled\(lit)"
        else "Routing: unknown\(lit)" end),
       (($r.routes // [])[]? | . as $rt
-       | "--Route: \(($rt.name|safe))\(lit)",
+       | "--Route: \(($rt.name|safe))\(parentlit)",
          (if ($rt.target_id|s2) != "" then "----Target: \(($rt.target_id|safe))\(lit)" else empty end),
          (if ($rt.source_path|s2) != "" then "----Source: \(($rt.source_path|safe))\(lit)" else empty end),
          "----Desired: \(if (($rt.desired // [])|length) > 0 then [($rt.desired[]?)|safe]|join(", ") else "(none)" end)\(lit)",
@@ -548,13 +551,13 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          (($rt.skipped // [])[]? | "----Skipped: \((.model|safe)) — \((.reason|safe))\(lit)"),
          "----Projection error: \(if $rt.projection_error == true then "yes" else "no" end)\(lit)"),
       (if (($r.pending_targets // [])|length) > 0 then
-         "Pending: \(($r.pending_targets|length)) outstanding target(s)\(lit)",
+         "Pending: \(($r.pending_targets|length)) outstanding target(s)\(parentlit)",
          (($r.pending_targets // [])[]? | "Pending target: \(safe)\(lit)"),
          "--Pending detail: outstanding reconciler work.\(lit)",
          "--Pending detail: reported routing may not yet be applied.\(lit)"
        else empty end),
       (if (($r.errors // [])|length) > 0 then
-         "Errors: \(($r.errors|length)) reported\(lit)",
+         "Errors: \(($r.errors|length)) reported\(parentlit)",
          "--Error scopes: provider = provider/quota projection; route = route projection\(lit)",
          (($r.errors // [])[]? | . as $e
           | "--Error: \(($e.scope|s2))\(if (($e.target_id // "")|safe) != "" then " — target \(($e.target_id|safe))" else "" end)\(lit)",
@@ -569,11 +572,12 @@ JQ_DOCTOR_BODY="$JQ_HELPERS"'
 . as $r
 | if ($r|type) != "object" or ($r.findings|type) != "array" then "Diagnostics output has an unexpected shape.\(lit)"
   else
-    "Doctor as of: \(($r.as_of|s2))\(tz($r.as_of)) — actionable: \(if $r.actionable == true then "yes" else "no" end)\(lit)",
+    "Doctor as of: \(($r.as_of|s2))\(tz($r.as_of))\(lit)",
     ([$r.findings[]?]) as $fs
-    | (if ($fs|length) == 0 then "Findings: none reported\(lit)" else "Findings: \(($fs|length))\(lit)" end),
+    | ([$fs[] | select(.severity == "warning" or .severity == "error")] | length) as $actionable
+    | (if ($fs|length) == 0 then "Findings: none reported\(parentlit)" else "Findings: \(($fs|length)) total; \($actionable) need attention\(parentlit)" end),
     ($fs[]? | . as $f
-     | "--Finding: \(($f.code|s2)) [severity: \(($f.severity|s2))] — kind: \(kind($f.code))\(lit)",
+     | "--Finding: \(($f.code|s2)) [severity: \(($f.severity|s2))] — kind: \(kind($f.code))\(parentlit)",
        "----Message: \(($f.message|safe))\(lit)",
        (if (($f.target_id // "")|safe) != "" then "----Target: \(($f.target_id|safe))\(lit)" else empty end),
        (if (($f.file // "")|safe) != "" then "----File: \(($f.file|safe))\(lit)" else empty end),
@@ -581,8 +585,8 @@ JQ_DOCTOR_BODY="$JQ_HELPERS"'
        (if (($f.remediation // "")|safe) != "" then "----Remediation (informational; the plugin performs no actions): \(($f.remediation|safe))\(lit)" else empty end)),
     (($r.recovered // []) as $rec
      | if ($rec|length) > 0 then
-         "Recovered: \($rec|length)\(lit)",
-         ($rec[]? | "--Recovered: \((.target_id|safe)) — stage \((.stage|safe))\(lit)",
+         "Recovered: \($rec|length)\(parentlit)",
+         ($rec[]? | "--Recovered: \((.target_id|safe)) — stage \((.stage|safe))\(parentlit)",
                     "----Summary: \((.summary|safe))\(lit)")
        else empty end),
     "--Note: doctor reports persisted/reported findings.\(lit)",
@@ -708,7 +712,7 @@ rc_text() {
 
 case "$STATUS_RC" in
   1) warn "status $(rc_text 1)" ;;
-  2) warn "status $(rc_text 2)" ;;
+  2) : ;; # the problem flag below supplies the single quota-issues warning
   124) warn "status command timed out after ${CMD_TIMEOUT}s" ;;
   125) warn "status capture setup failed — command not run" ;;
   0|skipped|nobudget) : ;;
@@ -749,7 +753,7 @@ if [ "$STATUS_RC" != "skipped" ] && [ "$STATUS_RC" != nobudget ] && [ "$STATUS_R
     else
       STATUS_OK=1
       [ "$COMPAT" = 1 ] && warn "older polytoken-quota CLI: no signal/freshness fields — pace unavailable"
-      [ "$STPROBLEM" = 1 ] && warn "status reported quota problems"
+      [ "$STPROBLEM" = 1 ] && warn "quota issues reported"
       [ "$STTOPERR" = 1 ] && warn "status reported an error"
       [ "$STERRS" -gt 0 ] && warn "status reported $STERRS diagnostic error(s)"
       [ "$STPENDING" -gt 0 ] && warn "$STPENDING pending reconciler target(s)"
@@ -826,7 +830,7 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ "$DOCTOR_R
       warn "doctor output has an unexpected shape"
     else
       DOCTOR_OK=1
-      [ "$D_ACT" -gt 0 ] && warn "doctor reported $D_ACT actionable finding(s)"
+      [ "$D_ACT" -gt 0 ] && warn "diagnostics need attention: $D_ACT of $D_FIND"
       if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
         run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null
         jqrc=$?
@@ -897,11 +901,11 @@ fi
 
 if [ "$DOCTOR_OK" = 1 ]; then
   if [ "$DOCTOR_PARSED" = 1 ]; then
-    printf '%s | %s\n' "Diagnostics: $D_FIND finding(s), $D_ACT actionable, $D_REC recovered" "$LIT"
+    printf '%s | %s\n' "Diagnostics: $D_ACT need attention · $D_FIND total · $D_REC recovered" "$PARENT_LIT"
     printf '%s\n' "---"
     cat "$DOCTOR_BODY"
   else
-    printf '%s | %s\n' "Diagnostics: $D_FIND finding(s), $D_ACT actionable — details could not be rendered" "$LIT"
+    printf '%s | %s\n' "Diagnostics: $D_ACT need attention · $D_FIND total — details could not be rendered" "$PARENT_LIT"
     printf '%s\n' "---"
   fi
 else
@@ -909,17 +913,10 @@ else
   printf '%s\n' "---"
 fi
 
-# Static disclaimers live in one submenu so they survive even when a read
-# fails; the menu stays concise without losing the required disclosures.
-printf '%s\n' "About this status"
-printf '%s | %s\n' "--Note: the menu-bar icon is best available pace." "$LIT"
-printf '%s | %s\n' "--Note: it is not fleet health, a token balance, or actual serving." "$LIT"
-printf '%s | %s\n' "--Note: status and diagnostics are two independent reads." "$LIT"
-printf '%s | %s\n' "--Note: they may observe different state revisions." "$LIT"
-printf '%s | %s\n' "--Note: gated is a quota-gate claim on the enabled field, not observed exhaustion." "$LIT"
-printf '%s | %s\n' "--Note: pace is a use-it-or-lose-it projection from saved quota evidence." "$LIT"
-printf '%s | %s\n' "--Note: it is not live traffic or a guarantee." "$LIT"
-printf '%s | %s\n' "--Note: pending means outstanding reconciler work." "$LIT"
-printf '%s | %s\n' "--Note: reported routing may not yet be applied." "$LIT"
+# Short interpretation notes live in a submenu and survive either read failing.
+printf '%s | %s\n' "About this status" "$PARENT_LIT"
+printf '%s | %s\n' "--Pace is a projection from saved quota evidence, not live traffic." "$LIT"
+printf '%s | %s\n' "--Status and diagnostics are independent reads and may differ." "$LIT"
+printf '%s | %s\n' "--Newest observation is not proof every provider is fresh." "$LIT"
 printf '%s\n' "Refresh status | refresh=true"
 exit 0

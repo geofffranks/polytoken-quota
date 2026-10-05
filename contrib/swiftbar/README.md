@@ -110,16 +110,21 @@ Rules:
 ## Reading the display
 
 The menu stays concise by design: the root shows one-line summaries, and
-longer explanations live in submenus (pace details under the pace line,
-per-provider and per-route rows, and an `About this status` section that
-groups every disclaimer). Every informational line carries SwiftBar's
-`length=85` cap — verified against SwiftBar's source, a set `length` shorter
-than the text truncates the visible row and moves the full text into the
-row's tooltip — so no line can grow to screen width. Crucial raw values are
-not left to truncation alone: used/limit/usage numbers, reset times, and
-warning reasons each get their own line. Informational rows without actions
-may appear dimmed in SwiftBar; that is normal, and no click actions were
-added to change it.
+longer explanations live under pace, provider, route, diagnostic, and About
+parents. Every informational line carries SwiftBar's `length=85` cap — a set
+`length` shorter than the text truncates the visible row and moves the full
+text into its tooltip — so no line can grow to screen width. Crucial raw values
+are not left to truncation alone: used/limit/usage numbers, reset times, and
+warning reasons each get their own line.
+
+Submenu parents have a fixed light/dark text color (`color=black,white`) but no
+`refresh`, URL, or shell action. This works around a SwiftBar menu-item action
+routing regression seen in released 2.1.x versions; fixtures verify the output
+metadata only and cannot verify native menu behavior. SwiftBar's merged
+[submenu action ownership fix](https://github.com/swiftbar/SwiftBar/pull/518)
+addresses grey, unexpandable submenu parents; if a parent still appears disabled
+or will not open, update SwiftBar to a build containing that fix. Do not treat
+a chevron or the fixture suite as proof the native menu opens.
 
 Timestamps are shown exactly as the CLI supplied them, RFC3339 with their own
 zone: a trailing `Z` is labeled `(UTC)`, and an explicit offset such as
@@ -150,10 +155,12 @@ then provider name.
 
 Warning precedence: command failure, timeout, malformed or unexpected output,
 an older CLI without the signal/freshness fields (shown as a compatibility
-warning; provider details still render, pace does not), actionable doctor
-findings, status errors or quota problems, or pending reconciler targets all
-turn the icon amber ahead of any pace display. Pace details remain in the
-menu beneath the warning line.
+warning; provider details still render, pace does not), diagnostics needing
+attention, status errors or quota issues, or pending reconciler targets all
+turn the icon amber ahead of any pace display. A status exit 2 and its problem
+flag produce one quota-issues warning, not two. Quota issues remain separate
+from actionable diagnostics, since the reports need not refer to the same
+condition. Pace details remain in the menu beneath the warning line.
 
 Each provider row shows its consolidated state (`available`, `gated`,
 `disabled`, `unavailable`, or `enabled` before first observation) and reason,
@@ -170,9 +177,11 @@ values stay visible. When a reported percent disagrees with `used/limit` by
 more than 5 percentage points, both are kept and the row is marked. Zero is
 data: `0` values are shown, not hidden.
 
-The Diagnostics section lists `doctor` findings (sanitized code, severity,
-target/file context, message, and remediation when present) plus recovered
-journal entries. A finding's kind (quota evidence, reconciliation/pending,
+The Diagnostics summary states how many findings need attention, the total
+finding count, and recovered entries. Each `doctor` finding retains its
+severity, code, target/file context, message, and remediation when present;
+info-severity findings remain visible but are not included in the attention
+count. A finding's kind (quota evidence, reconciliation/pending,
 journal/publication, persisted state, policy/config) is a hint from its code,
 not a reclassification. Remediation text is informational: the plugin has no
 mutation buttons. Pending target IDs come from `status`; they mean
