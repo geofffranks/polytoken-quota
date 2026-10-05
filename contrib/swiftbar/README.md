@@ -14,14 +14,12 @@ stores credentials.
   require macOS 11+.
 - [SwiftBar](https://github.com/swiftbar/SwiftBar).
 - `jq` 1.6 or newer, for example via `brew install jq`.
-- The `polytoken-quota` CLI **built from this same branch** on the Mac. The
-  pace signal and freshness labels come from additive `status --json` fields
-  that only this branch's CLI emits, so the branch CLI is required for the
-  first install. If your Mac already runs a CLI built from this branch,
-  copying the updated plugin alone is enough to get this menu layout — the
-  plugin does not require a CLI upgrade just for the layout, and an older
-  CLI shows the built-in compatibility warning (details still render; pace
-  does not). Build it on the Mac from your checkout of this branch:
+- The `polytoken-quota` CLI built from the same revision as this plugin on
+  the Mac. The flat layout works with older JSON reports, but complete latest
+  attempt and polling labels require the additive diagnostic fields in this
+  revision. Without them, polling status and pending attempt time are unknown.
+  If required pace fields are absent, a visible compatibility warning disables
+  pace ordering and the icon uses no pace candidate. Build the CLI on your Mac:
 
   ```sh
   cd /path/to/polytoken-quota
@@ -109,90 +107,92 @@ Rules:
 
 ## Reading the display
 
-The menu stays concise by design: the root shows one-line summaries, and
-longer explanations live under pace, provider, route, diagnostic, and About
-parents. Every informational line carries SwiftBar's `length=85` cap — a set
-`length` shorter than the text truncates the visible row and moves the full
-text into its tooltip — so no line can grow to screen width. Crucial raw values
-are not left to truncation alone: used/limit/usage numbers, reset times, and
-warning reasons each get their own line.
+Opening the menu shows timing, data problems, pending work, doctor errors,
+and every configured provider and quota window directly. There are no provider
+or diagnostic submenus and no Option-only details. Long causes and remediation
+are split into continued root rows rather than hidden in tooltips. Routing
+chains, ranking internals, ordinary doctor info/warning findings, and recovered
+history stay available through the CLI rather than in this dashboard.
 
-Submenu parents have a fixed light/dark text color (`color=black,white`) but no
-`refresh`, URL, or shell action. This works around a SwiftBar menu-item action
-routing regression seen in released 2.1.x versions; fixtures verify the output
-metadata only and cannot verify native menu behavior. SwiftBar's merged
-[submenu action ownership fix](https://github.com/swiftbar/SwiftBar/pull/518)
-addresses grey, unexpandable submenu parents; if a parent still appears disabled
-or will not open, update SwiftBar to a build containing that fix. Do not treat
-a chevron or the fixture suite as proof the native menu opens.
+Informational rows use the system appearance; only quota bars use a fixed-width
+font. Disabled providers are status information, not clickable disabled controls.
+Actual inactive-row contrast still needs inspection in SwiftBar on a Mac in
+both light and dark appearances. The plugin adds no dummy action to force styling.
 
-Timestamps are shown exactly as the CLI supplied them, RFC3339 with their own
-zone: a trailing `Z` is labeled `(UTC)`, and an explicit offset such as
-`-04:00` is shown as-is without a UTC label.
+### Timing and problems
 
-The menu-bar icon shows the best available pace, not fleet health:
+`Latest quota observation` is the newest saved quota snapshot across providers,
+not a successful whole-check result. `Evaluation time` is when the CLI evaluates
+saved evidence, not a provider request or the display refresh time. Latest known
+per-provider failed/partial attempts remain visible even if an older saved
+snapshot is still fresh. Missing evidence is not a healthy zero. Polling labels
+use explicit configuration/support evidence; absent evidence says `status unknown`,
+not that a check failed.
 
-- `+N.NN` with an up arrow (green): the projection says unused quota
-  accumulates toward the next reset for the best candidate provider.
-- `0` with a right arrow: exactly on pace. A displayed zero is a real zero
-  from the engine, never a placeholder for missing data.
-- `-N.NN` with a down arrow: usage is running ahead of pace.
-- A triangle with amber color: warning precedence (below). Details stay in
-  the menu.
-- A red circle-slash: every quota-observed, non-disabled provider is fresh
-  and explicitly unavailable. This is observed unavailability, not
-  necessarily quota exhaustion.
-- A question-mark circle: pace is unavailable (no candidate: gated,
-  disabled, stale, never observed, ineligible, unavailable, or no computable
-  signal). This is never shown as a healthy zero.
+Pending targets always show `duration unknown`. Their latest reconciliation
+attempt time/age, when supplied, is not the duration of continuous pending work.
+Retries can update that attempt time without implying the pending work is new.
+Doctor-only pending reports lack structured timing and say time unknown; the
+plugin does not extract timestamps from prose. Reported fields may not yet be
+reconciled while work is pending.
 
-The pace number is a use-it-or-lose-it projection the quota engine computes
-from saved quota evidence at the listed `as_of` time. It is not measured
-traffic, a token balance, or a guarantee about serving. Tiny nonzero signals
-are displayed as `~+0` or `~-0` so rounding cannot flip the direction of the
-arrow. Ties between candidates break deterministically by signal, then rank,
-then provider name.
+The doctor count includes only error-level findings. Each error shows target
+context, cause, and remediation when supplied. Collection/data problems and
+interrupted reconciliation are shown independently even if doctor classifies
+them as info or warning. Ordinary omitted warnings alone do not cause an amber
+icon. Doctor exits 0 and 1 with valid diagnostic JSON are accepted reports.
 
-Warning precedence: command failure, timeout, malformed or unexpected output,
-an older CLI without the signal/freshness fields (shown as a compatibility
-warning; provider details still render, pace does not), diagnostics needing
-attention, status errors or quota issues, or pending reconciler targets all
-turn the icon amber ahead of any pace display. A status exit 2 and its problem
-flag produce one quota-issues warning, not two. Quota issues remain separate
-from actionable diagnostics, since the reports need not refer to the same
-condition. Pace details remain in the menu beneath the warning line.
+Status and doctor are independent reads, not an atomic snapshot or a record of
+one complete check. Supplied RFC3339 timestamps retain their zone: trailing `Z`
+is labeled `(UTC)`, while explicit offsets are shown as-is. Relative times are
+computed against the status evaluation time when both timestamps are parseable.
 
-Each provider row shows its consolidated state (`available`, `gated`,
-`disabled`, `unavailable`, or `enabled` before first observation) and reason,
-availability distinct from routing eligibility, checked time with freshness
-(`fresh`, `stale`, `missing`), rank, off-peak, eligibility, next reset, and
-its pace signal with meaning. A signal is shown even when a quota gate holds
-the provider off; the row says so. Each quota window shows a fixed-width bar
-plus every supplied raw number: used, limit, and usage percent, with the
-reset time exactly as supplied (a `Z` value is UTC). Bars prefer a reported
-percent, otherwise derive from
-nonnegative used and positive limit; a missing or invalid denominator renders
-an unknown bar. Only the visual fill is clamped at 100%, so over-limit raw
-values stay visible. When a reported percent disagrees with `used/limit` by
-more than 5 percentage points, both are kept and the row is marked. Zero is
-data: `0` values are shown, not hidden.
+### Providers and quota bars
 
-The Diagnostics summary states how many findings need attention, the total
-finding count, and recovered entries. Each `doctor` finding retains its
-severity, code, target/file context, message, and remediation when present;
-info-severity findings remain visible but are not included in the attention
-count. A finding's kind (quota evidence, reconciliation/pending,
-journal/publication, persisted state, policy/config) is a hint from its code,
-not a reclassification. Remediation text is informational: the plugin has no
-mutation buttons. Pending target IDs come from `status`; they mean
-outstanding reconciler work, and reported routing may not yet be applied.
-Routing shows the enabled state, provider-only mode (where routes are not
-applicable), and per-route desired/effective chains with skipped-model
-reasons and target/source provenance.
+The list is labeled `Ordered by available pace`, not routing priority:
 
-Status and diagnostics are two independent reads. The menu labels them as
-such and never claims one atomic snapshot; `last_checked` is the newest
-observation across providers, not proof that every provider is fresh.
+1. Fresh, explicitly available, eligible providers with a finite computable
+   signal come first, ordered by unrounded signal descending, then routing rank
+   and provider name ascending.
+2. Other enabled providers follow by rank and name, including stale/missing
+   evidence and unknown signals. Unknown signal is never zero.
+3. Gated, unavailable, and manually disabled providers follow by status and name.
+   A positive signal cannot move them above usable providers.
+
+A header shows consolidated status and pace. Non-usable signals are qualified;
+reasons and evidence keep manual disable, quota exhaustion, policy gates,
+availability, and eligibility distinct. If an older CLI lacks required fields,
+all providers instead use deterministic rank/name order with an explicit
+compatibility warning and no pace candidate.
+
+Each supplied window has a fixed-width text bar, used percentage, and reset
+row with time/countdown when available. Bars prefer the reported percentage;
+otherwise they derive it from nonnegative used and positive limit. Missing or
+invalid numbers render `No data` with an unknown bar. Only visual fill is
+clamped, so over-limit percentages stay visible and real zero remains zero.
+If reported percent differs from used/limit by more than 5 percentage points,
+a compact raw-data row retains both and marks the disagreement. Invalid
+supplied numbers also retain a raw-data row.
+
+### Menu-bar icon
+
+The icon uses the first usable provider's pace, not fleet health or actual
+routing priority. Pace is the quota engine's saved-evidence use-it-or-lose-it
+projection, not measured traffic or a serving guarantee:
+
+- Positive pace: green up arrow.
+- Real zero: right arrow; never a placeholder for missing data.
+- Negative pace: down arrow.
+- Tiny nonzero pace: `~+0` or `~-0`, retaining its direction.
+- Amber triangle: command/JSON/compatibility failures, provider data problems,
+  error-level doctor findings, pending work, or status quota issues. Every
+  warning reason is visible above providers.
+- Red unavailable icon: all observed non-disabled providers are fresh and
+  explicitly unavailable, unless an amber problem takes precedence.
+- Question mark: no usable pace candidate.
+
+`Refresh status` is the sole action. It rereads saved status and doctor data;
+it does not collect quotas, reconcile, or control a daemon.
 
 ## Safety
 
@@ -213,7 +213,9 @@ observation across providers, not proof that every provider is fresh.
   command's own exit status and the deadline verdict are preserved.
 - Captured output is capped while the command runs, not afterwards; a
   producer that writes past the cap is stopped early and the truncation is
-  reported in the menu.
+  reported in the menu. Expanded status/doctor menu bodies have the same cap;
+  an overflowing body is omitted with a visible warning, never displayed as
+  complete. A large report may therefore require the CLI for full details.
 - Setup is fail-closed: if the capture FIFO cannot be created or the owned
   process group cannot be established, the command is not run (an in-flight
   producer is killed) and the refresh reports the setup failure visibly.
@@ -234,9 +236,13 @@ POSIX-ish environment with Bash and `jq`; repository CI runs it on Linux.
 
 ## Known limitations
 
-- The icon, submenu layout, colors in light/dark mode, and the refresh action
-  are verified against SwiftBar's documented behavior and source, but only
-  rendered checks on a real Mac confirm the visual result.
+- Fixture tests verify output and safety, not native SwiftBar rendering. On a
+  reachable Mac, inspect both light and dark appearances for readable inactive
+  rows, reasonable width, bar alignment, and no submenu navigation. Until then,
+  contrast is unverified. If SwiftBar dims plain status rows beyond readability,
+  report that limitation rather than adding unsafe actions.
+- Many providers/windows make a long flat menu. Use the system menu scrolling;
+  essential data is not hidden in submenus to shorten it.
 - Each quota-CLI subprocess is bounded at 10 seconds (SIGKILL one second
   later) and each jq pass at 5 seconds; an outer 50-second budget skips
   whichever stages remain once it runs out. With every bound exhausted the
