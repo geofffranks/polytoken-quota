@@ -4,7 +4,7 @@ Read-only quota dashboard with a gauge icon. Requires macOS 12+, [SwiftBar](http
 
 ## Install
 
-1. Install SwiftBar and `jq` (`brew install jq`).
+1. Install SwiftBar and `jq` (`brew install swiftbar jq`).
 2. From the repository root, copy the plugin:
 
    ```sh
