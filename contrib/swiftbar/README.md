@@ -107,12 +107,14 @@ Rules:
 
 ## Reading the display
 
-The root menu is a compact dashboard: latest quota observation age, actionable
+The root menu is a compact dashboard: one quota-observation summary row, actionable
 errors/data issues and pending work, then every configured provider and quota
-window. There are no provider or diagnostic submenus and no hidden Option-only
-details. Long causes and remediation are split into continued root rows rather
-than tooltips. Ranking internals, routine healthy evidence, ordinary doctor
-info/warning findings, and recovered history stay available through the CLI.
+window. Each provider header combines its status, material reason, and condition;
+a quota bar and its reset time share one row. There are no provider or diagnostic
+submenus and no hidden Option-only details. Long causes and remediation are split
+into continued root rows rather than tooltips. Ranking internals, routine healthy
+evidence, ordinary doctor info/warning findings, and recovered history stay
+available through the CLI.
 
 Informational rows explicitly specify black text in light appearance and white
 text in dark appearance, including bars; SwiftBar 2.1.0 applies this foreground
@@ -125,7 +127,10 @@ Native visual confirmation in both appearances remains pending.
 
 ### Timing and problems
 
-`Latest quota observation` shows a relative age when timestamps parse, otherwise
+`Quota observation` shares one summary row with `No errors` or `Attention needed`
+and a count of reported status/doctor errors when positive. Data and pending
+problems require attention without being mislabeled as error-level findings.
+The age is relative when timestamps parse, otherwise it shows
 the supplied timestamp (or `time unknown`). It is the newest saved quota
 snapshot across providers, not a successful whole-check result or display refresh
 time. A failed/partial latest attempt appears as a concise data issue even if an
@@ -176,16 +181,18 @@ The icon uses the first usable provider's pace, not fleet health or actual
 routing priority. Pace is the quota engine's saved-evidence use-it-or-lose-it
 projection, not measured traffic or a serving guarantee:
 
-- Positive pace: green up arrow.
-- Real zero: right arrow; never a placeholder for missing data.
-- Negative pace: down arrow.
-- Tiny nonzero pace: `~+0` or `~-0`, retaining its direction.
-- Amber triangle: command/JSON/compatibility failures, provider data problems,
-  error-level doctor findings, pending work, or status quota issues. Every
-  warning reason is visible above providers.
-- Red unavailable icon: all observed non-disabled providers are fresh and
-  explicitly unavailable, unless an amber problem takes precedence.
-- Question mark: no usable pace candidate.
+- A monochrome gauge SF Symbol accompanies the best usable signed pace.
+  Real zero is `0`, never a placeholder for missing data; tiny nonzero pace
+  remains `~+0` or `~-0`.
+- An amber triangle replaces the gauge for command/JSON/compatibility failures,
+  provider data problems, error-level doctor findings, pending work, or status
+  quota issues. Every warning reason is visible above providers.
+- `Quota unavailable` with the gauge means all observed non-disabled providers
+  are fresh and explicitly unavailable, unless an amber problem takes precedence.
+- `Quota ?` with the gauge means there is no usable pace candidate.
+
+The menu-bar title uses `dropdown=false` so it is not repeated inside the menu.
+Ordinary menu rows have no decorative icons.
 
 `Refresh status` is the sole action. It rereads saved status and doctor data;
 it does not collect quotas, reconcile, or control a daemon.

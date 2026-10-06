@@ -17,8 +17,8 @@ ok() { PASS=$((PASS+1)); }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL [%s]: %s\n' "$CASE_NAME" "$1"; }
 # Expected provider headers use the display name, without a diagnostic prefix.
 assert_has() { local text=$1; case "$text" in 'Provider '*) text=${text#Provider } ;; esac; if printf '%s\n' "$OUT" | grep -qF -- "$text"; then ok; else bad "missing: $text"; fi; }
-assert_lacks() { local text=$1; case "$text" in 'Provider '*) text=${text#Provider } ;; esac; if printf '%s\n' "$OUT" | grep -qF -- "$text"; then bad "unexpected: $text"; else ok; fi; }
-assert_header() { local first; first=$(printf '%s\n' "$OUT" | head -n 1); if [ "$first" = "$1" ]; then ok; else bad "header: $first (wanted $1)"; fi; }
+assert_lacks() { local text=$1; if printf '%s\n' "$OUT" | grep -qF -- "$text"; then bad "unexpected: $text"; else ok; fi; }
+assert_header() { local first wanted=$1 signal; first=$(printf '%s\n' "$OUT" | head -n 1); case "$wanted" in *arrow.up*) signal=${wanted#Quota }; signal=${signal%% *}; wanted="$signal | sfimage=gauge.medium dropdown=false" ;; *arrow.right*) wanted='0 | sfimage=gauge.medium dropdown=false' ;; *arrow.down*) signal=${wanted#Quota }; signal=${signal%% *}; wanted="$signal | sfimage=gauge.medium dropdown=false" ;; 'Quota :questionmark.circle:') wanted='Quota ? | sfimage=gauge.medium dropdown=false' ;; 'Quota :xmark.circle: | color=red') wanted='Quota unavailable | sfimage=gauge.medium dropdown=false' ;; *exclamationmark.triangle*) wanted='Quota | sfimage=exclamationmark.triangle sfcolor=orange dropdown=false' ;; esac; if [ "$first" = "$wanted" ]; then ok; else bad "header: $first (wanted $wanted)"; fi; }
 assert_order() {
   local actual
   actual=$(printf '%s\n' "$OUT" | sed -n 's/^\([^ ]*\) — \(Available\|Enabled\|Gated\|Unavailable\|Disabled\).*/\1/p' | tr '\n' ' ')
@@ -36,7 +36,7 @@ assert_before() {
 assert_layout() {
   local violations
   violations=$(printf '%s\n' "$OUT" | awk '
-    /^Quota / || /^---$/ || /^Refresh status \| refresh=true$/ { next }
+    NR == 1 || /^---$/ || /^Refresh status \| refresh=true$/ { next }
     /^-/ { c++; next }
     $0 !~ / \| emojize=false symbolize=false color=black,white( font=Menlo)?$/ { c++ }
     END { print c+0 }')
@@ -112,17 +112,45 @@ run_plugin() {
 # Compactness is an observable contract, not just absence of submenus.
 start_case compact_healthy
 run_plugin
-assert_has 'Ordered by available pace'
+assert_has 'Quota observation: 30s ago · No errors'
+assert_has 'alpha — Available'
+assert_lacks 'Provider alpha'
 assert_lacks 'Reason:'
 assert_lacks 'WARNING:'
-rows=$(printf '%s\n' "$OUT" | awk '/^alpha —/{on=1;next} on && /^---$/{exit} on{n++} END{print n+1}')
-[ "$rows" = 3 ] && ok || bad "healthy provider has $rows rows, wanted 3"
+rows=$(printf '%s\n' "$OUT" | awk '/^alpha —/{on=1;next} on && /^---$/{exit} on{n++} END{print n+0}')
+[ "$rows" = 1 ] && ok || bad "healthy provider has $rows quota rows, wanted 1"
+assert_has 'Weekly [█████░░░░░] 50% used · Resets in 1d'
+assert_lacks '===OBSERVATION==='
+[ "$(printf '%s\n' "$OUT" | grep -c '^Quota observation:')" = 1 ] && ok || bad 'summary not unique'
 start_case compact_gated
 status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha gated -1)")" '$r | .providers[0].reason="signal-gated (-1 <= 0); peak, signal -1" | .providers[0].windows += [{name:"rolling",usage_percent:8,reset_at:"2026-09-26T01:00:00Z"}]')"
 run_plugin
-assert_has 'Reason: usage ahead of configured pace'
+assert_has 'alpha — Gated · Pace -1 (not usable) · usage ahead of configured pace'
+assert_has 'Rolling ['
 assert_has 'Resets in 4d 15h'
+assert_lacks 'Reason:'
 assert_lacks 'peak, signal'
+start_case combined_condition
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha gated -1)")" '$r | .providers[0].reason="signal-gated" | .providers[0].condition="waiting for reset"')"
+run_plugin
+assert_has 'alpha — Gated · Pace -1 (not usable) · usage ahead of configured pace · waiting for reset'
+assert_lacks 'Condition:'
+start_case long_condition
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha gated -1)")" '$r | .providers[0].condition=(("long condition " * 24) + "retained final cause")')"
+run_plugin
+assert_has 'Continued:'
+assert_has 'retained final cause'
+start_case unknown_summary
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | del(.last_checked)')"
+run_plugin
+assert_has 'Quota observation: time unknown · No errors'
+start_case summary_errors
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .errors=[{scope:"global",summary:"saved failure"}]')"
+doctor_fixture '{"findings":[{"severity":"error","code":"permission","target_id":"global","message":"permission denied","remediation":"repair permissions"}]}'
+run_plugin
+assert_has 'Quota observation: 30s ago · Attention needed · Errors: 2'
+assert_has 'saved failure'
+assert_has 'Remediation: repair permissions'
 # Available pace keeps the same direction/rounding semantics as the CLI signal.
 for spec in '0.42|Quota +0.42 :arrow.up: | color=green' '0|Quota 0 :arrow.right:' '-1.25|Quota -1.25 :arrow.down:' '0.004|Quota ~+0 :arrow.up: | color=green' '-0.004|Quota ~-0 :arrow.down:' '-3.5|Quota -3.5 :arrow.down:'; do
   signal=${spec%%|*}; header=${spec#*|}
@@ -147,9 +175,11 @@ providers=$(jq -nc --argjson p "$(prov_base template available 1)" '
 status_fixture "$(jq -nc --argjson ps "$providers" --argjson r "$(wrap_status '')" '$r+{providers:$ps}')"
 run_plugin
 assert_order 'near-high near-low tie-rank tie-a tie-b zero negative missing unknown stale disabled-a disabled-b gated unavailable'
-assert_has 'Provider near-high — Available · Pace +1.23'
-assert_has 'Provider unknown — Available'
-assert_has 'Provider stale — Available · Pace +999'
+assert_has 'near-high — Available · Pace +1.23'
+assert_has 'unknown — Available'
+assert_has 'stale — Available · Pace +999'
+assert_lacks 'Provider near-high'
+assert_has 'Ordered by available pace'
 assert_before 'Data issue: missing' 'Provider near-high'
 assert_before 'Data issue: stale' 'Provider near-high'
 assert_header 'Quota :exclamationmark.triangle: | color=orange'
@@ -169,7 +199,7 @@ run_plugin; assert_header 'Quota :xmark.circle: | color=red'; assert_has 'Provid
 
 start_case disabled_readable
 status_fixture "$(wrap_status "$(prov_base alpha disabled 9)")"
-run_plugin; assert_header 'Quota :questionmark.circle:'; assert_has 'Reason: manually disabled'; assert_has 'Weekly ['; assert_lacks WARNING:
+run_plugin; assert_header 'Quota :questionmark.circle:'; assert_has 'alpha — Disabled · Pace +9 (not usable) · manually disabled'; assert_has 'Weekly ['; assert_lacks WARNING:
 
 start_case empty_providers
 status_fixture "$(wrap_status '')"
@@ -182,8 +212,8 @@ assert_has 'Provider zeta — Available'; assert_lacks 'Polling: status unknown'
 
 start_case latest_failed_older_fresh_snapshot
 status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .providers[0] += {observation_at:"2026-09-21T09:58:00Z",latest_attempt:{status:"failed",checked_at:"2026-09-21T09:59:00Z",error:"saved snapshot retained; adapter failed"}}')"
-run_plugin; assert_header 'Quota :exclamationmark.triangle: | color=orange'
-assert_has 'Latest quota observation: 30s ago'
+run_plugin; assert_header 'Quota | sfimage=exclamationmark.triangle sfcolor=orange dropdown=false'
+assert_has 'Quota observation: 30s ago · Attention needed'
 assert_has 'Data issue: alpha: latest quota attempt failed'
 assert_has 'saved snapshot retained'
 assert_has 'adapter'; assert_has 'failed'
@@ -257,7 +287,7 @@ assert_has 'Reset due'; assert_lacks '+02:00 (UTC)'
 
 start_case timestamp_fractional_offset
 status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .as_of="2026-09-21T06:00:00.123-04:00" | .providers[0].observation_at="2026-09-21T09:58:00.999Z"')"
-run_plugin; assert_has 'Latest quota observation: 30s ago'; assert_lacks 'Observation:'; assert_lacks '-04:00 (UTC)'
+run_plugin; assert_has 'Quota observation: 30s ago · No errors'; assert_lacks 'Observation:'; assert_lacks '-04:00 (UTC)'
 
 # Data cannot author attributes, submenu structure, symbols or extra actions.
 start_case injection_actions_and_structure
@@ -323,7 +353,7 @@ for kind in unknown malformed duplicate empty control large; do
     control) printf 'quota_bin=SECRET_VALUE_X\001\n' > "$CASE_DIR/plugin.conf" ;;
     large) yes 'SECRET_VALUE_X' | head -c 70000 > "$CASE_DIR/plugin.conf" ;;
   esac
-  run_plugin; assert_has 'Plugin configuration error'; assert_lacks SECRET_VALUE_X; assert_lacks bogus
+  run_plugin; assert_header 'Quota | sfimage=exclamationmark.triangle sfcolor=orange dropdown=false'; assert_has 'Quota observation: time unknown · Attention needed'; assert_has 'Plugin configuration error'; assert_lacks SECRET_VALUE_X; assert_lacks bogus
   [ ! -f "$CASE_DIR/ran" ] && ok || bad 'command ran with bad config'
 done
 start_case config_explicit_missing
