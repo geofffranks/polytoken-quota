@@ -64,6 +64,10 @@ install -m 0755 polytoken-quota ~/.local/bin/polytoken-quota
 
 Release builds embed the `vX.Y.Z` release tag in the executable, and the same tag is recorded in `VERSION`; `--version` reports that embedded version. No release is assumed to exist yet: if no release download is available, build from the repository with the commands above.
 
+## Menu-bar status with SwiftBar
+
+The read-only macOS quota dashboard lives in [swiftbar](swiftbar/README.md). Its README has installation and configuration instructions. The plugin is copied from this repository, not included in CLI release archives.
+
 ## Configuration
 
 All `polytoken-quota` configuration lives in:

@@ -8,6 +8,7 @@ import (
 
 	"github.com/geofffranks/polytoken-quota/internal/policy"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
+	sanitizepkg "github.com/geofffranks/polytoken-quota/internal/sanitize"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 )
 
@@ -25,6 +26,32 @@ func mergedRouteByName(t *testing.T, report MergedStatusReport, name string) Mer
 	}
 	t.Fatalf("route %q not found in %d routes", name, len(report.Routes))
 	return MergedStatusRoute{}
+}
+
+func TestMergedStatusAdditiveAttemptPollingAndPendingDetails(t *testing.T) {
+	observedAt := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	attemptedAt := observedAt.Add(time.Hour)
+	view := DiagnosticSnapshot{
+		asOf: observedAt.Add(2 * time.Hour),
+		providers: []ProviderProjection{
+			{MappingID: "failed", CheckedAt: observedAt, LatestAttempt: &QuotaAttemptReport{
+				Status: quota.SourceFailed, CheckedAt: attemptedAt, Error: "sanitized error",
+			}, Adapter: "codex"},
+			{MappingID: "never", Adapter: "", Freshness: FreshnessMissing},
+		},
+		ranks:          []RankEntryReport{{MappingID: "failed"}, {MappingID: "never"}},
+		pendingDetails: []PendingTargetDetail{{TargetID: sanitizepkg.Identifier("bad target\nsecret"), LastAttemptAt: attemptedAt}},
+	}
+	report := view.MergedStatusView()
+	if got := report.Providers[0]; !got.CheckedAt.Equal(observedAt) || !got.ObservationAt.Equal(observedAt) || got.LatestAttempt == nil || !got.LatestAttempt.CheckedAt.Equal(attemptedAt) {
+		t.Fatalf("snapshot and attempt provenance conflated: %+v", got)
+	}
+	if report.Providers[0].PollingStatus != "disabled" || report.Providers[1].PollingStatus != "unknown" {
+		t.Fatalf("polling statuses = %q, %q; want disabled, unknown", report.Providers[0].PollingStatus, report.Providers[1].PollingStatus)
+	}
+	if len(report.PendingDetails) != 1 || report.PendingDetails[0].TargetID != sanitizepkg.Identifier("bad target\nsecret") || !report.PendingDetails[0].LastAttemptAt.Equal(attemptedAt) {
+		t.Fatalf("pending details = %+v", report.PendingDetails)
+	}
 }
 
 func TestMergedStatusSkipsDisabledModelWithRankReason(t *testing.T) {
@@ -164,17 +191,17 @@ func TestMergedStatusGatedPrecedence(t *testing.T) {
 		provider ProviderProjection
 		want     string
 	}{
-		"signal gate over fresh":            {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
-		"reserve gate over fresh":           {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
-		"manual disable beats gate":         {ProviderProjection{MappingID: "p", ManualDisabled: true, Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusDisabled},
-		"gated never observed":              {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false)}, StatusGated},
-		"gated over unavailable":            {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), Availability: state.Unavailable, CheckedAt: asOf, Freshness: FreshnessFresh}, StatusGated},
-		"conflicted signal claim stays healthy": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
-		"conflicted reserve claim stays healthy": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"signal gate over fresh":                  {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
+		"reserve gate over fresh":                 {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusGated},
+		"manual disable beats gate":               {ProviderProjection{MappingID: "p", ManualDisabled: true, Gate: gate(state.OwnershipAxisSignal, false), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusDisabled},
+		"gated never observed":                    {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false)}, StatusGated},
+		"gated over unavailable":                  {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, false), Availability: state.Unavailable, CheckedAt: asOf, Freshness: FreshnessFresh}, StatusGated},
+		"conflicted signal claim stays healthy":   {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisSignal, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"conflicted reserve claim stays healthy":  {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisReserve, true), CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
 		"disabled axis keeps availability status": {ProviderProjection{MappingID: "p", Gate: gate(state.OwnershipAxisDisabled, false), Availability: state.Unavailable, CheckedAt: asOf, Freshness: FreshnessFresh}, StatusUnavailable},
-		"legacy claim keeps quota health":   {ProviderProjection{MappingID: "p", CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
-		"unavailable without gate":          {ProviderProjection{MappingID: "p", Availability: state.Unavailable}, StatusUnavailable},
-		"never observed without gate":       {ProviderProjection{MappingID: "p", Freshness: FreshnessMissing}, StatusEnabled},
+		"legacy claim keeps quota health":         {ProviderProjection{MappingID: "p", CheckedAt: asOf, Freshness: FreshnessFresh, Availability: state.Available}, StatusAvailable},
+		"unavailable without gate":                {ProviderProjection{MappingID: "p", Availability: state.Unavailable}, StatusUnavailable},
+		"never observed without gate":             {ProviderProjection{MappingID: "p", Freshness: FreshnessMissing}, StatusEnabled},
 	} {
 		t.Run(name, func(t *testing.T) {
 			view := DiagnosticSnapshot{

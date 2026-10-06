@@ -49,12 +49,32 @@ type MergedStatusProvider struct {
 	// otherwise the latest attempt's — so an observed-but-failed row stays
 	// distinguishable from a never-observed one even when both read `gated`.
 	CheckedAt time.Time `json:"checked_at,omitempty"`
+	// LatestAttempt preserves attempt provenance independently from the snapshot.
+	LatestAttempt *QuotaAttemptReport `json:"latest_attempt,omitempty"`
+	// ObservationAt is the timestamp of the last quota snapshot only; unlike
+	// CheckedAt, it never falls back to an attempt time.
+	ObservationAt time.Time `json:"observation_at,omitempty"`
+	// PollingStatus reports whether quota polling is configured and supported.
+	// Empty means no quota polling configuration is present.
+	PollingStatus string `json:"polling_status,omitempty"`
 	// Availability is the stored quota snapshot's own availability
 	// (available/unavailable/unknown), read from the raw pre-aggregation
 	// snapshot; empty when never observed. Distinct from the consolidated
 	// Status: the fail-closed row axis collapses windowless snapshots to
 	// unavailable, losing the unknown distinction the QUOTA fallback needs.
 	Availability quota.QuotaAvailability `json:"availability,omitempty"`
+	// Freshness classifies the saved quota snapshot's age against the
+	// mapping's freshness TTL at the report's AsOf: fresh, stale, or missing
+	// (never observed). Always one of the three — never empty in a projected
+	// report.
+	Freshness Freshness `json:"freshness"`
+	// Signal is the provider's current use-it-or-lose-it pace recomputed from
+	// the saved quota snapshot at AsOf (routing.ComputeSignal — the ranking's
+	// own formula). Diagnostic-only: computed whether or not any gate engages
+	// the provider, and nil (omitted in JSON) when no snapshot exists or no
+	// window qualifies, never fabricated as zero. Distinct from Gate.Signal,
+	// which records the gate claim's observation.
+	Signal *float64 `json:"signal,omitempty"`
 	// Gate carries the provider-only gate attribution (axis, observed pace,
 	// threshold, engaged revision); nil when quota holds no attributed claim.
 	Gate *GateReport `json:"gate,omitempty"`
@@ -81,18 +101,29 @@ type SkippedModel struct {
 	Reason string `json:"reason"`
 }
 
+// PendingTargetDetail carries only bounded pending-target identity and its last
+// attempted time; a first-pending duration is intentionally not inferred.
+type PendingTargetDetail struct {
+	TargetID      string    `json:"target_id"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+}
+
 // MergedStatusReport is the result of the merged status command. LastChecked
 // is the max snapshot CheckedAt across providers (zero when never observed).
+// AsOf is the single clock sample every time-sensitive projection in the
+// report was evaluated at (freshness, signal, next reset).
 type MergedStatusReport struct {
 	RoutingEnabled bool `json:"routing_enabled"`
 	// ProviderOnly is true when the loaded policy is the opt-in provider-only
 	// mode: chain/route projections are not applicable and the routes section
 	// is empty by design, never because data was silently dropped.
 	ProviderOnly   bool                   `json:"provider_only"`
+	AsOf           time.Time              `json:"as_of,omitempty"`
 	LastChecked    time.Time              `json:"last_checked,omitempty"`
 	Providers      []MergedStatusProvider `json:"providers,omitempty"`
 	Routes         []MergedStatusRoute    `json:"routes,omitempty"`
 	PendingTargets []string               `json:"pending_targets,omitempty"`
+	PendingDetails []PendingTargetDetail  `json:"pending_details,omitempty"`
 	Problem        bool                   `json:"problem"`
 	Errors         []DiagnosticError      `json:"errors,omitempty"`
 	Error          string                 `json:"error,omitempty"`
@@ -102,7 +133,7 @@ type MergedStatusReport struct {
 // Like the other selectors it is read-only and returns copies of slice data.
 // A fatal error yields a report carrying only the sanitized error string.
 func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
-	report := MergedStatusReport{Error: s.fatalError}
+	report := MergedStatusReport{AsOf: s.asOf, Error: s.fatalError}
 	if s.fatalError != "" {
 		return report
 	}
@@ -110,6 +141,7 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 	report.ProviderOnly = s.providerOnly
 	report.Problem = s.problem
 	report.PendingTargets = append([]string(nil), s.pendingTargets...)
+	report.PendingDetails = append([]PendingTargetDetail(nil), s.pendingDetails...)
 	report.Errors = cloneDiagnosticErrors(s.providerErrors)
 	report.Errors = append(report.Errors, cloneDiagnosticErrors(s.routeErrors)...)
 
@@ -153,11 +185,19 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 			Gate:         cloneGateReport(provider.Gate),
 			Condition:    provider.Condition,
 			Availability: provider.SnapshotAvailability,
+			Freshness:    provider.Freshness,
+			Signal:       cloneFloat(provider.Signal),
 		}
 		// Observed-ness rides checked_at: fall back to the latest attempt's
 		// time when no snapshot exists, so observed-but-failed rows stay
 		// distinguishable from never-observed ones.
 		row.CheckedAt = provider.CheckedAt
+		if provider.LatestAttempt != nil {
+			attempt := *provider.LatestAttempt
+			row.LatestAttempt = &attempt
+		}
+		row.ObservationAt = provider.CheckedAt
+		row.PollingStatus = providerPollingStatus(provider, s.asOf, s.evidence, s.pollerEnabled)
 		if row.CheckedAt.IsZero() && provider.LatestAttempt != nil {
 			row.CheckedAt = provider.LatestAttempt.CheckedAt
 		}
@@ -186,6 +226,19 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		report.Routes = append(report.Routes, row)
 	}
 	return report
+}
+
+func providerPollingStatus(provider ProviderProjection, asOf time.Time, evidence *quota.EvidenceRegistry, pollerEnabled bool) string {
+	if provider.Adapter == "" {
+		return "unknown"
+	}
+	if !pollerEnabled {
+		return "disabled"
+	}
+	if adapterSupport(provider.Adapter, asOf, evidence).Supported {
+		return "enabled"
+	}
+	return "unsupported"
 }
 
 // failedRouteKeys indexes the route-scope projection errors by target and
