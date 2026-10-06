@@ -324,7 +324,7 @@ budget_remaining() {
 
 # --- jq programs ---------------------------------------------------------------
 # Digest: fixed-vocabulary key=value lines the shell reads without parsing JSON.
-# Body: complete menu lines; every data string passes through `safe`.
+# Body: provider and quota-window menu lines; every data string passes through `safe`.
 
 JQ_HELPERS='
 def isnum($x): ($x|type)=="number" and (($x|isnan)|not) and (($x|isinfinite)|not);
@@ -505,19 +505,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
   else
     $r.providers as $ps | compat_mode($r) as $compat
     | "===OBSERVATION===\(stamp($r.last_checked; $r.as_of))",
-      (if (($r.error // "")|safe) != "" then detail("Status"; $r.error) else empty end),
-      ($ps[]? | . as $p | data_problems as $problems
-       | ($problems[] | detail("Data issue: \(($p.provider|safe))"; .))),
-      (if (($r.pending_targets // [])|length) > 0 then
-        (($r.pending_targets // [])[]? | . as $id
-         | ([$r.pending_details[]? | select(.target_id == $id)][0] // {}) as $d
-         | "Pending: \(($id|safe)) — duration unknown; last attempt \(stamp($d.last_attempt_at; $r.as_of))\(lit)")
-       else empty end),
-      (($r.errors // [])[]? | . as $e
-       | detail("Error: \(($e.scope|s2))\(if ($e.target_id // "") != "" then " — \(($e.target_id|safe))" else "" end)\(if ($e.mapping_id // "") != "" then " / \(($e.mapping_id|safe))" else "" end)"; $e.summary)),
-      ($ps[]? | select(row_valid($compat)|not) | detail("Invalid provider: \((.provider|s2))"; (row_problems($compat)|join("; ")))),
       "===PROVIDERS===",
-      "Ordered by available pace\(lit)",
       (if ($ps|length) == 0 then "No providers are configured or projected.\(lit)" else empty end),
       (ordered($ps; $compat)[] | . as $p
        | "---",
@@ -536,26 +524,6 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
   end
 '
 
-JQ_DOCTOR_BODY="$JQ_HELPERS"'
-. as $r
-| if ($r|type) != "object" or ($r.findings|type) != "array" then "Diagnostics output has an unexpected shape.\(lit)"
-  else
-    (if (($r.error // "")|safe) != "" then detail("Doctor"; $r.error) else empty end),
-    (try ($status[0].providers // []) catch []) as $ps
-    | ($r.findings[]? | select(.severity == "error" or independent_problem) | . as $f
-     | ([$ps[]? | select(.provider == $f.target_id)][0] // {}) as $p
-     | (if $f.code == "quota-attempt-failed" and $p.latest_attempt.status == "failed" and (($p.latest_attempt.error // "") != "")
-           and $f.message == ("provider " + $p.provider + " quota attempt failed: " + $p.latest_attempt.error) then true
-         else false end) as $overlap
-     | (if $overlap then empty else
-       "\(if .severity == "error" then "Error" elif .code == "target-pending" or .code == "quota-reconcile-pending" then "Pending" else "Data issue" end): \(($f.target_id // "global"|safe)) — \(($f.code|s2))\(lit)",
-       (if .code == "target-pending" or .code == "quota-reconcile-pending" then "Pending timing: duration unknown; last attempt time unknown in doctor report.\(lit)" else empty end),
-       detail("Cause"; $f.message),
-       (if (($f.file // "")|safe) != "" then detail("File"; $f.file) else empty end),
-       (if (($f.chain // "")|safe) != "" then detail("Chain"; $f.chain) else empty end) end),
-       (if (($f.remediation // "")|safe) != "" then detail("Remediation"; $f.remediation) else empty end))
-  end
-'
 
 # --- startup: config + dependencies -------------------------------------------
 
@@ -576,12 +544,9 @@ if [ -z "$CONFIG_ERROR" ] && [ -n "$CONFIG_PATH" ]; then
 fi
 
 if [ -n "$CONFIG_ERROR" ]; then
-  printf '%s\n' "Quota | sfimage=exclamationmark.triangle sfcolor=orange dropdown=false"
+  printf '%s\n' "​ | sfimage=gauge.medium sfcolor=orange dropdown=false"
   printf '%s\n' "---"
   printf '%s | %s\n' "Quota observation: time unknown · Attention needed" "$LIT"
-  printf '%s | %s\n' "Plugin configuration error — override ignored, no fallback" "$LIT"
-  printf '%s | %s\n' "Reason: $CONFIG_ERROR" "$LIT"
-  printf '%s | %s\n' "Fix: correct $CONFIG_NAME (keys: quota_bin, polytoken_bin, jq_bin) or remove it" "$LIT"
   printf '%s\n' "Refresh status | refresh=true"
   exit 0
 fi
@@ -770,7 +735,6 @@ case "$DOCTOR_RC" in
 esac
 
 DOCTOR_DIGEST="$TMPDIR_LOCAL/doctor.digest"
-DOCTOR_BODY="$TMPDIR_LOCAL/doctor.body"
 
 if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ "$DOCTOR_RC" != 125 ] && [ -n "$JQ_BIN" ] && [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
   run_bounded "$JQ_TIMEOUT" "$DOCTOR_DIGEST" "$JQ_BIN" -r "$JQ_HELPERS"'
@@ -803,27 +767,6 @@ if [ "$DOCTOR_RC" != "skipped" ] && [ "$DOCTOR_RC" != nobudget ] && [ "$DOCTOR_R
       DOCTOR_OK=1
       [ "$D_FIND" -gt 0 ] && warn "doctor error-level findings: $D_FIND"
       [ "$D_ACT" -gt "$D_FIND" ] && warn "doctor reports independent data/pending problems"
-      if [ "$(budget_remaining)" -ge $((JQ_TIMEOUT + 2)) ]; then
-        if [ "$STATUS_PARSED" = 1 ]; then
-          STATUS_FOR_DOCTOR=$STATUS_FILE
-        else
-          STATUS_FOR_DOCTOR="$TMPDIR_LOCAL/empty-status"
-          printf '%s\n' '{}' > "$STATUS_FOR_DOCTOR"
-        fi
-        run_bounded "$JQ_TIMEOUT" "$DOCTOR_BODY" "$JQ_BIN" --slurpfile status "$STATUS_FOR_DOCTOR" -r "$JQ_DOCTOR_BODY" "$DOCTOR_FILE" 2>/dev/null
-        jqrc=$?
-        if cap_check "$DOCTOR_BODY"; then
-          warn "doctor rendered details exceeded the capture limit — details omitted"
-        elif [ "$jqrc" -eq 0 ]; then
-          DOCTOR_PARSED=1
-        elif [ "$jqrc" -eq 125 ]; then
-          warn "jq capture setup failed — diagnostics details omitted"
-        else
-          warn "doctor output could not be rendered"
-        fi
-      else
-        warn "refresh budget exhausted; diagnostics details omitted"
-      fi
     fi
   else
     if [ "$jqrc" -eq 125 ]; then
@@ -839,13 +782,9 @@ fi
 # --- header decision ----------------------------------------------------------------
 
 if [ -n "$WARN_REASONS" ]; then
-  HEADER="Quota | sfimage=exclamationmark.triangle sfcolor=orange dropdown=false"
-elif [ "$REDRULE" = 1 ]; then
-  HEADER="Quota unavailable | sfimage=gauge.medium dropdown=false"
-elif [ "$CAND" = 1 ] && [ -n "$SIG" ]; then
-  HEADER="$SIG | sfimage=gauge.medium dropdown=false"
+  HEADER="​ | sfimage=gauge.medium sfcolor=orange dropdown=false"
 else
-  HEADER="Quota ? | sfimage=gauge.medium dropdown=false"
+  HEADER="​ | sfimage=gauge.medium dropdown=false"
 fi
 
 # --- assemble menu --------------------------------------------------------------------
@@ -867,47 +806,6 @@ ERROR_COUNT=$((STERRS + D_FIND))
 [ "$ERROR_COUNT" -eq 0 ] || SUMMARY="$SUMMARY · Errors: $ERROR_COUNT"
 printf '%s | %s\n' "Quota observation: $OBSERVATION · $SUMMARY" "$LIT"
 
-if [ -n "$WARN_REASONS" ]; then
-  printf '%s\n' "$WARN_REASONS" | while IFS= read -r wr; do
-    # Detailed report rows already explain these icon reasons; do not repeat counts.
-    case "$wr" in
-      'provider collection/data problems:'*|'status reported an error'|'status reported '*diagnostic*|'status contained '*|*' pending reconciler target(s)')
-        [ "$STATUS_PARSED" != 1 ] || continue ;;
-      'doctor reported an error'|'doctor error-level findings:'*|'doctor reports independent data/pending problems')
-        [ "$DOCTOR_PARSED" != 1 ] || continue ;;
-      'quota issues reported')
-        if [ "$STATUS_PARSED" = 1 ] && { [ "$STDATA" -gt 0 ] || [ "$STERRS" -gt 0 ] || [ "$STPENDING" -gt 0 ] || [ "$D_ACT" -gt 0 ]; }; then continue; fi ;;
-    esac
-    [ -n "$wr" ] && printf '%s | %s\n' "WARNING: $wr" "$LIT"
-  done
-fi
-
-# Emit timing/status problems first; defer provider rows until after doctor.
-if [ "$STATUS_PARSED" = 1 ]; then
-  while IFS= read -r line; do
-    [ "$line" = '===PROVIDERS===' ] && break
-    case "$line" in '===OBSERVATION==='*) continue ;; esac
-    printf '%s\n' "$line"
-  done < "$STATUS_BODY"
-elif [ "$STATUS_RC" = "skipped" ]; then
-  printf '%s | %s\n' "Best available pace: unavailable — status was not run (missing dependency)" "$LIT"
-  printf '%s | %s\n' "Quota status: unavailable — fix the missing dependency and refresh" "$LIT"
-  printf '%s\n' "---"
-else
-  printf '%s | %s\n' "Best available pace: unavailable — status $(rc_text "$STATUS_RC") with unusable output" "$LIT"
-  printf '%s | %s\n' "Quota status: unavailable — no provider details could be read" "$LIT"
-  printf '%s\n' "---"
-fi
-
-if [ "$DOCTOR_PARSED" = 1 ]; then
-  cat "$DOCTOR_BODY"
-else
-  printf '%s | %s\n' "Diagnostics: unavailable — doctor $(rc_text "$DOCTOR_RC") with unusable output" "$LIT"
-fi
-
-if [ "$REDRULE" = 1 ]; then
-  printf '%s | %s\n' "Observed unavailability: every observed non-disabled provider is fresh and unavailable." "$LIT"
-fi
 if [ "$STATUS_PARSED" = 1 ]; then
   printf '%s\n' '---'
   providers=0

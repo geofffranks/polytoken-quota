@@ -1,8 +1,8 @@
 # SwiftBar plugin: polytoken-quota status
 
 A read-only macOS menu-bar plugin for SwiftBar that shows provider quota
-state, per-window utilization bars, reset times, persisted diagnostics, and
-the best available pace signal from `polytoken-quota`. The plugin runs two
+state, per-window utilization bars, reset times, provider pace, and a single
+observation-age/attention summary from `polytoken-quota`. The plugin runs two
 commands and nothing else: `polytoken-quota status --json` and read-only
 `polytoken-quota doctor --json`. It never checks quotas against providers,
 reconciles, changes routing, operates a daemon, keeps a status cache, or
@@ -15,11 +15,12 @@ stores credentials.
 - [SwiftBar](https://github.com/swiftbar/SwiftBar).
 - `jq` 1.6 or newer, for example via `brew install jq`.
 - The `polytoken-quota` CLI built from the same revision as this plugin on
-  the Mac. The flat layout works with older JSON reports, but complete latest
-  attempt and polling labels require the additive diagnostic fields in this
-  revision. Without them, polling status and pending attempt time are unknown.
-  If required pace fields are absent, a visible compatibility warning disables
-  pace ordering and the icon uses no pace candidate. Build the CLI on your Mac:
+  the Mac. The flat layout works with older JSON reports, but latest-attempt
+  problems and explicit polling support require the additive diagnostic fields
+  in this revision. Missing fields cannot establish those conditions; detailed
+  attempt and pending timing information is available through the CLI.
+  If required pace fields are absent, the menu indicates attention, pace ordering
+  is disabled, and the icon remains a gauge without a pace number. Build the CLI on your Mac:
 
   ```sh
   cd /path/to/polytoken-quota
@@ -87,14 +88,14 @@ Rules:
 
 - The config file is parsed line by line. It is never sourced or evaluated,
   so it cannot execute anything; only the three keys above are accepted, and
-  any other key, a duplicate key, or an empty value is a visible
-  configuration error in the menu.
-- An explicit override that does not resolve to an executable fails visibly
-  with its own warning line. The plugin never silently falls back past a bad
-  override.
-- Configuration diagnostics name the line number and, for value problems, the
-  known key only. Rejected lines, unsupported key names, override values, and
-  file paths are never echoed anywhere in the menu.
+  any other key, a duplicate key, or an empty value causes the menu summary
+  and amber gauge to indicate attention.
+- An explicit override that does not resolve to an executable causes the menu
+  to indicate attention. The plugin never silently falls back past a bad
+  override; use the terminal CLI for detailed troubleshooting.
+- Configuration failures show only attention status. Rejected lines,
+  unsupported key names, override values, and file paths are never shown
+  in the menu.
 - The quota CLI inherits your environment, so `POLYTOKEN_QUOTA_HOME`,
   `POLYTOKEN_CONFIG_DIR`, and `POLYTOKEN_BINARY` work as documented by the
   CLI. The quota CLI itself resolves `polytoken` from `POLYTOKEN_BINARY` or
@@ -107,14 +108,16 @@ Rules:
 
 ## Reading the display
 
-The root menu is a compact dashboard: one quota-observation summary row, actionable
-errors/data issues and pending work, then every configured provider and quota
-window. Each provider header combines its status, material reason, and condition;
-a quota bar and its reset time share one row. There are no provider or diagnostic
-submenus and no hidden Option-only details. Long causes and remediation are split
-into continued root rows rather than tooltips. Ranking internals, routine healthy
-evidence, ordinary doctor info/warning findings, and recovered history stay
-available through the CLI.
+The root menu contains one quota-observation summary row, then provider headers
+and quota-window rows when status data is available, followed by the sole action,
+`Refresh status`. The menu-bar title is only a monochrome gauge when no attention
+condition was observed, or the same gauge in amber when attention is needed; it
+never shows quota text or a pace number. Diagnostic details, errors, pending-work
+causes, and remediation are intentionally not shown in the menu. Use
+`polytoken-quota status` and `polytoken-quota doctor` in a terminal when details
+are needed. The summary distinguishes reported errors from other attention
+conditions; data, pending, malformed, and unavailable observations do not
+implicitly become error-level counts.
 
 Informational rows explicitly specify black text in light appearance and white
 text in dark appearance, including bars; SwiftBar 2.1.0 applies this foreground
@@ -127,44 +130,26 @@ Native visual confirmation in both appearances remains pending.
 
 ### Timing and problems
 
-`Quota observation` shares one summary row with `No errors` or `Attention needed`
-and a count of reported status/doctor errors when positive. Data and pending
-problems require attention without being mislabeled as error-level findings.
-The age is relative when timestamps parse, otherwise it shows
-the supplied timestamp (or `time unknown`). It is the newest saved quota
-snapshot across providers, not a successful whole-check result or display refresh
-time. A failed/partial latest attempt appears as a concise data issue even if an
-older saved snapshot is still fresh; its sanitized error appears once. Missing
-evidence is not a healthy zero. Routine healthy polling and attempt details are
-omitted.
-
-Pending targets always show `duration unknown`. Their latest reconciliation
-attempt time/age, when supplied, is not the duration of continuous pending work.
-Retries can update that attempt time without implying the pending work is new.
-Doctor-only pending reports lack structured timing and say time unknown; the
-plugin does not extract timestamps from prose. Reported fields may not yet be
-reconciled while work is pending.
-
-Each doctor error shows target context, cause, and remediation when supplied.
-Collection/data problems and interrupted reconciliation remain visible even if
-doctor classifies them as info or warning. Duplicate status/doctor records are
-collapsed only when their structured condition identity matches; ordinary
-omitted warnings alone do not cause an amber icon. Doctor exits 0 and 1 with
-valid diagnostic JSON are accepted reports.
+`Quota observation` reports the age available from the status snapshot and
+`No errors` or `Attention needed`; a positive count is shown only for reported
+status/doctor errors. Data problems and pending work can require attention but
+are not counted as errors unless the reports classify them as such. The age is
+not a claim that the whole check succeeded or a display-refresh timestamp. If
+status is missing, malformed, or unusable, age is `time unknown` and the summary
+requires attention. Detailed causes, findings, file paths, and remediation stay
+in the CLI output and are deliberately omitted from this menu.
 
 Status and doctor are independent reads, not an atomic snapshot or a record of
-one complete check. Relative age uses status timestamps when parseable; otherwise
-the supplied timestamp is retained as fallback. Reset times show a concise
-countdown in days/hours when parseable, without changing the stored data.
+one complete check. Reset times show a concise countdown in days/hours when
+parseable, without changing the stored data.
 
 ### Providers and quota bars
 
 Providers retain the shared three-tier ordering: usable fresh/available/eligible
 providers first by unrounded pace, other enabled providers by rank/name, then
-gated, unavailable, and manually disabled providers. Headers show the provider
-name, human-readable state, and pace when meaningful. Material reasons remain
-distinct; routine eligibility, polling, ranking, and healthy evidence details are
-omitted. Ineligibility continues to affect whether a provider can lead.
+gated, unavailable, and manually disabled providers. Headers show provider name,
+human-readable state, meaningful pace, and material reason or condition. Ineligibility
+continues to affect whether a provider can lead.
 
 Each quota window is a compact 10-cell bar, exact used percentage, and concise
 reset countdown when parseable. Common window identifiers use human-readable
@@ -177,25 +162,17 @@ data row.
 
 ### Menu-bar icon
 
-The icon uses the first usable provider's pace, not fleet health or actual
-routing priority. Pace is the quota engine's saved-evidence use-it-or-lose-it
-projection, not measured traffic or a serving guarantee:
-
-- A monochrome gauge SF Symbol accompanies the best usable signed pace.
-  Real zero is `0`, never a placeholder for missing data; tiny nonzero pace
-  remains `~+0` or `~-0`.
-- An amber triangle replaces the gauge for command/JSON/compatibility failures,
-  provider data problems, error-level doctor findings, pending work, or status
-  quota issues. Every warning reason is visible above providers.
-- `Quota unavailable` with the gauge means all observed non-disabled providers
-  are fresh and explicitly unavailable, unless an amber problem takes precedence.
-- `Quota ?` with the gauge means there is no usable pace candidate.
-
-The menu-bar title uses `dropdown=false` so it is not repeated inside the menu.
-Ordinary menu rows have no decorative icons.
+The menu-bar title is an icon only: a monochrome `gauge.medium` SF Symbol for
+ordinary status, and that same gauge in amber when an error, data issue, pending
+work, command problem, malformed report, or other attention condition is
+observed. It does not show pace, availability text, or a warning triangle. The
+`dropdown=false` setting keeps the icon out of the menu rows. The menu summary
+reports status observation age and error presence separately from attention.
 
 `Refresh status` is the sole action. It rereads saved status and doctor data;
-it does not collect quotas, reconcile, or control a daemon.
+it does not collect quotas, reconcile, or control a daemon. After replacing the
+installed plugin script with an updated copy, select Refresh (or wait up to one
+minute for SwiftBar's filename-based refresh interval); no restart is required.
 
 ## Safety
 
@@ -205,8 +182,8 @@ it does not collect quotas, reconcile, or control a daemon.
   data line.
 - The only action is the fixed `Refresh status | refresh=true` line. No
   command, URL, or eval can be injected through data or config values.
-- stderr is never printed; failures render as fixed-vocabulary warnings with
-  exit codes. No credentials, raw config, or secrets are displayed, and
+- stderr is never printed; failures indicate attention in the summary and
+  gauge color. No credentials, raw config, or secrets are displayed, and
   configuration problems never echo the rejected content.
 - Each subprocess runs in a process group owned by the plugin: on a deadline,
   an output overflow, or plugin termination the whole group (descendants
@@ -215,14 +192,14 @@ it does not collect quotas, reconcile, or control a daemon.
   The cleanup's KILL escalation removes TERM-resistant descendants while the
   command's own exit status and the deadline verdict are preserved.
 - Captured output is capped while the command runs, not afterwards; a
-  producer that writes past the cap is stopped early and the truncation is
-  reported in the menu. Expanded status/doctor menu bodies have the same cap;
-  an overflowing body is omitted with a visible warning, never displayed as
-  complete. A large report may therefore require the CLI for full details.
+  producer that writes past the cap is stopped early. Status menu output has the
+  same cap; if it is too large to render, provider details are omitted and the
+  summary indicates attention. A large report may therefore require the CLI for
+  full details.
 - Setup is fail-closed: if the capture FIFO cannot be created or the owned
   process group cannot be established, the command is not run (an in-flight
-  producer is killed) and the refresh reports the setup failure visibly.
-  There is no unbounded or direct-PID fallback.
+  producer is killed) and the menu indicates attention. Use CLI output for
+  details. There is no unbounded or direct-PID fallback.
 
 ## Host and container notes
 
