@@ -37,4 +37,4 @@ jobs:
       - name: Build
         run: go build ./...
       - name: SwiftBar plugin fixture tests
-        run: contrib/swiftbar/tests/run_tests.sh
+        run: swiftbar/tests/run_tests.sh

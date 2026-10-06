@@ -66,7 +66,7 @@ Release builds embed the `vX.Y.Z` release tag in the executable, and the same ta
 
 ## Menu-bar status with SwiftBar
 
-A read-only macOS menu-bar plugin (provider states, quota bars, resets, diagnostics, best available pace) lives in [contrib/swiftbar](contrib/swiftbar/README.md). The plugin is not part of the release archives; copy it from this repository into your SwiftBar plugin folder. That README covers prerequisites (`jq`, the CLI, macOS 11+ for SF Symbols), overrides, display meanings, and uninstall steps.
+The read-only macOS quota dashboard lives in [swiftbar](swiftbar/README.md). Its README has installation and configuration instructions. The plugin is copied from this repository, not included in CLI release archives.
 
 ## Configuration
 
