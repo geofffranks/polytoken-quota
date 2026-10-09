@@ -187,6 +187,15 @@ for mutation in '.providers[0].reset_credits.usable_count=1.5' '.providers[0].re
   status_fixture "$(printf '%s' "$base" | jq "$mutation")"
   run_plugin; assert_has 'Banked resets: Unknown · Refresh failed'; assert_has 'Session ['
 done
+# Service omits the filtered expiry list after all historical entries expire.
+for attempt in success failed skipped; do
+  start_case "banked_resets_all_expired_$attempt"
+  status_fixture "$(jq -nc --arg attempt "$attempt" --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .providers[0].windows=[{name:"session"}] | .providers[0] += {adapter:"codex",reset_credits:{freshness:"stale",usable_count:0,discrepancy_count:0,skipped_count:0,latest_attempt:{status:$attempt},last_success:{observed_at:"2026-09-20T09:00:00Z",server_available_count:2,usable_count:2,discrepancy_count:0,skipped_count:0,available_expiries:["2026-09-20T10:00:00Z","2026-09-21T10:00:00Z"]}}}')"
+  run_plugin; assert_has 'Banked resets: 0 available · Stale'; assert_has 'Session ['; assert_lacks 'Banked resets: Unknown'; assert_lacks 'Earliest expiry'
+  if [ "$attempt" != success ]; then assert_has "Last known · Refresh $attempt"; fi
+  status_fixture "$(jq '.providers[0].reset_credits.available_expiries=null' "$CASE_DIR/status.json")"
+  run_plugin; assert_has 'Banked resets: Unknown'; assert_has 'Session ['
+done
 start_case compact_gated
 status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha gated -1)")" '$r | .providers[0].reason="signal-gated (-1 <= 0); peak, signal -1" | .providers[0].windows += [{name:"rolling",usage_percent:8,reset_at:"2026-09-26T01:00:00Z"}]')"
 run_plugin

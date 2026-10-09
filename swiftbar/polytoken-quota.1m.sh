@@ -452,7 +452,7 @@ def banked_resets($p; $asof):
     | (if ($r.usable_count|type) == "number" and isnum($r.usable_count) and $r.usable_count >= 0 and ($r.usable_count|floor) == $r.usable_count then $r.usable_count else null end) as $raw_count
     | (if ($success|has("available_expiries")|not) then [] elif ($success.available_expiries|type) == "array" then $success.available_expiries else null end) as $success_expiries
     | ([$success | to_entries[] | select(.key == "server_available_count" or .key == "usable_count" or .key == "discrepancy_count" or .key == "skipped_count") | .value] | all(.[]; type == "number" and isnum(.) and . >= 0 and (floor == .))) as $success_counters
-    | (if ($r.available_expiries == null and ($success|has("available_expiries")|not)) then [] elif ($r.available_expiries|type) == "array" then $r.available_expiries elif ($r.available_expiries == null and ($success.available_expiries == null)) then [] else null end) as $raw_expiries
+    | (if ($r|has("available_expiries")|not) then [] elif ($r.available_expiries|type) == "array" then $r.available_expiries else null end) as $raw_expiries
     | (if ($r.discrepancy_count|type) == "number" and isnum($r.discrepancy_count) and $r.discrepancy_count >= 0 and ($r.discrepancy_count|floor) == $r.discrepancy_count then $r.discrepancy_count elif $r.discrepancy_count == null then 0 else null end) as $raw_discrepancy
     | (if ($r.skipped_count|type) == "number" and isnum($r.skipped_count) and $r.skipped_count >= 0 and ($r.skipped_count|floor) == $r.skipped_count then $r.skipped_count elif $r.skipped_count == null then 0 else null end) as $raw_skipped
     | (if ($success.observed_at|type) == "string" and epoch($success.observed_at) != null then epoch($success.observed_at) else null end) as $observed
