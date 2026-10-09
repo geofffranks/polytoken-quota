@@ -44,7 +44,7 @@ func TestMergedStatusCopiesResetCreditNestedData(t *testing.T) {
 	*first.ResetCredits.LastSuccess.AvailableExpiries[0] = time.Time{}
 	*first.ResetCredits.LatestAttempt.Inventory.AvailableExpiries[0] = time.Time{}
 	again := snapshot.MergedStatusView().Providers[0]
-	if again.Adapter != "codex" || again.ResetCredits == nil || !again.ResetCredits.EarliestExpiryAt.Equal(expiry) || !again.ResetCredits.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LastSuccess.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LatestAttempt.Inventory.AvailableExpiries[0].Equal(expiry) {
+	if again.Adapter != "codex" || again.ResetCredits == nil || again.ResetCredits.EarliestExpiryAt == nil || !again.ResetCredits.EarliestExpiryAt.Equal(expiry) || !again.ResetCredits.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LastSuccess.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LatestAttempt.Inventory.AvailableExpiries[0].Equal(expiry) {
 		t.Fatalf("merged report reset data was not independently copied: %+v", again)
 	}
 }

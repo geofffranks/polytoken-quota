@@ -452,11 +452,20 @@ def banked_resets($p; $asof):
   else
     (if ($p.reset_credits|type) == "object" then $p.reset_credits else {} end) as $r
     | (if ($r.latest_attempt|type) == "object" then ($r.latest_attempt.status // "") else "" end) as $attempt
-    | (if ($r.usable_count|type) == "number" and isnum($r.usable_count) and $r.usable_count >= 0 then $r.usable_count|floor else null end) as $count
-    | (if ($r.available_expiries|type) == "array" then [$r.available_expiries[] | select(type == "string") | epoch(.) as $t | select($t != null and ($asof|type) == "string" and epoch($asof) != null and $t > epoch($asof)) | {raw:., epoch:$t}] | sort_by(.epoch) else [] end) as $exp
-    | (($r.discrepancy_count|type) == "number" and isnum($r.discrepancy_count) and $r.discrepancy_count > 0) as $discrepancy
-    | (if ($r.available_expiries|type) == "array" then any($r.available_expiries[]; . != null and ((type != "string") or (epoch(.) == null))) else false end) as $badexpiry
-    | ($discrepancy or $badexpiry) as $partial
+    | (if ($r.last_success|type) == "object" then $r.last_success else {} end) as $success
+    | (if ($r.usable_count|type) == "number" and isnum($r.usable_count) and $r.usable_count >= 0 and ($r.usable_count|floor) == $r.usable_count then $r.usable_count else null end) as $raw_count
+    | (if ($success|has("available_expiries")|not) then [] elif ($success.available_expiries|type) == "array" then $success.available_expiries else null end) as $success_expiries
+    | ([$success | to_entries[] | select(.key == "server_available_count" or .key == "usable_count" or .key == "discrepancy_count" or .key == "skipped_count") | .value] | all(.[]; type == "number" and isnum(.) and . >= 0 and (floor == .))) as $success_counters
+    | (if ($r.available_expiries == null and ($success|has("available_expiries")|not)) then [] elif ($r.available_expiries|type) == "array" then $r.available_expiries elif ($r.available_expiries == null and ($success.available_expiries == null)) then [] else null end) as $raw_expiries
+    | (if ($r.discrepancy_count|type) == "number" and isnum($r.discrepancy_count) and $r.discrepancy_count >= 0 and ($r.discrepancy_count|floor) == $r.discrepancy_count then $r.discrepancy_count elif $r.discrepancy_count == null then 0 else null end) as $raw_discrepancy
+    | (if ($r.skipped_count|type) == "number" and isnum($r.skipped_count) and $r.skipped_count >= 0 and ($r.skipped_count|floor) == $r.skipped_count then $r.skipped_count elif $r.skipped_count == null then 0 else null end) as $raw_skipped
+    | (if ($success.observed_at|type) == "string" and epoch($success.observed_at) != null then epoch($success.observed_at) else null end) as $observed
+    | (if ($asof|type) == "string" and epoch($asof) != null then epoch($asof) else null end) as $now
+    | (if ($raw_expiries|type) == "array" then [$raw_expiries[] | select(. == null or type == "string") | if . == null then null else epoch(.) end] else null end) as $expiry_epochs
+    | (if $expiry_epochs != null then [$raw_expiries[] | select(type == "string") | epoch(.) as $t | select($t != null and $now != null and $t > $now) | {epoch:$t}] | sort_by(.epoch) else [] end) as $exp
+    | (($raw_discrepancy == null) or ($raw_skipped == null) or ($raw_expiries == null) or ($success_expiries == null) or ($success_counters|not) or ($observed == null) or ($now == null) or ($r.server_available_count != null and (($r.server_available_count|type) != "number" or (isnum($r.server_available_count)|not) or $r.server_available_count < 0 or ($r.server_available_count|floor) != $r.server_available_count))) as $badoptional
+    | (($raw_discrepancy != null and $raw_discrepancy > 0) or ($raw_expiries != null and any($raw_expiries[]; . != null and ((type != "string") or (epoch(.) == null))))) as $partial
+    | (if $raw_count != null and $success != {} and $observed != null and $now != null and ($raw_discrepancy != null) and ($raw_skipped != null) and $raw_expiries != null and ($expiry_epochs != null) and ($badoptional|not) then $raw_count else null end) as $count
     | (if $count == null then "Banked resets: Unknown"
        elif $partial then "Banked resets: \($count) confirmed available · Partial data"
        else "Banked resets: \($count) available" end)

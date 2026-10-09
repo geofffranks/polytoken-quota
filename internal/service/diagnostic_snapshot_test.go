@@ -564,8 +564,9 @@ func TestStatusCommandResponsibility(t *testing.T) {
 	*status.Providers[0].Windows[0].ResetAt = time.Time{}
 	*status.Providers[0].Usage.Credits.Balance = "mutated"
 	status.Providers[0].ResetCredits.AvailableExpiries[0] = nil
+	*status.Providers[0].ResetCredits.EarliestExpiryAt = time.Time{}
 	again := snapshot.StatusView()
-	if again.Providers[0].Windows[0].Name == "mutated" || again.Providers[0].Windows[0].ResetAt.IsZero() || *again.Providers[0].Usage.Credits.Balance == "mutated" || again.Providers[0].ResetCredits.AvailableExpiries[0] == nil {
+	if again.Providers[0].Windows[0].Name == "mutated" || again.Providers[0].Windows[0].ResetAt.IsZero() || *again.Providers[0].Usage.Credits.Balance == "mutated" || again.Providers[0].ResetCredits.AvailableExpiries[0] == nil || again.Providers[0].ResetCredits.EarliestExpiryAt == nil || again.Providers[0].ResetCredits.EarliestExpiryAt.IsZero() {
 		t.Fatalf("selector DTO mutation reached shared snapshot: %+v", again.Providers[0])
 	}
 }

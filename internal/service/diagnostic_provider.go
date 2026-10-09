@@ -216,7 +216,7 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			}
 		}
 		entry.Usage = usageSummaryReport(ps.ResetCredits.UsageSummary)
-		if entry.Adapter == "codex" {
+		if ps.ResetCredits.LastSuccess != nil || ps.ResetCredits.LatestAttempt != nil || entry.Adapter == "codex" {
 			entry.ResetCredits = resetCreditReport(ps.ResetCredits, ttl, asOf)
 		}
 		if record, ok := observed.OwnershipOf(id); ok && record.Owned && record.Axis != "" {
@@ -439,6 +439,7 @@ func cloneResetCredits(in *ResetCreditReport) *ResetCreditReport {
 	out.LastSuccess = cloneResetInventory(in.LastSuccess)
 	out.LatestAttempt = cloneResetAttempt(in.LatestAttempt)
 	out.UsableCount = cloneInt(in.UsableCount)
+	out.EarliestExpiryAt = cloneTime(in.EarliestExpiryAt)
 	out.AvailableExpiries = cloneTimes(in.AvailableExpiries)
 	return &out
 }
