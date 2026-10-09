@@ -13,7 +13,7 @@ PLUGIN_BASH=${PLUGIN_BASH:-bash}
 bash -n "$PLUGIN" || exit 1
 command -v "$PLUGIN_BASH" >/dev/null || exit 1
 PATH_PREPEND=""; PLUGIN_ENV_POLYTOKEN_BINARY=""
-PLUGIN_APPEARANCE=""; EXPECTED_COLOR=black
+PLUGIN_APPEARANCE=""
 ok() { PASS=$((PASS+1)); }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL [%s]: %s\n' "$CASE_NAME" "$1"; }
 # Expected provider headers use the display name, without a diagnostic prefix.
@@ -36,15 +36,16 @@ assert_before() {
 }
 assert_layout() {
   local violations
-  violations=$(printf '%s\n' "$OUT" | awk -v color="$EXPECTED_COLOR" '
+  violations=$(printf '%s\n' "$OUT" | awk '
     NR == 1 || /^---$/ { next }
-    $0 == "Refresh status | refresh=true emojize=false symbolize=false color=" color { next }
+    $0 == "Refresh status | refresh=true emojize=false symbolize=false" { next }
     /^-/ { c++; next }
-    $0 !~ (" \\| emojize=false symbolize=false color=" color "( font=Menlo)?$") { c++ }
+    $0 !~ / \| emojize=false symbolize=false bash=\/usr\/bin\/true terminal=false( font=Menlo)?$/ { c++ }
     END { print c+0 }')
-  [ "$violations" = 0 ] && ok || bad "nonliteral or nested rows: $violations"
-  [ "$(printf '%s\n' "$OUT" | grep -c "^Refresh status | refresh=true emojize=false symbolize=false color=$EXPECTED_COLOR\$")" = 1 ] && ok || bad "refresh not unique"
-  if printf '%s\n' "$OUT" | grep -v "^Refresh status | refresh=true emojize=false symbolize=false color=$EXPECTED_COLOR\$" | grep -qE '\|.*(refresh=|href=|bash=|terminal=|shell=|params[0-9]=|alternate=)'; then bad 'data-driven action'; else ok; fi
+  [ "$violations" = 0 ] && ok || bad "nonliteral, nested or unsafe action rows: $violations"
+  [ "$(printf '%s\n' "$OUT" | grep -c '^Refresh status | refresh=true emojize=false symbolize=false$')" = 1 ] && ok || bad "refresh not unique"
+  if printf '%s\n' "$OUT" | grep -v '^Refresh status | refresh=true emojize=false symbolize=false$' | sed 's/ bash=\/usr\/bin\/true terminal=false//' | grep -qE '\|.*(refresh=|href=|bash=|terminal=|shell=|params?[0-9]=|alternate=)'; then bad 'data-driven action'; else ok; fi
+  if printf '%s\n' "$OUT" | grep -qE '(^|[ |])color='; then bad 'explicit text color'; else ok; fi
   assert_lacks 'length='
   assert_lacks '===PROVIDERS==='
   assert_lacks 'Evaluation time:'
@@ -112,10 +113,9 @@ run_plugin() {
   assert_layout
 }
 
-# Explicit colors must agree across shell summaries, jq details and actions.
+# Native text color and fixed no-op actions must not depend on appearance input.
 for appearance in Light Dark '' 'Dark | href=https://invalid.example'; do
   PLUGIN_APPEARANCE=$appearance
-  case "$appearance" in Dark) EXPECTED_COLOR=white ;; *) EXPECTED_COLOR=black ;; esac
   start_case appearance_normal
   run_plugin
   assert_has 'alpha — Available'
@@ -137,7 +137,7 @@ for appearance in Light Dark '' 'Dark | href=https://invalid.example'; do
   [ ! -f "$CASE_DIR/ran" ] && ok || bad 'command ran with bad config'
 
 done
-PLUGIN_APPEARANCE=""; EXPECTED_COLOR=black
+PLUGIN_APPEARANCE=""
 
 # Compactness is an observable contract, not just absence of submenus.
 start_case compact_healthy
@@ -324,7 +324,7 @@ doctor_fixture '{"findings":[{"code":"--error | refresh=true","severity":"error"
 run_plugin; assert_has 'ev   refresh=true href=https://evil.example — Available'; assert_has '· --w   bash=/bin/echo params0=x'; if printf '%s\n' "$OUT" | grep -q '^--w'; then bad 'window created submenu'; else ok; fi
 status_fixture "$(jq '.providers[0].provider="--hostile"' "$CASE_DIR/status.json")"
 run_plugin; assert_has '· --hostile — Available'
-assert_lacks 'Pending:'; assert_lacks 'terminal=false'; assert_lacks 'symbolize=true'
+assert_lacks 'Pending:'; assert_lacks 'symbolize=true' # assert_layout checks the exact fixed action.
 
 # Typed contradictions must never enter pace or red-state decisions.
 for mutation in '.status="unavailable"' '.freshness="banana" | .availability="unavailable"' '.status="banana"' '.eligible="yes"'; do
