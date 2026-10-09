@@ -40,8 +40,12 @@ BUDGET_SECONDS=50       # outer refresh budget; later stages skip when exhausted
 BAR_WIDTH=10            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
-# Use the system appearance for every informational row, never dummy actions.
-LIT="emojize=false symbolize=false color=black,white"
+# SwiftBar supplies the current appearance; emit only a fixed, known color.
+case "${OS_APPEARANCE-}" in
+  Dark) TEXT_COLOR=white ;;
+  *) TEXT_COLOR=black ;;
+esac
+LIT="emojize=false symbolize=false color=$TEXT_COLOR"
 
 # Fallback search dirs (newline-separated) for minimal GUI PATH environments.
 SEARCH_DIRS="/opt/homebrew/bin
@@ -333,7 +337,7 @@ def safe: if . == null then "" else (tostring
   | gsub("^ +| +$"; "")
   | .[0:240]) end;
 def s2: if . == null then "unknown" else safe end;
-def lit: " | emojize=false symbolize=false color=black,white";
+def lit: " | emojize=false symbolize=false color='"$TEXT_COLOR"'";
 # Split sanitized essential details into root rows, never tooltip-only text.
 def detail($label; $text):
   ($text|tostring|gsub("[\\x00-\\x1f\\x7f\\x{0085}\\x{2028}\\x{2029}|]"; " ")) as $s
@@ -516,7 +520,7 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
          (($p.windows // [])[]? | . as $w | window_pct($w) as $wp
           | (isnum($w.usage_percent) and isnum($w.used) and $w.used >= 0 and isnum($w.limit) and $w.limit > 0
               and ((($w.usage_percent) - (($w.used/$w.limit)*100))|fabs) > '$PCT_DIFF_LIMIT') as $conflict
-          | "\(if $w.name == "subscription_kwh" then "Subscription" elif $w.name == "rolling" then "Rolling" elif $w.name == "session" then "Session" elif $w.name == "weekly" then "Weekly" elif $w.name == "daily" then "Daily" else ($w.name|title_safe) end) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \(if $wp.pct == null then "No data" else "\($wp.pct)% used" end)\(if $wp.pct != null and $wp.pct > 100 then " (over limit)" else "" end)\(reset_label($w.reset_at; $r.as_of) as $label | if $label != "" then " · " + $label else "" end) | emojize=false symbolize=false color=black,white font=Menlo",
+          | "\(if $w.name == "subscription_kwh" then "Subscription" elif $w.name == "rolling" then "Rolling" elif $w.name == "session" then "Session" elif $w.name == "weekly" then "Weekly" elif $w.name == "daily" then "Daily" else ($w.name|title_safe) end) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \(if $wp.pct == null then "No data" else "\($wp.pct)% used" end)\(if $wp.pct != null and $wp.pct > 100 then " (over limit)" else "" end)\(reset_label($w.reset_at; $r.as_of) as $label | if $label != "" then " · " + $label else "" end)\(lit) font=Menlo",
             (if $wp.bad or $conflict then
                "Raw quota: used \(($w.used|s2)) / limit \(($w.limit|s2)); percent \(($w.usage_percent|s2))\(lit)",
                (if $conflict then "Data note: reported percentage disagrees with used/limit; both retained.\(lit)" else "Data note: invalid supplied numbers ignored for bar.\(lit)" end)
@@ -547,7 +551,7 @@ if [ -n "$CONFIG_ERROR" ]; then
   printf '%s\n' "​ | sfimage=gauge.medium sfcolor=orange dropdown=false"
   printf '%s\n' "---"
   printf '%s | %s\n' "Quota observation: time unknown · Attention needed" "$LIT"
-  printf '%s\n' "Refresh status | refresh=true"
+  printf '%s\n' "Refresh status | refresh=true $LIT"
   exit 0
 fi
 
@@ -815,5 +819,5 @@ if [ "$STATUS_PARSED" = 1 ]; then
   done < "$STATUS_BODY"
 fi
 printf '%s\n' "---"
-printf '%s\n' "Refresh status | refresh=true"
+printf '%s\n' "Refresh status | refresh=true $LIT"
 exit 0

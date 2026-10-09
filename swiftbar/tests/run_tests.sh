@@ -13,6 +13,7 @@ PLUGIN_BASH=${PLUGIN_BASH:-bash}
 bash -n "$PLUGIN" || exit 1
 command -v "$PLUGIN_BASH" >/dev/null || exit 1
 PATH_PREPEND=""; PLUGIN_ENV_POLYTOKEN_BINARY=""
+PLUGIN_APPEARANCE=""; EXPECTED_COLOR=black
 ok() { PASS=$((PASS+1)); }
 bad() { FAIL=$((FAIL+1)); printf 'FAIL [%s]: %s\n' "$CASE_NAME" "$1"; }
 # Expected provider headers use the display name, without a diagnostic prefix.
@@ -35,14 +36,15 @@ assert_before() {
 }
 assert_layout() {
   local violations
-  violations=$(printf '%s\n' "$OUT" | awk '
-    NR == 1 || /^---$/ || /^Refresh status \| refresh=true$/ { next }
+  violations=$(printf '%s\n' "$OUT" | awk -v color="$EXPECTED_COLOR" '
+    NR == 1 || /^---$/ { next }
+    $0 == "Refresh status | refresh=true emojize=false symbolize=false color=" color { next }
     /^-/ { c++; next }
-    $0 !~ / \| emojize=false symbolize=false color=black,white( font=Menlo)?$/ { c++ }
+    $0 !~ (" \\| emojize=false symbolize=false color=" color "( font=Menlo)?$") { c++ }
     END { print c+0 }')
   [ "$violations" = 0 ] && ok || bad "nonliteral or nested rows: $violations"
-  [ "$(printf '%s\n' "$OUT" | grep -c '^Refresh status | refresh=true$')" = 1 ] && ok || bad "refresh not unique"
-  if printf '%s\n' "$OUT" | grep -v '^Refresh status | refresh=true$' | grep -qE '\|.*(refresh=|href=|bash=|terminal=|shell=|params[0-9]=|alternate=)'; then bad 'data-driven action'; else ok; fi
+  [ "$(printf '%s\n' "$OUT" | grep -c "^Refresh status | refresh=true emojize=false symbolize=false color=$EXPECTED_COLOR\$")" = 1 ] && ok || bad "refresh not unique"
+  if printf '%s\n' "$OUT" | grep -v "^Refresh status | refresh=true emojize=false symbolize=false color=$EXPECTED_COLOR\$" | grep -qE '\|.*(refresh=|href=|bash=|terminal=|shell=|params[0-9]=|alternate=)'; then bad 'data-driven action'; else ok; fi
   assert_lacks 'length='
   assert_lacks '===PROVIDERS==='
   assert_lacks 'Evaluation time:'
@@ -104,10 +106,38 @@ run_plugin() {
   [ -z "$PATH_PREPEND" ] || path="$PATH_PREPEND:$path"
   [ "$conf" = none ] || envs=(POLYTOKEN_SWIFTBAR_CONFIG="$conf")
   [ -z "$PLUGIN_ENV_POLYTOKEN_BINARY" ] || envs=("${envs[@]+"${envs[@]}"}" POLYTOKEN_BINARY="$PLUGIN_ENV_POLYTOKEN_BINARY")
+  [ -z "$PLUGIN_APPEARANCE" ] || envs=("${envs[@]+"${envs[@]}"}" OS_APPEARANCE="$PLUGIN_APPEARANCE")
   OUT=$(env -i PATH="$path" HOME="$CASE_DIR" STUB_DIR="$CASE_DIR" "${envs[@]+"${envs[@]}"}" "$PLUGIN_BASH" "$PLUGIN" 2>/dev/null); RC=$?
   [ "$RC" = 0 ] && [ -n "$OUT" ] && ok || bad "plugin exit=$RC or empty output"
   assert_layout
 }
+
+# Explicit colors must agree across shell summaries, jq details and actions.
+for appearance in Light Dark '' 'Dark | href=https://invalid.example'; do
+  PLUGIN_APPEARANCE=$appearance
+  case "$appearance" in Dark) EXPECTED_COLOR=white ;; *) EXPECTED_COLOR=black ;; esac
+  start_case appearance_normal
+  run_plugin
+  assert_has 'alpha — Available'
+  assert_has 'Weekly ['
+  assert_lacks 'color=black,white'
+  assert_lacks 'invalid.example'
+
+  start_case appearance_degraded
+  stub_rc status 3
+  run_plugin
+  assert_has 'Quota observation: 30s ago · Attention needed'
+  assert_header 'color=orange'
+
+  start_case appearance_bad_config
+  printf 'unsupported=value\n' > "$CASE_DIR/plugin.conf"
+  run_plugin
+  assert_has 'Quota observation: time unknown · Attention needed'
+  assert_header 'color=orange'
+  [ ! -f "$CASE_DIR/ran" ] && ok || bad 'command ran with bad config'
+
+done
+PLUGIN_APPEARANCE=""; EXPECTED_COLOR=black
 
 # Compactness is an observable contract, not just absence of submenus.
 start_case compact_healthy
