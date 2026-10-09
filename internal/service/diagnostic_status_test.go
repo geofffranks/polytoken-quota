@@ -28,6 +28,29 @@ func mergedRouteByName(t *testing.T, report MergedStatusReport, name string) Mer
 	return MergedStatusRoute{}
 }
 
+func TestMergedStatusCopiesResetCreditNestedData(t *testing.T) {
+	asOf := diagnosticAsOf
+	expiry := asOf.Add(time.Hour)
+	snapshot := DiagnosticSnapshot{asOf: asOf, providers: []ProviderProjection{{
+		MappingID: "renamed", Adapter: "codex", Freshness: FreshnessMissing,
+		ResetCredits: &ResetCreditReport{Freshness: FreshnessStale, UsableCount: intRef(1),
+			EarliestExpiryAt: &expiry, AvailableExpiries: []*time.Time{&expiry},
+			LastSuccess:   &ResetCreditInventoryReport{AvailableExpiries: []*time.Time{&expiry}},
+			LatestAttempt: &ResetCreditAttemptReport{Status: quota.CreditAttemptFailed, Inventory: &ResetCreditInventoryReport{AvailableExpiries: []*time.Time{&expiry}}}},
+	}}, ranks: []RankEntryReport{{MappingID: "renamed"}}}
+	first := snapshot.MergedStatusView().Providers[0]
+	*first.ResetCredits.EarliestExpiryAt = time.Time{}
+	*first.ResetCredits.AvailableExpiries[0] = time.Time{}
+	*first.ResetCredits.LastSuccess.AvailableExpiries[0] = time.Time{}
+	*first.ResetCredits.LatestAttempt.Inventory.AvailableExpiries[0] = time.Time{}
+	again := snapshot.MergedStatusView().Providers[0]
+	if again.Adapter != "codex" || again.ResetCredits == nil || !again.ResetCredits.EarliestExpiryAt.Equal(expiry) || !again.ResetCredits.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LastSuccess.AvailableExpiries[0].Equal(expiry) || !again.ResetCredits.LatestAttempt.Inventory.AvailableExpiries[0].Equal(expiry) {
+		t.Fatalf("merged report reset data was not independently copied: %+v", again)
+	}
+}
+
+func intRef(v int) *int { return &v }
+
 func TestMergedStatusAdditiveAttemptPollingAndPendingDetails(t *testing.T) {
 	observedAt := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
 	attemptedAt := observedAt.Add(time.Hour)

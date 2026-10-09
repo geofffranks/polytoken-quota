@@ -154,6 +154,32 @@ assert_lacks '===OBSERVATION==='
 [ "$(printf '%s\n' "$OUT" | grep -c '^Quota observation:')" = 1 ] && ok || bad 'summary not unique'
   [ "$(printf '%s\n' "$OUT" | grep -c ' | sfimage=gauge.medium')" = 1 ] && ok || bad 'gauge not unique'
   assert_lacks 'Plugin configuration error'; assert_lacks 'Diagnostics:'; assert_lacks 'WARNING:'
+start_case banked_resets_after_session
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .providers[0].windows=[{name:"session",usage_percent:40},{name:"weekly",usage_percent:20}] | .providers[0] += {adapter:"codex",reset_credits:{freshness:"fresh",usable_count:2,available_expiries:["2026-09-22T10:00:00Z","2026-09-24T10:00:00+02:00"],discrepancy_count:0,latest_attempt:{status:"success"}}}')"
+run_plugin; assert_has 'Banked resets: 2 available · Earliest expiry in 1d 0h'; assert_before 'Session [' 'Banked resets:'; assert_before 'Banked resets:' 'Weekly ['
+[ "$(printf '%s\\n' "$OUT" | grep -c 'Banked resets:')" = 1 ] && ok || bad 'banked reset row not unique'
+start_case banked_resets_partial_failed_no_session
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base renamed available 0.3)")" '$r | .providers[0] += {adapter:"codex",windows:[{name:"weekly",usage_percent:20}],reset_credits:{freshness:"stale",usable_count:1,available_expiries:["2026-09-22T10:00:00Z"],discrepancy_count:1,latest_attempt:{status:"failed",error:"must not display"}}}')"
+run_plugin; assert_has 'Banked resets: 1 confirmed available · Partial data · Earliest known expiry in 1d 0h · Stale · Last known · Refresh failed'; assert_before 'Weekly [' 'Banked resets:'; assert_lacks 'must not display'
+start_case banked_resets_unknown_and_legacy
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base codex available 0.3)")" '$r | .providers[0] += {adapter:"codex",windows:[{name:"weekly"}],reset_credits:{freshness:"missing",usable_count:"bad",latest_attempt:{status:"skipped"}}}')"
+run_plugin; assert_has 'Banked resets: Unknown · Refresh skipped'
+start_case banked_resets_non_codex_and_old_cli
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base codex available 0.3)")" '$r | .providers[0].adapter="other" | .providers[0].reset_credits={usable_count:9}')"
+run_plugin; assert_lacks 'Banked resets:'
+status_fixture "$(jq 'del(.providers[0].adapter,.providers[0].reset_credits)' "$CASE_DIR/status.json")"
+run_plugin; assert_lacks 'Banked resets:'
+start_case banked_resets_empty_mixed_and_bad_values
+status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha available 0.3)")" '$r | .providers[0].windows=[{name:"session"}] | .providers[0] += {adapter:"codex",reset_credits:{freshness:"fresh",usable_count:2,available_expiries:["2026-09-20T10:00:00Z","2026-09-21T10:00:00Z","bad | href=https://evil","2026-09-22T10:00:00+00:00"],discrepancy_count:1}}')"
+run_plugin; assert_has 'Banked resets: 2 confirmed available · Partial data · Earliest known expiry in 1d 0h'; assert_lacks 'evil'
+status_fixture "$(jq '.providers[0].reset_credits.usable_count=0 | .providers[0].reset_credits.available_expiries=[] | .providers[0].reset_credits.discrepancy_count=0' "$CASE_DIR/status.json")"
+run_plugin; assert_has 'Banked resets: 0 available'
+status_fixture "$(jq '.providers[0].reset_credits.usable_count=1 | .providers[0].reset_credits.available_expiries=["2026-09-21T10:00:00Z"] | .providers[0].reset_credits.discrepancy_count=0' "$CASE_DIR/status.json")"
+run_plugin; assert_has 'Banked resets: 1 available · Expiry unknown'
+status_fixture "$(jq '.providers[0].reset_credits="malformed"' "$CASE_DIR/status.json")"
+run_plugin; assert_has 'Banked resets: Unknown'; assert_has 'Session ['
+status_fixture "$(jq '.providers[0].reset_credits={usable_count:1,available_expiries:[42],latest_attempt:"bad"}' "$CASE_DIR/status.json")"
+run_plugin; assert_has 'Banked resets: 1 confirmed available · Partial data · Expiry unknown'; assert_has 'Session ['
 start_case compact_gated
 status_fixture "$(jq -nc --argjson r "$(wrap_status "$(prov_base alpha gated -1)")" '$r | .providers[0].reason="signal-gated (-1 <= 0); peak, signal -1" | .providers[0].windows += [{name:"rolling",usage_percent:8,reset_at:"2026-09-26T01:00:00Z"}]')"
 run_plugin

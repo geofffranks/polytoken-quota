@@ -29,4 +29,8 @@ Adjust paths for your installation. Only these three keys are accepted; bad over
 
 The display refreshes every minute. After replacing the installed script, click **Refresh status**; no restart is needed. An amber gauge means attention is needed; run `polytoken-quota status` and `polytoken-quota doctor` for details.
 
+For configured Codex adapters, the menu adds one **Banked resets** row after the first Session window (or after the quota windows when Session is absent). It shows the saved usable count and earliest known future expiry; it does not redeem resets or change quota status. `Unknown` means there is no usable inventory observation. `Partial data` marks a confirmed lower-bound count; unknown expiry is not treated as expired. `Stale` describes the reset inventory's own age, independently of ordinary quota freshness. After a failed or skipped refresh, retained counts are marked `Last known`; without retained inventory the row stays `Unknown`. Normal scheduled quota checks supply this information.
+
+The installed plugin and `polytoken-quota` CLI both need to be updated for this row: the plugin reads the additive `adapter` and `reset_credits` fields from `status --json`. Older CLI JSON and non-Codex adapters do not produce a banked-reset row.
+
 To uninstall, remove the script and its optional `.conf` file from your SwiftBar plugin folder.

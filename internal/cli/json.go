@@ -79,7 +79,9 @@ type statusProviderJSON struct {
 	PollingStatus string             `json:"polling_status,omitempty"`
 	// Availability is the stored snapshot's own availability
 	// (available/unavailable/unknown); omitted when never observed.
-	Availability string `json:"availability,omitempty"`
+	Availability string                     `json:"availability,omitempty"`
+	Adapter      string                     `json:"adapter,omitempty"`
+	ResetCredits *service.ResetCreditReport `json:"reset_credits,omitempty"`
 }
 
 // statusSkippedJSON is one desired model absent from the effective chain.
@@ -138,6 +140,7 @@ func statusEnvelope(r service.MergedStatusReport) statusJSON {
 			Provider: p.Provider, Status: p.Status, Rank: p.Rank,
 			OffPeak: p.OffPeak, Eligible: p.Eligible, Reason: p.Reason,
 			Condition: p.Condition, Freshness: string(p.Freshness), Signal: p.Signal,
+			Adapter: p.Adapter, ResetCredits: p.ResetCredits,
 		}
 		if !p.CheckedAt.IsZero() {
 			pj.CheckedAt = p.CheckedAt.UTC().Format(time.RFC3339)

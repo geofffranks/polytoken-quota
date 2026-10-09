@@ -447,6 +447,32 @@ def provider_header:
   | [scan(".{1,120}(?= +|$)|.{1,120}")] as $parts
   | range(0; $parts|length) as $i
   | (if $i == 0 then $parts[$i] else "Continued: " + $parts[$i] end) + lit;
+def banked_resets($p; $asof):
+  if $p.adapter != "codex" then empty
+  else
+    (if ($p.reset_credits|type) == "object" then $p.reset_credits else {} end) as $r
+    | (if ($r.latest_attempt|type) == "object" then ($r.latest_attempt.status // "") else "" end) as $attempt
+    | (if ($r.usable_count|type) == "number" and isnum($r.usable_count) and $r.usable_count >= 0 then $r.usable_count|floor else null end) as $count
+    | (if ($r.available_expiries|type) == "array" then [$r.available_expiries[] | select(type == "string") | epoch(.) as $t | select($t != null and ($asof|type) == "string" and epoch($asof) != null and $t > epoch($asof)) | {raw:., epoch:$t}] | sort_by(.epoch) else [] end) as $exp
+    | (($r.discrepancy_count|type) == "number" and isnum($r.discrepancy_count) and $r.discrepancy_count > 0) as $discrepancy
+    | (if ($r.available_expiries|type) == "array" then any($r.available_expiries[]; . != null and ((type != "string") or (epoch(.) == null))) else false end) as $badexpiry
+    | ($discrepancy or $badexpiry) as $partial
+    | (if $count == null then "Banked resets: Unknown"
+       elif $partial then "Banked resets: \($count) confirmed available · Partial data"
+       else "Banked resets: \($count) available" end)
+      + (if $count != null and $count > 0 then
+           if ($exp|length) > 0 then
+             " · Earliest " + (if $partial or ($exp|length) < $count then "known " else "" end) + "expiry in " + countdown(($exp[0].epoch-epoch($asof))|floor)
+           else " · Expiry unknown" end
+         else "" end)
+      + (if $r.freshness == "stale" then " · Stale" else "" end)
+      + (if $count == null and $attempt == "failed" then " · Refresh failed"
+         elif $count == null and $attempt == "skipped" then " · Refresh skipped"
+         elif $count != null and $attempt == "failed" then " · Last known · Refresh failed"
+         elif $count != null and $attempt == "skipped" then " · Last known · Refresh skipped"
+         else "" end)
+      + lit
+  end;
 def reset_label($ts; $asof):
   epoch($ts) as $t | epoch($asof) as $n
   | if $t != null and $n != null then
@@ -515,16 +541,20 @@ JQ_STATUS_BODY="$JQ_HELPERS"'
        | "---",
          ("\(($p.provider|title_safe)) — \(if $p.status == "available" then "Available" elif $p.status == "enabled" then "Enabled (quota unknown)" elif $p.status == "gated" then "Gated" elif $p.status == "unavailable" then "Unavailable" elif $p.status == "disabled" then "Disabled" else "Status unknown" end)\(if isnum($p.signal) and ($compat|not) then " · Pace " + fmtsig($p.signal) + (if usable($compat) then "" else " (not usable)" end) else "" end)\(if (reason|length) > 0 then " · " + reason else "" end)\(if (($p.condition // "")|safe) != "" and ($p.status == "unavailable" or $p.status == "gated") then " · " + ($p.condition|tostring) else "" end)" | provider_header),
          (if (($p.windows // [])|length) == 0 then
-            "Quota: No data\(if $p.polling_status == "disabled" then " (polling disabled)" elif $p.polling_status == "unsupported" then " (polling unsupported)" elif $p.polling_status == null or $p.polling_status == "unknown" then " (polling status unknown)" else "" end)\(lit)"
+            "Quota: No data\(if $p.polling_status == "disabled" then " (polling disabled)" elif $p.polling_status == "unsupported" then " (polling unsupported)" elif $p.polling_status == null or $p.polling_status == "unknown" then " (polling status unknown)" else "" end)\(lit)",
+             (if $p.adapter == "codex" then banked_resets($p; $r.as_of) else empty end)
           else empty end),
-         (($p.windows // [])[]? | . as $w | window_pct($w) as $wp
+         (($p.windows // []) | to_entries[]? | .key as $wi | .value as $w | window_pct($w) as $wp
           | (isnum($w.usage_percent) and isnum($w.used) and $w.used >= 0 and isnum($w.limit) and $w.limit > 0
               and ((($w.usage_percent) - (($w.used/$w.limit)*100))|fabs) > '$PCT_DIFF_LIMIT') as $conflict
           | "\(if $w.name == "subscription_kwh" then "Subscription" elif $w.name == "rolling" then "Rolling" elif $w.name == "session" then "Session" elif $w.name == "weekly" then "Weekly" elif $w.name == "daily" then "Daily" else ($w.name|title_safe) end) [\(if $wp.pct == null then ("unknown" + (" "*('$BAR_WIDTH'-7))) else bar($wp.pct) end)] \(if $wp.pct == null then "No data" else "\($wp.pct)% used" end)\(if $wp.pct != null and $wp.pct > 100 then " (over limit)" else "" end)\(reset_label($w.reset_at; $r.as_of) as $label | if $label != "" then " · " + $label else "" end)\(lit) font=Menlo",
+            (if $w.name == "session" and ([ $p.windows[0:$wi][]? | select(.name == "session") ]|length) == 0 then banked_resets($p; $r.as_of) else empty end),
             (if $wp.bad or $conflict then
                "Raw quota: used \(($w.used|s2)) / limit \(($w.limit|s2)); percent \(($w.usage_percent|s2))\(lit)",
                (if $conflict then "Data note: reported percentage disagrees with used/limit; both retained.\(lit)" else "Data note: invalid supplied numbers ignored for bar.\(lit)" end)
-             else empty end)))
+             else empty end),
+           (if (($p.adapter == "codex") and (([$p.windows[]? | select(.name == "session")]|length) == 0) and ($wi == (($p.windows|length)-1))) then banked_resets($p; $r.as_of) else empty end),
+           empty))
   end
 '
 

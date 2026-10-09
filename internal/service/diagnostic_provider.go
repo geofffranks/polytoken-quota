@@ -81,6 +81,8 @@ type ResetCreditAttemptReport struct {
 // ResetCreditReport preserves success/attempt provenance and provides an AsOf
 // summary whose count/expiries exclude expired items without changing history.
 type ResetCreditReport struct {
+	Freshness            Freshness                   `json:"freshness"`
+	EarliestExpiryAt     *time.Time                  `json:"earliest_expiry_at,omitempty"`
 	LastSuccess          *ResetCreditInventoryReport `json:"last_success,omitempty"`
 	LatestAttempt        *ResetCreditAttemptReport   `json:"latest_attempt,omitempty"`
 	Status               quota.CreditAttemptStatus   `json:"status,omitempty"`
@@ -214,7 +216,9 @@ func projectProviders(desired policy.Desired, observed state.State, asOf time.Ti
 			}
 		}
 		entry.Usage = usageSummaryReport(ps.ResetCredits.UsageSummary)
-		entry.ResetCredits = resetCreditReport(ps.ResetCredits, asOf)
+		if entry.Adapter == "codex" {
+			entry.ResetCredits = resetCreditReport(ps.ResetCredits, ttl, asOf)
+		}
 		if record, ok := observed.OwnershipOf(id); ok && record.Owned && record.Axis != "" {
 			g := &GateReport{Axis: record.Axis, EngagedRevision: record.EngagedRevision, Conflict: record.Conflict}
 			if record.Axis == state.OwnershipAxisSignal {
@@ -302,13 +306,21 @@ func usageSummaryReport(summary *quota.CodexUsageSummary) *UsageSummaryReport {
 	return out
 }
 
-func resetCreditReport(credits quota.ResetCreditState, asOf time.Time) *ResetCreditReport {
-	if credits.LastSuccess == nil && credits.LatestAttempt == nil {
-		return nil
+func resetCreditSuccessAt(credits quota.ResetCreditState) time.Time {
+	if credits.LastSuccess == nil {
+		return time.Time{}
 	}
+	return credits.LastSuccess.ObservedAt
+}
+
+func resetCreditReport(credits quota.ResetCreditState, ttl time.Duration, asOf time.Time) *ResetCreditReport {
 	out := &ResetCreditReport{
+		Freshness:     classifyFreshness(resetCreditSuccessAt(credits), ttl, asOf),
 		LastSuccess:   resetInventoryReport(credits.LastSuccess),
 		LatestAttempt: resetAttemptReport(credits.LatestAttempt),
+	}
+	if credits.LastSuccess == nil && credits.LatestAttempt == nil {
+		return out
 	}
 	if credits.LatestAttempt != nil {
 		out.Status = credits.LatestAttempt.Status
@@ -321,6 +333,9 @@ func resetCreditReport(credits quota.ResetCreditState, asOf time.Time) *ResetCre
 		for _, expiry := range credits.LastSuccess.AvailableExpiries {
 			if expiry == nil || expiry.After(asOf) {
 				out.AvailableExpiries = append(out.AvailableExpiries, cloneTime(expiry))
+				if expiry != nil && (out.EarliestExpiryAt == nil || expiry.Before(*out.EarliestExpiryAt)) {
+					out.EarliestExpiryAt = cloneTime(expiry)
+				}
 			}
 		}
 	}

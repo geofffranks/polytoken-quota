@@ -34,14 +34,16 @@ const disabledRankExplanation = "ineligible: disabled"
 // metadata, raw quota window numbers, the earliest upcoming reset, and the
 // gate attribution when quota holds the provider's enabled field off.
 type MergedStatusProvider struct {
-	Provider    string              `json:"provider"`
-	Status      string              `json:"status"`
-	Rank        int                 `json:"rank"`
-	OffPeak     bool                `json:"off_peak"`
-	Eligible    bool                `json:"eligible"`
-	Reason      string              `json:"reason"`
-	Windows     []QuotaWindowReport `json:"windows,omitempty"`
-	NextResetAt *time.Time          `json:"next_reset_at,omitempty"`
+	Provider     string              `json:"provider"`
+	Adapter      string              `json:"adapter,omitempty"`
+	ResetCredits *ResetCreditReport  `json:"reset_credits,omitempty"`
+	Status       string              `json:"status"`
+	Rank         int                 `json:"rank"`
+	OffPeak      bool                `json:"off_peak"`
+	Eligible     bool                `json:"eligible"`
+	Reason       string              `json:"reason"`
+	Windows      []QuotaWindowReport `json:"windows,omitempty"`
+	NextResetAt  *time.Time          `json:"next_reset_at,omitempty"`
 	// Condition names the adapter's sanitized out-of-quota condition behind a
 	// fail-closed snapshot, windowless or not; empty otherwise.
 	Condition string `json:"condition,omitempty"`
@@ -177,6 +179,8 @@ func (s DiagnosticSnapshot) MergedStatusView() MergedStatusReport {
 		}
 		row := MergedStatusProvider{
 			Provider:     provider.MappingID,
+			Adapter:      provider.Adapter,
+			ResetCredits: cloneResetCredits(provider.ResetCredits),
 			Status:       mergedProviderStatus(provider),
 			Rank:         rank.Rank,
 			OffPeak:      rank.OffPeak,
