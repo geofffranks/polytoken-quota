@@ -40,12 +40,8 @@ BUDGET_SECONDS=50       # outer refresh budget; later stages skip when exhausted
 BAR_WIDTH=10            # characters in each quota window bar
 PCT_DIFF_LIMIT=5.0      # percentage points marking reported-vs-derived disagreement
 
-# SwiftBar supplies the current appearance; emit only a fixed, known color.
-case "${OS_APPEARANCE-}" in
-  Dark) TEXT_COLOR=white ;;
-  *) TEXT_COLOR=black ;;
-esac
-LIT="emojize=false symbolize=false color=$TEXT_COLOR"
+# A fixed no-op action keeps informational rows enabled; macOS owns text color.
+LIT="emojize=false symbolize=false bash=/usr/bin/true terminal=false"
 
 # Fallback search dirs (newline-separated) for minimal GUI PATH environments.
 SEARCH_DIRS="/opt/homebrew/bin
@@ -337,7 +333,7 @@ def safe: if . == null then "" else (tostring
   | gsub("^ +| +$"; "")
   | .[0:240]) end;
 def s2: if . == null then "unknown" else safe end;
-def lit: " | emojize=false symbolize=false color='"$TEXT_COLOR"'";
+def lit: " | emojize=false symbolize=false bash=/usr/bin/true terminal=false";
 # Split sanitized essential details into root rows, never tooltip-only text.
 def detail($label; $text):
   ($text|tostring|gsub("[\\x00-\\x1f\\x7f\\x{0085}\\x{2028}\\x{2029}|]"; " ")) as $s
@@ -590,7 +586,7 @@ if [ -n "$CONFIG_ERROR" ]; then
   printf '%s\n' "​ | sfimage=gauge.medium sfcolor=orange dropdown=false"
   printf '%s\n' "---"
   printf '%s | %s\n' "Quota observation: time unknown · Attention needed" "$LIT"
-  printf '%s\n' "Refresh status | refresh=true $LIT"
+  printf '%s\n' "Refresh status | refresh=true emojize=false symbolize=false"
   exit 0
 fi
 
@@ -858,5 +854,5 @@ if [ "$STATUS_PARSED" = 1 ]; then
   done < "$STATUS_BODY"
 fi
 printf '%s\n' "---"
-printf '%s\n' "Refresh status | refresh=true $LIT"
+printf '%s\n' "Refresh status | refresh=true emojize=false symbolize=false"
 exit 0
