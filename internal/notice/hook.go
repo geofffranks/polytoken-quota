@@ -4,10 +4,16 @@ package notice
 // operator-installed hooks.json entries) at session boundaries; it dispatches
 // on POLYTOKEN_HOOK_EVENT:
 //
+//   - session_start: baseline the first valid notice without daemon requests.
+//     pre_user_prompt and post_model_turn can initialize if startup could not.
 //   - post_model_turn (fire-and-forget): when the published notice carries a
-//     revision newer than this session's consumed marker, POST /reload to
-//     this session's own daemon (loopback address and bearer token from the
-//     session's startup.json/credential.json). Only a 200 advances the
+//     revision newer than this session's baseline and consumed marker, check /state for
+//     explicit idle activity, resolving omitted/null legacy activity only with
+//     a matching idle /sync and /sync/summary pair before POST /reload to this
+//     session's own daemon (loopback address and bearer token from
+//     startup.json/credential.json).
+//     Unresolved or active state defers without changing the marker. This check
+//     is not atomic with reload. Only a 200 advances the
 //     marker: 409 (turn in flight), 422, 401, and transport errors leave it
 //     unadvanced so the next event retries naturally. Every failure is a
 //     silent no-op — the hook must never disturb a session.
@@ -28,9 +34,9 @@ import (
 	"time"
 )
 
-// hookEventTurnEnd and hookEventPrompt are the two Polytoken hook events the
-// handler subscribes to (installed by `install-hook`).
+// Hook events subscribed to by install-hook.
 const (
+	hookEventStart   = "session_start"
 	hookEventTurnEnd = "post_model_turn"
 	hookEventPrompt  = "pre_user_prompt"
 )
@@ -43,8 +49,8 @@ type HookDeps struct {
 	// SessionsDir is the daemon sessions root
 	// (~/.local/share/polytoken/sessions by default).
 	SessionsDir string
-	// HTTPClient performs the reload call; nil uses a client with a 5s
-	// timeout.
+	// HTTPClient performs own-session activity and reload calls; nil uses a
+	// client with a 5s timeout per request.
 	HTTPClient *http.Client
 	// Stdout receives the JSON decision object for blocking events.
 	Stdout io.Writer
@@ -53,12 +59,19 @@ type HookDeps struct {
 	Environ func(string) string
 	// Now stamps state transitions; nil uses time.Now.
 	Now func() time.Time
+	// diagnostics is invocation-local; no caller can inject external log text.
+	diagnostics *hookDiagnostics
+	// stateRoot is pinned for the lifetime of the held state lock.
+	stateRoot *os.Root
 }
 
 // hookState is the per-session marker file persisted under
 // <sessions-dir>/<session-id>/polytoken-quota/state.json.
 type hookState struct {
-	ConsumedRevision uint64 `json:"consumed_revision,omitempty"`
+	// Presence, including revision zero, distinguishes an observed baseline
+	// from an uninitialized session. It does not imply a reload was applied.
+	BaselineRevision *uint64 `json:"baseline_revision,omitempty"`
+	ConsumedRevision uint64  `json:"consumed_revision,omitempty"`
 	// LastSeenModel is the active model observed at the previous
 	// pre_user_prompt; empty until the first prompt.
 	LastSeenModel string `json:"last_seen_model,omitempty"`
@@ -77,7 +90,17 @@ type hookState struct {
 // blocking-event errors fail open.
 func RunHook(d HookDeps) int {
 	event := d.env("POLYTOKEN_HOOK_EVENT")
+	d.diagnostics = newHookDiagnostics(d, event)
+	started := time.Now()
+	d.diagnose(diagnosticRecord{Event: "hook_started"})
+	defer func() {
+		d.diagnose(diagnosticRecord{Event: "hook_finished", DurationMS: time.Since(started).Milliseconds()})
+	}()
 	switch event {
+	case hookEventStart:
+		d.initializeSession()
+		fmt.Fprintln(d.out(), `{"outcome":"allow"}`)
+		return 0
 	case hookEventTurnEnd:
 		d.reloadIfStale()
 		return 0
@@ -85,6 +108,7 @@ func RunHook(d HookDeps) int {
 		d.handlePrompt()
 		return 0
 	default:
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "unsupported_event"})
 		return 0
 	}
 }
@@ -116,15 +140,39 @@ type noticeTarget struct {
 func (d HookDeps) handlePrompt() {
 	current := d.env("POLYTOKEN_MODEL_NAME")
 	sessDir, sessionID := d.sessionDir()
-	if current == "" || sessionID == "" {
+	if sessionID == "" {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "missing_prompt_inputs"})
 		d.printAccept()
 		return
 	}
 	statePath := d.statePath(sessDir)
-	state := readHookState(statePath)
+	unlock, ok := d.lockState()
+	if !ok {
+		d.printAccept()
+		return
+	}
+	defer unlock()
+	state, ok := d.readState(statePath)
+	if !ok {
+		d.printAccept()
+		return
+	}
+	doc, validNotice := d.readNotice()
+	if validNotice {
+		if _, ok := d.ensureBaseline(&state, doc.Revision); !ok {
+			d.printAccept()
+			return
+		}
+	}
+	if current == "" {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "missing_prompt_inputs"})
+		d.printAccept()
+		return
+	}
 
 	var lines []string
-	if doc, ok := d.readNotice(); ok && !doc.ProviderOnly {
+	var categories []string
+	if validNotice && !doc.ProviderOnly {
 		chain, head := applicableChain(doc, d.env("POLYTOKEN_FACET_NAME"))
 		inChain := chainContains(chain, current)
 		// Drift warnings fire at most once per published notice revision (the
@@ -133,20 +181,31 @@ func (d HookDeps) handlePrompt() {
 		if !inChain && state.LastWarnedRevision != doc.Revision {
 			if chainContains(doc.DisabledModels, current) {
 				lines = append(lines, actionableWarning(doc.Revision, current, head))
+				categories = append(categories, "disabled_model")
 			} else {
 				lines = append(lines, informationalWarning(doc.Revision, current, head))
+				categories = append(categories, "outside_chain")
 			}
 			state.LastWarnedRevision = doc.Revision
 		}
 		if state.LastSeenModel != "" && current != state.LastSeenModel && state.ConsumedRevision > state.LastPromptConsumed {
 			lines = append(lines, forcedSwitchNote(state.ConsumedRevision, state.LastSeenModel, current))
+			categories = append(categories, "forced_switch")
+		}
+		if len(lines) == 0 {
+			reason := "in_chain"
+			if !inChain {
+				reason = "warning_already_reported"
+			}
+			d.diagnose(diagnosticRecord{Event: "noop", Reason: reason, Revision: doc.Revision, Consumed: state.ConsumedRevision})
 		}
 	}
 
+	d.diagnose(diagnosticRecord{Event: "prompt_warnings", WarningCount: len(categories), WarningCategories: categories})
 	state.LastSeenModel = current
 	state.LastPromptConsumed = state.ConsumedRevision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	_ = writeHookState(statePath, state)
+	d.markerResult(d.writeState(state), state)
 
 	if len(lines) == 0 {
 		d.printAccept()
@@ -171,20 +230,19 @@ func (d HookDeps) printAccept() {
 // readNotice parses the full notice document; missing or corrupt files are
 // "no news" and suppress warnings without failing the prompt.
 func (d HookDeps) readNotice() (noticeDoc, bool) {
-	path := d.NoticePath
-	if path == "" {
-		var err error
-		path, err = ResolvePath("")
-		if err != nil {
-			return noticeDoc{}, false
+	b, reason := d.noticeBytes()
+	var doc noticeDoc
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Schema != SchemaVersion {
+			reason = "unsupported_schema"
+		} else if !validNoticeRevision(b) {
+			reason = "invalid_revision"
 		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return noticeDoc{}, false
-	}
-	var doc noticeDoc
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Schema != SchemaVersion {
+	d.noticeCheck(reason, doc.Revision, doc.ProviderOnly)
+	if reason != "available" {
 		return noticeDoc{}, false
 	}
 	return doc, true
@@ -266,59 +324,107 @@ func (d HookDeps) reloadIfStale() {
 	if sessionID == "" {
 		return
 	}
-	state := readHookState(d.statePath(sessDir))
+	statePath := d.statePath(sessDir)
+	unlock, ok := d.lockState()
+	if !ok {
+		return
+	}
+	defer unlock()
+	state, ok := d.readState(statePath)
+	if !ok {
+		return
+	}
+	initialized, ok := d.ensureBaseline(&state, revision)
+	if !ok || initialized {
+		return
+	}
+	if *state.BaselineRevision >= revision {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "revision_baselined", Revision: revision, Consumed: state.ConsumedRevision})
+		return
+	}
 	if state.ConsumedRevision >= revision {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "revision_consumed", Revision: revision, Consumed: state.ConsumedRevision})
 		return
 	}
 	runtimeDir := filepath.Join(filepath.Dir(d.sessionsRoot()), "sessions-v1", sessionID)
-	port, ok := readPort(runtimeDir)
+	layout := "runtime"
+	port, ok := d.readPort(runtimeDir, layout)
 	if !ok {
-		port, ok = readPort(sessDir) // compatibility with session layouts that keep artifacts together
+		layout = "session"
+		port, ok = d.readPort(sessDir, layout) // compatibility with session layouts that keep artifacts together
 		if !ok {
 			return
 		}
 		runtimeDir = sessDir
 	}
-	token, ok := readToken(runtimeDir)
+	token, ok := d.readToken(runtimeDir, layout)
 	if !ok {
 		return
 	}
-	if !d.postReload(port, token) {
+	if !d.daemonIdle(port, token) || !d.postReload(port, token) {
 		return
 	}
 	state.ConsumedRevision = revision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	_ = writeHookState(d.statePath(sessDir), state)
+	d.markerResult(d.writeState(state), state)
 }
 
 // noticeRevision reads just the revision from the notice document. Missing or
 // corrupt files are "no news".
 func (d HookDeps) noticeRevision() (uint64, bool) {
-	path := d.NoticePath
-	if path == "" {
-		var err error
-		path, err = ResolvePath("")
-		if err != nil {
-			return 0, false
-		}
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
+	b, reason := d.noticeBytes()
 	var doc struct {
 		Schema   int    `json:"schema"`
 		Revision uint64 `json:"revision"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Schema != SchemaVersion {
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Schema != SchemaVersion {
+			reason = "unsupported_schema"
+		} else if !validNoticeRevision(b) {
+			reason = "invalid_revision"
+		}
+	}
+	d.noticeCheck(reason, doc.Revision, false)
+	if reason != "available" {
 		return 0, false
 	}
 	return doc.Revision, true
 }
 
+func validNoticeRevision(b []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(b, &fields) != nil {
+		return false
+	}
+	raw, exists := fields["revision"]
+	var revision uint64
+	return exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && json.Unmarshal(raw, &revision) == nil
+}
+
+func (d HookDeps) noticeBytes() ([]byte, string) {
+	path := d.NoticePath
+	if path == "" {
+		var err error
+		path, err = ResolvePath("")
+		if err != nil {
+			return nil, "path_unavailable"
+		}
+	}
+	return artifactBytes(path)
+}
+
+func (d HookDeps) noticeCheck(reason string, revision uint64, providerOnly bool) {
+	if reason == "available" && providerOnly {
+		reason = "provider_only"
+	}
+	d.diagnose(diagnosticRecord{Event: "notice_check", Reason: reason, Revision: revision})
+}
+
 func (d HookDeps) sessionDir() (dir, sessionID string) {
 	sessionID = d.env("POLYTOKEN_SESSION_ID")
-	if sessionID == "" {
+	if !safeSessionID(sessionID) || !filepath.IsAbs(d.sessionsRoot()) {
 		return "", ""
 	}
 	return filepath.Join(d.sessionsRoot(), sessionID), sessionID
@@ -341,6 +447,13 @@ func (d HookDeps) statePath(sessDir string) string {
 
 // postReload issues the authenticated reload call. True only on HTTP 200.
 func (d HookDeps) postReload(port int, token string) bool {
+	started := time.Now()
+	result := diagnosticRecord{Event: "reload_result", Reason: "transport_failed"}
+	d.diagnose(diagnosticRecord{Event: "reload_request"})
+	defer func() {
+		result.DurationMS = time.Since(started).Milliseconds()
+		d.diagnose(result)
+	}()
 	client := d.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
@@ -356,36 +469,50 @@ func (d HookDeps) postReload(port int, token string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	var body boundedReloadBody
+	_, readErr := io.Copy(&body, resp.Body)
+	result.HTTPStatus = resp.StatusCode
+	result.Reason = "http_non_200"
+	if resp.StatusCode == http.StatusOK {
+		result.Reason = "http_200"
+	}
+	result.Response = parseReloadDiagnostic(body, readErr)
+	if resp.StatusCode == http.StatusOK && result.Response.Queued != nil && *result.Response.Queued {
+		result.Reason = "http_200_queued_unexpected"
+	}
 	return resp.StatusCode == http.StatusOK
 }
 
-func readPort(sessDir string) (int, bool) {
-	b, err := os.ReadFile(filepath.Join(sessDir, "startup.json"))
-	if err != nil {
-		return 0, false
-	}
+func (d HookDeps) readPort(sessDir, layout string) (int, bool) {
+	b, reason := artifactBytes(filepath.Join(sessDir, "startup.json"))
 	var doc struct {
 		Port int `json:"port"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Port <= 0 {
-		return 0, false
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Port <= 0 {
+			reason = "invalid_port"
+		}
 	}
-	return doc.Port, true
+	d.diagnose(diagnosticRecord{Event: "artifact_check", Artifact: "startup", Layout: layout, Reason: reason})
+	return doc.Port, reason == "available"
 }
 
-func readToken(sessDir string) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(sessDir, "credential.json"))
-	if err != nil {
-		return "", false
-	}
+func (d HookDeps) readToken(sessDir, layout string) (string, bool) {
+	b, reason := artifactBytes(filepath.Join(sessDir, "credential.json"))
 	var doc struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Token == "" {
-		return "", false
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Token == "" {
+			reason = "empty_token"
+		}
 	}
-	return doc.Token, true
+	d.diagnose(diagnosticRecord{Event: "artifact_check", Artifact: "credential", Layout: layout, Reason: reason})
+	return doc.Token, reason == "available"
 }
 
 func readHookState(path string) hookState {

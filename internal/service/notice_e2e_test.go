@@ -107,6 +107,10 @@ func TestPublishedNoticeDrivesHandlerEndToEnd(t *testing.T) {
 
 	var reloads int
 	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/state" && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"turn_in_flight":false,"main_provider_wait":null}`))
+			return
+		}
 		if r.URL.Path != "/reload" || r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -132,6 +136,8 @@ func TestPublishedNoticeDrivesHandlerEndToEnd(t *testing.T) {
 	}
 	writeE2EJSON(t, filepath.Join(sessDir, "startup.json"), map[string]any{"state": "ready", "pid": 424242, "port": port})
 	writeE2EJSON(t, filepath.Join(sessDir, "credential.json"), map[string]any{"token": "tok-e2e"})
+	// The session observed an earlier notice before the published change.
+	writeE2EJSON(t, filepath.Join(sessDir, "polytoken-quota", "state.json"), map[string]any{"baseline_revision": 5})
 
 	env := map[string]string{
 		"POLYTOKEN_HOOK_EVENT": "post_model_turn",

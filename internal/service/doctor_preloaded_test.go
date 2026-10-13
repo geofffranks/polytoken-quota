@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -49,6 +50,71 @@ func TestDoctorPolicyLoadFailureDoesNotReportObservedProvidersAsOrphaned(t *test
 		if finding.Code == "orphaned-provider-state" {
 			t.Fatalf("policy-load failure produced orphan finding: %+v", finding)
 		}
+	}
+}
+
+func TestCoordinatorDoctorQuotaHooksFindings(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		hooks         string
+		directoryFile bool
+		wantCode      string
+		forbid        string
+	}{
+		{name: "missing file is opted out"},
+		{name: "unrelated only is opted out", hooks: `[{"name":"other","event":"session_start","handler":{"bash":"exec '/other'"}}]`},
+		{name: "partial managed set is outdated", hooks: `[{"name":"polytoken-quota-reload","event":"post_model_turn","handler":{"bash":"exec '/custom/bin' notice-hook --notice '/tmp/notice.json'"}}]`, wantCode: "quota-hooks-outdated"},
+		{name: "malformed config is distinct and sanitized", hooks: `[{"name":"other","token":"Bearer CANARY-HOOK-SECRET"}`, wantCode: "quota-hooks-config-unreadable", forbid: "CANARY-HOOK-SECRET"},
+		{name: "read error is distinct", directoryFile: true, wantCode: "quota-hooks-config-unreadable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := filepath.Join(home, ".config", "polytoken")
+			if tc.directoryFile {
+				if err := os.MkdirAll(filepath.Join(configDir, "hooks.json"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.hooks != "" {
+				if err := os.MkdirAll(configDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(configDir, "hooks.json"), []byte(tc.hooks), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, c := doctorSnapshotFixture(t)
+			report := c.Doctor(context.Background(), false)
+			found := false
+			for _, finding := range report.Findings {
+				if finding.Code == "quota-hooks-outdated" || finding.Code == "quota-hooks-config-unreadable" {
+					if tc.wantCode == "" || finding.Code != tc.wantCode {
+						t.Errorf("unexpected hook finding: %+v", finding)
+					}
+					if finding.Severity != doctor.Warning {
+						t.Errorf("severity=%q, want warning", finding.Severity)
+					}
+					if finding.Code == "quota-hooks-config-unreadable" && finding.Remediation != "inspect and repair hooks.json, then run polytoken-quota install-hook" {
+						t.Errorf("config remediation=%q", finding.Remediation)
+					}
+					if finding.Code == "quota-hooks-outdated" && finding.Remediation != "run polytoken-quota install-hook to update the managed registrations" {
+						t.Errorf("outdated remediation=%q", finding.Remediation)
+					}
+					found = true
+				}
+			}
+			if (tc.wantCode != "") != found {
+				t.Fatalf("hook finding present=%v, want code %q; findings=%+v", found, tc.wantCode, report.Findings)
+			}
+			encoded, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.forbid != "" && strings.Contains(string(encoded), tc.forbid) {
+				t.Fatalf("serialized doctor report leaks config value: %s", encoded)
+			}
+		})
 	}
 }
 

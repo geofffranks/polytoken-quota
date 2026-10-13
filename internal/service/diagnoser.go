@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geofffranks/polytoken-quota/internal/doctor"
+	"github.com/geofffranks/polytoken-quota/internal/notice"
 	"github.com/geofffranks/polytoken-quota/internal/quota"
 	"github.com/geofffranks/polytoken-quota/internal/state"
 	"github.com/geofffranks/polytoken-quota/internal/target"
@@ -114,6 +115,28 @@ func (c *Coordinator) Doctor(ctx context.Context, _ bool) doctor.Report {
 
 	report := doctor.Run(ctx, deps)
 	report.AsOf = asOf
+
+	noticePath := ""
+	if snapshot.PolicyError() == nil {
+		noticePath = snapshot.DesiredPolicy().Operational.NoticePath
+	}
+	managedHooks, currentHooks, hooksErr := notice.HookRegistrationFinding("", noticePath)
+	switch {
+	case hooksErr != nil:
+		report.Findings = append(report.Findings, doctor.Finding{
+			Code:        "quota-hooks-config-unreadable",
+			Message:     "could not read or validate Polytoken hooks.json",
+			Remediation: "inspect and repair hooks.json, then run polytoken-quota install-hook",
+			Severity:    doctor.Warning,
+		})
+	case managedHooks && !currentHooks:
+		report.Findings = append(report.Findings, doctor.Finding{
+			Code:        "quota-hooks-outdated",
+			Message:     "installed Polytoken quota hook registrations do not match this binary",
+			Remediation: "run polytoken-quota install-hook to update the managed registrations",
+			Severity:    doctor.Warning,
+		})
+	}
 
 	// Surface a state-unreadable finding from the snapshot's captured state load
 	// error — doctor must report this even though the preloaded observed state is

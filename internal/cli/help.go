@@ -133,7 +133,7 @@ var helpDocs = map[string]helpDoc{
 	},
 	"notice-hook": {
 		short: "Run one in-session hook event (installed by install-hook)",
-		long:  "Handle one Polytoken hook event: converge this session's daemon to a newly published reconciliation notice and surface model-drift information. Invoked by the hooks installed with install-hook; not for direct use.",
+		long:  "Handle one Polytoken hook event: record the first valid notice as a baseline, converge newer notices only at idle post-turn boundaries, and surface model-drift information. Invoked by the hooks installed with install-hook; not for direct use.",
 		usage: []string{"polytoken-quota notice-hook [--notice PATH]"},
 		flags: []flagDoc{
 			{"--notice PATH", "Notice file to consume (defaults to the published path)"},
@@ -166,7 +166,7 @@ var helpDocs = map[string]helpDoc{
 	},
 	"install-hook": {
 		short: "Install or remove the in-session Polytoken hook entries",
-		long:  "Idempotently add (or remove with --remove) the two hooks.json entries that route session events to notice-hook. Backs up hooks.json before writing and never touches unrelated entries.",
+		long:  "Idempotently add (or remove with --remove) the three hooks.json entries that route startup, prompt and post-turn events to notice-hook. Backs up hooks.json before writing and never touches unrelated entries.",
 		usage: []string{"polytoken-quota install-hook [--config-dir DIR] [--handler-path PATH] [--notice PATH] [--dry-run] [--remove]"},
 		flags: []flagDoc{
 			{"--config-dir DIR", "Polytoken config dir (default ~/.config/polytoken)"},
