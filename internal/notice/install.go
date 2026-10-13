@@ -42,14 +42,10 @@ type InstallOptions struct {
 // process exit code: 0 on success, 1 on refusal (malformed hooks.json,
 // unresolvable defaults). Dry runs and no-ops never write.
 func Install(opts InstallOptions, stdout, stderr io.Writer) int {
-	configDir := opts.ConfigDir
-	if configDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			fmt.Fprintln(stderr, "install-hook: resolve home:", err)
-			return 1
-		}
-		configDir = filepath.Join(home, ".config", "polytoken")
+	configDir, err := resolveConfigDir(opts.ConfigDir)
+	if err != nil {
+		fmt.Fprintln(stderr, "install-hook: resolve home:", err)
+		return 1
 	}
 	handler := opts.HandlerPath
 	if handler == "" {
@@ -118,6 +114,17 @@ func Install(opts InstallOptions, stdout, stderr io.Writer) int {
 	}
 	printInstallSummary(stdout, opts, noticePath, false)
 	return 0
+}
+
+func resolveConfigDir(configDir string) (string, error) {
+	if configDir != "" {
+		return configDir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "polytoken"), nil
 }
 
 // readHooksDoc loads and validates the existing hooks.json. A missing file is
@@ -190,16 +197,11 @@ func mergeHookEntries(existing []json.RawMessage, handlerPath, noticePath string
 	if remove {
 		return out, foundOurs, nil
 	}
-	bash := fmt.Sprintf("exec %s notice-hook --notice %s", shellQuote(handlerPath), shellQuote(noticePath))
-	for _, entry := range []struct{ name, event string }{
-		{reloadHookName, "post_model_turn"},
-		{driftHookName, "pre_user_prompt"},
-		{baselineHookName, "session_start"},
-	} {
+	for _, entry := range managedHookRegistrations(handlerPath, noticePath) {
 		raw, err := json.Marshal(map[string]any{
-			"name":    entry.name,
-			"event":   entry.event,
-			"handler": map[string]string{"bash": bash},
+			"name":    entry.Name,
+			"event":   entry.Event,
+			"handler": entry.Handler,
 		})
 		if err != nil {
 			return nil, false, err

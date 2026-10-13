@@ -560,7 +560,18 @@ consume the notice:
 
 **In-session convergence (opt-in).** `polytoken-quota install-hook` installs
 three entries into Polytoken's `hooks.json` (backup kept, unrelated entries
-untouched, `--remove` to uninstall, `--dry-run` to preview). The handler is
+untouched, `--remove` to uninstall, `--dry-run` to preview). This feature is
+opt-in: if `hooks.json` is absent or contains no managed quota hook registrations,
+`doctor` reports no hook warning. If at least one managed registration remains
+but the full set is missing entries or has outdated events/handler commands,
+`doctor` warns and suggests `polytoken-quota install-hook` to update it. If
+`hooks.json` cannot be read or validated, `doctor` emits a separate sanitized
+warning to inspect and repair that file before running `install-hook` (which
+refuses malformed configuration). It accepts a custom handler executable path
+when the managed invocation arguments match. The expected notice path comes from
+`operational.notice_path` (or its default); if `--notice` was used only for
+installation and is not reflected in policy, doctor cannot infer that override
+and may warn until the path is made persistent. The handler is
 the `notice-hook` subcommand, which acts only on its **own** session's daemon
 via the documented loopback API with that session's own credential:
 
