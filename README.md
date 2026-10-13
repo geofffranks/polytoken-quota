@@ -565,12 +565,19 @@ the `notice-hook` subcommand, which acts only on its **own** session's daemon
 via the documented loopback API with that session's own credential:
 
 - After a model turn, a session with a newer shared notice first checks its own
-  daemon's activity. Reload requires an explicit idle signal (`turn_in_flight:
-  false`) with no provider wait. Active, unknown (including missing or null activity),
-  malformed, oversized or unavailable state defers reload without changing the
-  consumed marker; a later hook event can retry. Only the activity fields are
-  decoded from a snapshot bounded to 32 KiB; raw state, including environment, is
-  never logged or persisted.
+  daemon's activity. An explicit idle signal (`turn_in_flight: false`) with no
+  provider wait permits reload. Missing or null legacy activity is not idle:
+  when there is no provider wait, the hook makes one `/sync` and `/sync/summary`
+  observation of the same daemon. Both must use version 1 and match on epoch and
+  cursor; the summary must explicitly report no busy turn or attention, and the
+  snapshot must contain a null turn, an empty input queue and no pending questions.
+  Required idle fields must be present and correctly typed. Active, unresolved,
+  malformed, oversized, unavailable or mismatched state defers reload without
+  changing the consumed marker. A later post-model-turn event can retry; there is
+  no polling worker or guarantee that such an event will observe idle.
+  The activity check has a five-second total deadline and at most three GETs.
+  `/state` is bounded to 32 KiB and each authority response to 256 KiB. Raw state,
+  including environment, is never logged or persisted.
   The idle check and reload are separate requests, not an atomic guarantee. The
   installed API documents no no-queue request flag, so a turn starting between them
   can still cause queue acceptance. A busy-turn `409` leaves the marker unchanged;
@@ -590,9 +597,12 @@ via the documented loopback API with that session's own credential:
 location is `~/.local/share/polytoken/sessions/<session-id>/polytoken-quota/diagnostics.jsonl`,
 beside `state.json` (not in the `sessions-v1` runtime-artifact directory). Diagnostics
 never go to stdout or stderr; prompt JSON and silent fail-open behavior are unchanged.
-A stale post-turn notice adds one own-session activity request before reload;
-prompt hooks and already-consumed revisions make no activity request. No lifecycle
-hooks are added.
+A stale post-turn notice adds one own-session activity request before reload,
+plus at most two authority requests for inconclusive legacy activity. The fixed
+reason `idle` identifies explicit legacy idle; `idle_authority` identifies an idle
+paired authority observation. Authority deferrals use `authority_` reason codes;
+no epoch, cursor, queue content or question content enters diagnostics. Prompt hooks
+and already-consumed revisions make no activity request. No lifecycle hooks are added.
 
 Records include an invocation ID, UTC timestamps, Go build version and available VCS
 revision/modified status, hook start/finish, notice and state revisions/check reasons,

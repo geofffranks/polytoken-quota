@@ -46,6 +46,10 @@ func TestHookActivityAdmission(t *testing.T) {
 					stateCalls++
 					w.WriteHeader(tc.status)
 					_, _ = io.WriteString(w, tc.body)
+				case r.Method == http.MethodGet && r.URL.Path == "/sync":
+					// Unknown legacy activity attempts authority once; unavailable
+					// authority must still leave the marker unchanged.
+					w.WriteHeader(http.StatusServiceUnavailable)
 				case r.Method == http.MethodPost && r.URL.Path == "/reload":
 					h.reloadCalls++
 					if stateCalls != 1 {
@@ -79,9 +83,13 @@ func TestHookActivityAdmission(t *testing.T) {
 			}
 			records, raw := diagnosticRecords(t, filepath.Join(filepath.Dir(h.statePath()), diagnosticFile))
 			foundCheck, foundDeferred := false, false
+			deferReason := tc.reason
+			if tc.reason == "activity_unknown" && authorityFallbackAllowed([]byte(tc.body)) {
+				deferReason = "authority_http_non_200"
+			}
 			for _, r := range records {
 				foundCheck = foundCheck || r.Event == "activity_check" && r.Reason == tc.reason
-				foundDeferred = foundDeferred || r.Event == "reload_deferred" && r.Reason == tc.reason
+				foundDeferred = foundDeferred || r.Event == "reload_deferred" && r.Reason == deferReason
 			}
 			if !foundCheck || foundDeferred == tc.admit {
 				t.Fatal("missing activity/deferral reason")

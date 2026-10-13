@@ -6,9 +6,11 @@ package notice
 //
 //   - post_model_turn (fire-and-forget): when the published notice carries a
 //     revision newer than this session's consumed marker, check /state for
-//     explicit idle activity before POST /reload to this session's own daemon
-//     (loopback address and bearer token from startup.json/credential.json).
-//     Unknown or active state defers without changing the marker. This check
+//     explicit idle activity, resolving omitted/null legacy activity only with
+//     a matching idle /sync and /sync/summary pair before POST /reload to this
+//     session's own daemon (loopback address and bearer token from
+//     startup.json/credential.json).
+//     Unresolved or active state defers without changing the marker. This check
 //     is not atomic with reload. Only a 200 advances the
 //     marker: 409 (turn in flight), 422, 401, and transport errors leave it
 //     unadvanced so the next event retries naturally. Every failure is a

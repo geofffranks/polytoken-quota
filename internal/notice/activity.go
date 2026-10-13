@@ -2,6 +2,7 @@ package notice
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +23,7 @@ func (d HookDeps) daemonIdle(port int, token string) bool {
 	defer func() {
 		result.DurationMS = time.Since(started).Milliseconds()
 		d.diagnose(result)
-		if result.Reason != "idle" {
+		if result.Reason != "idle" && result.Reason != "idle_authority" {
 			d.diagnose(diagnosticRecord{Event: "reload_deferred", Reason: result.Reason})
 		}
 	}()
@@ -34,7 +35,11 @@ func (d HookDeps) daemonIdle(port int, token string) bool {
 	// client so its policy remains unchanged for callers and reload requests.
 	activityClient := *client
 	activityClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/state", port), nil)
+	// One deadline covers /state and the optional pair, even with an injected
+	// client that has no timeout. There is no retry or polling in this check.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://127.0.0.1:%d/state", port), nil)
 	if err != nil {
 		return false
 	}
@@ -59,7 +64,30 @@ func (d HookDeps) daemonIdle(port int, token string) bool {
 		return false
 	}
 	result.Reason = activityReason(body)
-	return result.Reason == "idle"
+	if result.Reason == "activity_unknown" && authorityFallbackAllowed(body) {
+		// A valid but inconclusive legacy snapshot is not idle evidence. Only
+		// the complete paired authority projection can resolve it.
+		d.diagnose(diagnosticRecord{Event: "activity_check", Reason: result.Reason, HTTPStatus: result.HTTPStatus})
+		result.Reason, result.HTTPStatus = authorityIdle(ctx, &activityClient, port, token)
+	}
+	return result.Reason == "idle" || result.Reason == "idle_authority"
+}
+
+// Only an object with omitted/null legacy activity and no provider wait can
+// use the compatibility fallback. Malformed or contradictory legacy values
+// remain unknown rather than being overridden by another observation.
+func authorityFallbackAllowed(body []byte) bool {
+	var snapshot struct {
+		Turn json.RawMessage `json:"turn_in_flight"`
+		Wait json.RawMessage `json:"main_provider_wait"`
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(body, &snapshot) != nil {
+		return false
+	}
+	turn, wait := bytes.TrimSpace(snapshot.Turn), bytes.TrimSpace(snapshot.Wait)
+	return (len(turn) == 0 || bytes.Equal(turn, []byte("null"))) &&
+		(len(wait) == 0 || bytes.Equal(wait, []byte("null")))
 }
 
 func activityReason(body []byte) string {
@@ -82,8 +110,8 @@ func activityReason(body []byte) string {
 		}
 		return "idle"
 	default:
-		// The installed schema specifies boolean, not null. Unknown activity
-		// never authorizes reload, even if another version uses null for idle.
+		// Missing, null or unexpected activity values do not authorize reload.
+		// daemonIdle may resolve them with a separate authority-owned pair.
 		return "activity_unknown"
 	}
 }
