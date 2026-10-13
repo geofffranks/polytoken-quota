@@ -564,11 +564,18 @@ untouched, `--remove` to uninstall, `--dry-run` to preview). The handler is
 the `notice-hook` subcommand, which acts only on its **own** session's daemon
 via the documented loopback API with that session's own credential:
 
-- After a model turn, a session with a newer shared notice reloads only its
-  own daemon. A busy-turn `409` leaves the consumed marker unchanged, so a later
-  hook event can retry; the marker advances on HTTP `200`, even when the response
-  reports a queued reload or partial subsystem failure. HTTP acceptance is not
-  proof that a queued reload has been applied.
+- After a model turn, a session with a newer shared notice first checks its own
+  daemon's activity. Reload requires an explicit idle signal (`turn_in_flight:
+  false`) with no provider wait. Active, unknown (including missing or null activity),
+  malformed, oversized or unavailable state defers reload without changing the
+  consumed marker; a later hook event can retry. Only the activity fields are
+  decoded from a snapshot bounded to 32 KiB; raw state, including environment, is
+  never logged or persisted.
+  The idle check and reload are separate requests, not an atomic guarantee. The
+  installed API documents no no-queue request flag, so a turn starting between them
+  can still cause queue acceptance. A busy-turn `409` leaves the marker unchanged;
+  HTTP `200` still advances it, even for an unexpectedly queued reload or partial
+  subsystem failure. HTTP acceptance is not proof of eventual application.
   Reloading does not restart or compact the session. Prompt hooks accept without
   blocking and provider-only notices do not claim a particular model change or
   fallback.
@@ -583,12 +590,16 @@ via the documented loopback API with that session's own credential:
 location is `~/.local/share/polytoken/sessions/<session-id>/polytoken-quota/diagnostics.jsonl`,
 beside `state.json` (not in the `sessions-v1` runtime-artifact directory). Diagnostics
 never go to stdout or stderr; prompt JSON and silent fail-open behavior are unchanged.
-No additional daemon requests or lifecycle hooks are added.
+A stale post-turn notice adds one own-session activity request before reload;
+prompt hooks and already-consumed revisions make no activity request. No lifecycle
+hooks are added.
 
 Records include an invocation ID, UTC timestamps, Go build version and available VCS
 revision/modified status, hook start/finish, notice and state revisions/check reasons,
-startup/credential availability reasons, reload request/result duration and HTTP
-status, marker write result, and prompt warning categories/counts. Reload summaries
+startup/credential availability reasons, activity-check duration/status and fixed
+deferral reasons, reload request/result duration and HTTP status, marker write
+result, and prompt warning categories/counts. A queued HTTP `200` after the idle
+check has the distinct reason `http_200_queued_unexpected`. Reload summaries
 retain only `queued`, failed-subsystem counts and allowlisted subsystem names/boolean
 change flags. Unknown failed names are counted, not retained. At most 32 KiB of a
 response is captured for parsing; empty, invalid, oversized and unreadable bodies

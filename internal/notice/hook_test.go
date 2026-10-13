@@ -39,6 +39,14 @@ func newHookHarness(t *testing.T) *hookHarness {
 		t.Fatalf("mkdir: %v", err)
 	}
 	h.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/state" && r.Method == http.MethodGet {
+			if r.Header.Get("Authorization") != "Bearer tok-1" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"turn_in_flight":false,"main_provider_wait":null}`))
+			return
+		}
 		if r.URL.Path != "/reload" || r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
 			return

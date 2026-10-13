@@ -82,6 +82,9 @@ func TestHookDiagnosticReloadPolicyAndPrivacy(t *testing.T) {
 			writeJSON(t, filepath.Join(session, "startup.json"), map[string]any{"port": 5})
 			writeJSON(t, filepath.Join(session, "credential.json"), map[string]any{"token": "secret-token"})
 			d.HTTPClient = &http.Client{Transport: diagnosticTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && r.URL.Path == "/state" && r.Header.Get("Authorization") == "Bearer secret-token" {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"turn_in_flight":false,"env":{"TOKEN":"secret-env"}}`)), Header: make(http.Header)}, nil
+				}
 				if r.Method != "POST" || r.URL.Path != "/reload" || r.Header.Get("Authorization") != "Bearer secret-token" {
 					t.Fatal("request changed")
 				}
@@ -97,7 +100,7 @@ func TestHookDiagnosticReloadPolicyAndPrivacy(t *testing.T) {
 				t.Fatalf("consumed %d", got)
 			}
 			records, raw := diagnosticRecords(t, diagnosticPath(d))
-			for _, secret := range []string{"secret-token", "secret-model", "secret-body", "secret-error", d.NoticePath, d.SessionsDir} {
+			for _, secret := range []string{"secret-token", "secret-model", "secret-body", "secret-error", "secret-env", d.NoticePath, d.SessionsDir} {
 				if strings.Contains(raw, secret) {
 					t.Fatalf("leaked %q", secret)
 				}
@@ -118,7 +121,7 @@ func TestHookDiagnosticReloadPolicyAndPrivacy(t *testing.T) {
 			if result == nil || result.HTTPStatus != tc.status || result.Response.Parse != tc.parse {
 				t.Fatal("missing response summary")
 			}
-			if tc.name == "queued" && (result.Response.Queued == nil || !*result.Response.Queued) {
+			if tc.name == "queued" && (result.Response.Queued == nil || !*result.Response.Queued || result.Reason != "http_200_queued_unexpected") {
 				t.Fatal("queued not recorded")
 			}
 			if tc.name == "partial" && (result.Response.FailedCount != 3 || result.Response.UnknownFailedCount != 1 || len(result.Response.Failed) != 1) {

@@ -5,9 +5,11 @@ package notice
 // on POLYTOKEN_HOOK_EVENT:
 //
 //   - post_model_turn (fire-and-forget): when the published notice carries a
-//     revision newer than this session's consumed marker, POST /reload to
-//     this session's own daemon (loopback address and bearer token from the
-//     session's startup.json/credential.json). Only a 200 advances the
+//     revision newer than this session's consumed marker, check /state for
+//     explicit idle activity before POST /reload to this session's own daemon
+//     (loopback address and bearer token from startup.json/credential.json).
+//     Unknown or active state defers without changing the marker. This check
+//     is not atomic with reload. Only a 200 advances the
 //     marker: 409 (turn in flight), 422, 401, and transport errors leave it
 //     unadvanced so the next event retries naturally. Every failure is a
 //     silent no-op — the hook must never disturb a session.
@@ -43,8 +45,8 @@ type HookDeps struct {
 	// SessionsDir is the daemon sessions root
 	// (~/.local/share/polytoken/sessions by default).
 	SessionsDir string
-	// HTTPClient performs the reload call; nil uses a client with a 5s
-	// timeout.
+	// HTTPClient performs own-session activity and reload calls; nil uses a
+	// client with a 5s timeout per request.
 	HTTPClient *http.Client
 	// Stdout receives the JSON decision object for blocking events.
 	Stdout io.Writer
@@ -305,7 +307,7 @@ func (d HookDeps) reloadIfStale() {
 	if !ok {
 		return
 	}
-	if !d.postReload(port, token) {
+	if !d.daemonIdle(port, token) || !d.postReload(port, token) {
 		return
 	}
 	state.ConsumedRevision = revision
@@ -409,6 +411,9 @@ func (d HookDeps) postReload(port int, token string) bool {
 		result.Reason = "http_200"
 	}
 	result.Response = parseReloadDiagnostic(body, readErr)
+	if resp.StatusCode == http.StatusOK && result.Response.Queued != nil && *result.Response.Queued {
+		result.Reason = "http_200_queued_unexpected"
+	}
 	return resp.StatusCode == http.StatusOK
 }
 
