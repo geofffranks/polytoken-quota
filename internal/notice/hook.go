@@ -53,6 +53,8 @@ type HookDeps struct {
 	Environ func(string) string
 	// Now stamps state transitions; nil uses time.Now.
 	Now func() time.Time
+	// diagnostics is invocation-local; no caller can inject external log text.
+	diagnostics *hookDiagnostics
 }
 
 // hookState is the per-session marker file persisted under
@@ -77,6 +79,12 @@ type hookState struct {
 // blocking-event errors fail open.
 func RunHook(d HookDeps) int {
 	event := d.env("POLYTOKEN_HOOK_EVENT")
+	d.diagnostics = newHookDiagnostics(d, event)
+	started := time.Now()
+	d.diagnose(diagnosticRecord{Event: "hook_started"})
+	defer func() {
+		d.diagnose(diagnosticRecord{Event: "hook_finished", DurationMS: time.Since(started).Milliseconds()})
+	}()
 	switch event {
 	case hookEventTurnEnd:
 		d.reloadIfStale()
@@ -85,6 +93,7 @@ func RunHook(d HookDeps) int {
 		d.handlePrompt()
 		return 0
 	default:
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "unsupported_event"})
 		return 0
 	}
 }
@@ -117,13 +126,15 @@ func (d HookDeps) handlePrompt() {
 	current := d.env("POLYTOKEN_MODEL_NAME")
 	sessDir, sessionID := d.sessionDir()
 	if current == "" || sessionID == "" {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "missing_prompt_inputs"})
 		d.printAccept()
 		return
 	}
 	statePath := d.statePath(sessDir)
-	state := readHookState(statePath)
+	state := d.readState(statePath)
 
 	var lines []string
+	var categories []string
 	if doc, ok := d.readNotice(); ok && !doc.ProviderOnly {
 		chain, head := applicableChain(doc, d.env("POLYTOKEN_FACET_NAME"))
 		inChain := chainContains(chain, current)
@@ -133,20 +144,31 @@ func (d HookDeps) handlePrompt() {
 		if !inChain && state.LastWarnedRevision != doc.Revision {
 			if chainContains(doc.DisabledModels, current) {
 				lines = append(lines, actionableWarning(doc.Revision, current, head))
+				categories = append(categories, "disabled_model")
 			} else {
 				lines = append(lines, informationalWarning(doc.Revision, current, head))
+				categories = append(categories, "outside_chain")
 			}
 			state.LastWarnedRevision = doc.Revision
 		}
 		if state.LastSeenModel != "" && current != state.LastSeenModel && state.ConsumedRevision > state.LastPromptConsumed {
 			lines = append(lines, forcedSwitchNote(state.ConsumedRevision, state.LastSeenModel, current))
+			categories = append(categories, "forced_switch")
+		}
+		if len(lines) == 0 {
+			reason := "in_chain"
+			if !inChain {
+				reason = "warning_already_reported"
+			}
+			d.diagnose(diagnosticRecord{Event: "noop", Reason: reason, Revision: doc.Revision, Consumed: state.ConsumedRevision})
 		}
 	}
 
+	d.diagnose(diagnosticRecord{Event: "prompt_warnings", WarningCount: len(categories), WarningCategories: categories})
 	state.LastSeenModel = current
 	state.LastPromptConsumed = state.ConsumedRevision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	_ = writeHookState(statePath, state)
+	d.markerResult(writeHookState(statePath, state), state)
 
 	if len(lines) == 0 {
 		d.printAccept()
@@ -171,20 +193,17 @@ func (d HookDeps) printAccept() {
 // readNotice parses the full notice document; missing or corrupt files are
 // "no news" and suppress warnings without failing the prompt.
 func (d HookDeps) readNotice() (noticeDoc, bool) {
-	path := d.NoticePath
-	if path == "" {
-		var err error
-		path, err = ResolvePath("")
-		if err != nil {
-			return noticeDoc{}, false
+	b, reason := d.noticeBytes()
+	var doc noticeDoc
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Schema != SchemaVersion {
+			reason = "unsupported_schema"
 		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return noticeDoc{}, false
-	}
-	var doc noticeDoc
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Schema != SchemaVersion {
+	d.noticeCheck(reason, doc.Revision, doc.ProviderOnly)
+	if reason != "available" {
 		return noticeDoc{}, false
 	}
 	return doc, true
@@ -266,20 +285,23 @@ func (d HookDeps) reloadIfStale() {
 	if sessionID == "" {
 		return
 	}
-	state := readHookState(d.statePath(sessDir))
+	state := d.readState(d.statePath(sessDir))
 	if state.ConsumedRevision >= revision {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "revision_consumed", Revision: revision, Consumed: state.ConsumedRevision})
 		return
 	}
 	runtimeDir := filepath.Join(filepath.Dir(d.sessionsRoot()), "sessions-v1", sessionID)
-	port, ok := readPort(runtimeDir)
+	layout := "runtime"
+	port, ok := d.readPort(runtimeDir, layout)
 	if !ok {
-		port, ok = readPort(sessDir) // compatibility with session layouts that keep artifacts together
+		layout = "session"
+		port, ok = d.readPort(sessDir, layout) // compatibility with session layouts that keep artifacts together
 		if !ok {
 			return
 		}
 		runtimeDir = sessDir
 	}
-	token, ok := readToken(runtimeDir)
+	token, ok := d.readToken(runtimeDir, layout)
 	if !ok {
 		return
 	}
@@ -288,32 +310,48 @@ func (d HookDeps) reloadIfStale() {
 	}
 	state.ConsumedRevision = revision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	_ = writeHookState(d.statePath(sessDir), state)
+	d.markerResult(writeHookState(d.statePath(sessDir), state), state)
 }
 
 // noticeRevision reads just the revision from the notice document. Missing or
 // corrupt files are "no news".
 func (d HookDeps) noticeRevision() (uint64, bool) {
+	b, reason := d.noticeBytes()
+	var doc struct {
+		Schema   int    `json:"schema"`
+		Revision uint64 `json:"revision"`
+	}
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Schema != SchemaVersion {
+			reason = "unsupported_schema"
+		}
+	}
+	d.noticeCheck(reason, doc.Revision, false)
+	if reason != "available" {
+		return 0, false
+	}
+	return doc.Revision, true
+}
+
+func (d HookDeps) noticeBytes() ([]byte, string) {
 	path := d.NoticePath
 	if path == "" {
 		var err error
 		path, err = ResolvePath("")
 		if err != nil {
-			return 0, false
+			return nil, "path_unavailable"
 		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
+	return artifactBytes(path)
+}
+
+func (d HookDeps) noticeCheck(reason string, revision uint64, providerOnly bool) {
+	if reason == "available" && providerOnly {
+		reason = "provider_only"
 	}
-	var doc struct {
-		Schema   int    `json:"schema"`
-		Revision uint64 `json:"revision"`
-	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Schema != SchemaVersion {
-		return 0, false
-	}
-	return doc.Revision, true
+	d.diagnose(diagnosticRecord{Event: "notice_check", Reason: reason, Revision: revision})
 }
 
 func (d HookDeps) sessionDir() (dir, sessionID string) {
@@ -341,6 +379,13 @@ func (d HookDeps) statePath(sessDir string) string {
 
 // postReload issues the authenticated reload call. True only on HTTP 200.
 func (d HookDeps) postReload(port int, token string) bool {
+	started := time.Now()
+	result := diagnosticRecord{Event: "reload_result", Reason: "transport_failed"}
+	d.diagnose(diagnosticRecord{Event: "reload_request"})
+	defer func() {
+		result.DurationMS = time.Since(started).Milliseconds()
+		d.diagnose(result)
+	}()
 	client := d.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
@@ -356,36 +401,47 @@ func (d HookDeps) postReload(port int, token string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	var body boundedReloadBody
+	_, readErr := io.Copy(&body, resp.Body)
+	result.HTTPStatus = resp.StatusCode
+	result.Reason = "http_non_200"
+	if resp.StatusCode == http.StatusOK {
+		result.Reason = "http_200"
+	}
+	result.Response = parseReloadDiagnostic(body, readErr)
 	return resp.StatusCode == http.StatusOK
 }
 
-func readPort(sessDir string) (int, bool) {
-	b, err := os.ReadFile(filepath.Join(sessDir, "startup.json"))
-	if err != nil {
-		return 0, false
-	}
+func (d HookDeps) readPort(sessDir, layout string) (int, bool) {
+	b, reason := artifactBytes(filepath.Join(sessDir, "startup.json"))
 	var doc struct {
 		Port int `json:"port"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Port <= 0 {
-		return 0, false
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Port <= 0 {
+			reason = "invalid_port"
+		}
 	}
-	return doc.Port, true
+	d.diagnose(diagnosticRecord{Event: "artifact_check", Artifact: "startup", Layout: layout, Reason: reason})
+	return doc.Port, reason == "available"
 }
 
-func readToken(sessDir string) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(sessDir, "credential.json"))
-	if err != nil {
-		return "", false
-	}
+func (d HookDeps) readToken(sessDir, layout string) (string, bool) {
+	b, reason := artifactBytes(filepath.Join(sessDir, "credential.json"))
 	var doc struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(b, &doc); err != nil || doc.Token == "" {
-		return "", false
+	if reason == "available" {
+		if json.Unmarshal(b, &doc) != nil {
+			reason = "invalid_json"
+		} else if doc.Token == "" {
+			reason = "empty_token"
+		}
 	}
-	return doc.Token, true
+	d.diagnose(diagnosticRecord{Event: "artifact_check", Artifact: "credential", Layout: layout, Reason: reason})
+	return doc.Token, reason == "available"
 }
 
 func readHookState(path string) hookState {

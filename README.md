@@ -566,7 +566,9 @@ via the documented loopback API with that session's own credential:
 
 - After a model turn, a session with a newer shared notice reloads only its
   own daemon. A busy-turn `409` leaves the consumed marker unchanged, so a later
-  hook event can retry; the marker advances only after a successful `200`.
+  hook event can retry; the marker advances on HTTP `200`, even when the response
+  reports a queued reload or partial subsystem failure. HTTP acceptance is not
+  proof that a queued reload has been applied.
   Reloading does not restart or compact the session. Prompt hooks accept without
   blocking and provider-only notices do not claim a particular model change or
   fallback.
@@ -575,6 +577,35 @@ via the documented loopback API with that session's own credential:
   switch, or guarantee which group leaf Polytoken will choose. The pinned
   synthetic contract suite proves successful next-turn continuation for its
   covered routes; this is not a promise for every configuration or provider.
+
+**Hook diagnostics.** Each invocation writes best-effort JSON-lines records to
+`<sessions-dir>/<session-id>/polytoken-quota/diagnostics.jsonl`; the default exact
+location is `~/.local/share/polytoken/sessions/<session-id>/polytoken-quota/diagnostics.jsonl`,
+beside `state.json` (not in the `sessions-v1` runtime-artifact directory). Diagnostics
+never go to stdout or stderr; prompt JSON and silent fail-open behavior are unchanged.
+No additional daemon requests or lifecycle hooks are added.
+
+Records include an invocation ID, UTC timestamps, Go build version and available VCS
+revision/modified status, hook start/finish, notice and state revisions/check reasons,
+startup/credential availability reasons, reload request/result duration and HTTP
+status, marker write result, and prompt warning categories/counts. Reload summaries
+retain only `queued`, failed-subsystem counts and allowlisted subsystem names/boolean
+change flags. Unknown failed names are counted, not retained. At most 32 KiB of a
+response is captured for parsing; empty, invalid, oversized and unreadable bodies
+receive fixed reason codes. Raw bodies, error/detail text, paths, tokens, environment,
+model names, notices and prompt/warning text are never logged. A queued response
+records acceptance only; it does not establish eventual application.
+
+The quota directory must be private (`0700`); diagnostic and lock files use `0600`.
+Directories/files must belong to the current user, and session/root directories
+must not be group/world-writable. Unsafe session IDs, symlinked session/quota
+directories, and symlinked, hardlinked, non-regular, non-private or already oversized
+diagnostic files disable logging silently. A nonblocking
+cross-process lock covers complete record writes and rotation; contention may drop
+records rather than delay the hook waiting for another invocation. The current file
+and one previous file (`diagnostics.jsonl.1`) are each bounded to 64 KiB. Logging
+failure has no stdout/stderr fallback and does not change reload, marker or prompt
+policy. Logs are local per-session troubleshooting evidence, not an audit trail.
 
 Because agent containers each run their own loopback-only daemon, the notice
 path must be visible inside them: bind-mount `~/.local/polytoken-quota` at
