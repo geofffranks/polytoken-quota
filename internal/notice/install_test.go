@@ -73,7 +73,7 @@ func baseOpts(t *testing.T, configDir string) InstallOptions {
 }
 
 // TestInstallHookCreatesAndIsIdempotent: installing into a missing hooks.json
-// creates exactly the two entries with the baked handler argv; a second
+// creates exactly the three entries with the baked handler argv; a second
 // install changes nothing and does not churn backups.
 func TestInstallHookCreatesAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
@@ -84,7 +84,7 @@ func TestInstallHookCreatesAndIsIdempotent(t *testing.T) {
 		t.Fatalf("exit = %d stderr=%s", res.code, res.stderr.String())
 	}
 	names := readHooksNames(t, dir)
-	if len(names) != 2 || names[0] != reloadHookName || names[1] != driftHookName {
+	if len(names) != 3 || names[0] != reloadHookName || names[1] != driftHookName || names[2] != baselineHookName {
 		t.Fatalf("names = %v", names)
 	}
 	b, _ := os.ReadFile(hooksPath(dir))
@@ -104,7 +104,7 @@ func TestInstallHookCreatesAndIsIdempotent(t *testing.T) {
 			t.Fatalf("%s bash = %q, want %q", e.Name, e.Handler.Bash, wantBash)
 		}
 	}
-	if entries[0].Event != "post_model_turn" || entries[1].Event != "pre_user_prompt" {
+	if entries[0].Event != "post_model_turn" || entries[1].Event != "pre_user_prompt" || entries[2].Event != "session_start" {
 		t.Fatalf("events = %+v", entries)
 	}
 
@@ -112,7 +112,7 @@ func TestInstallHookCreatesAndIsIdempotent(t *testing.T) {
 	if res2.code != 0 {
 		t.Fatalf("second install exit = %d", res2.code)
 	}
-	if got := readHooksNames(t, dir); len(got) != 2 {
+	if got := readHooksNames(t, dir); len(got) != 3 {
 		t.Fatalf("second install duplicated entries: %v", got)
 	}
 	// No prior file existed for the first install and the second is a no-op,
@@ -124,7 +124,7 @@ func TestInstallHookCreatesAndIsIdempotent(t *testing.T) {
 }
 
 // TestInstallHookPreservesUnrelatedEntries: existing hooks (objects and
-// string negations) keep their relative order around the installed pair, and
+// string negations) keep their relative order around the installed entries, and
 // stale same-name entries are replaced in place.
 func TestInstallHookPreservesUnrelatedEntries(t *testing.T) {
 	dir := t.TempDir()
@@ -139,7 +139,7 @@ func TestInstallHookPreservesUnrelatedEntries(t *testing.T) {
 		t.Fatalf("exit = %d stderr=%s", res.code, res.stderr.String())
 	}
 	names := readHooksNames(t, dir)
-	want := []string{"log-edits", "!polytoken-quota-reload", reloadHookName, driftHookName}
+	want := []string{"log-edits", "!polytoken-quota-reload", reloadHookName, driftHookName, baselineHookName}
 	if len(names) != len(want) {
 		t.Fatalf("names = %v, want %v", names, want)
 	}
@@ -187,7 +187,7 @@ func TestInstallHookMalformedRefused(t *testing.T) {
 	}
 }
 
-// TestInstallHookRemoveAndDryRun: --remove deletes exactly the two entries
+// TestInstallHookRemoveAndDryRun: --remove deletes exactly the three entries
 // (absence is success); --dry-run changes nothing and prints a diff plus the
 // container-visibility advisory; install always prints the advisory.
 func TestInstallHookRemoveAndDryRun(t *testing.T) {

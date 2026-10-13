@@ -559,13 +559,24 @@ only provider IDs and enabled status. Two opt-in delivery mechanisms can
 consume the notice:
 
 **In-session convergence (opt-in).** `polytoken-quota install-hook` installs
-two entries into Polytoken's `hooks.json` (backup kept, unrelated entries
+three entries into Polytoken's `hooks.json` (backup kept, unrelated entries
 untouched, `--remove` to uninstall, `--dry-run` to preview). The handler is
 the `notice-hook` subcommand, which acts only on its **own** session's daemon
 via the documented loopback API with that session's own credential:
 
-- After a model turn, a session with a newer shared notice first checks its own
-  daemon's activity. An explicit idle signal (`turn_in_flight: false`) with no
+- At `session_start`, the hook records the first valid notice as this session's
+  baseline without requesting daemon state or reload. `pre_user_prompt` provides
+  a fallback; if neither has observed a valid notice, the first valid post-turn
+  observation also establishes the baseline without reload. Missing or malformed
+  notices do not initialize it. This is an observation boundary, not proof of the
+  exact configuration-load instant: changes between startup and first observation
+  can be absorbed into the baseline. The same policy applies to existing sessions
+  that newly pick up the hook. Legacy state with a nonzero consumed revision
+  preserves that evidence and initializes the baseline from it, so a newer notice
+  remains eligible. Baseline and consumed revision are separate persisted fields;
+  initializing the baseline does not claim a reload was applied.
+- After a model turn, a notice newer than both this session's baseline and consumed
+  revision first checks its own daemon's activity. An explicit idle signal (`turn_in_flight: false`) with no
   provider wait permits reload. Missing or null legacy activity is not idle:
   when there is no provider wait, the hook makes one `/sync` and `/sync/summary`
   observation of the same daemon. Both must use version 1 and match on epoch and
@@ -602,7 +613,18 @@ plus at most two authority requests for inconclusive legacy activity. The fixed
 reason `idle` identifies explicit legacy idle; `idle_authority` identifies an idle
 paired authority observation. Authority deferrals use `authority_` reason codes;
 no epoch, cursor, queue content or question content enters diagnostics. Prompt hooks
-and already-consumed revisions make no activity request. No lifecycle hooks are added.
+and baseline/already-consumed revisions make no activity request. State transitions
+use a separate nonblocking per-session lock and atomic replacement; a competing
+handler skips rather than waiting or overwriting another handler's consumption.
+A genuinely missing state file can initialize. Existing unreadable or corrupt state
+records a `state_recovery` problem without overwrite or reload; repair it before
+convergence can resume. A failed baseline write makes no HTTP request and leaves
+initialization for a later event. State transitions use the same owned/private,
+rooted session and quota directory checks as diagnostics. Unsafe session IDs or
+directories and symlinked, hardlinked, non-regular, non-private or foreign-owned
+state/lock files skip the transition without daemon requests; blocking hooks still
+allow/accept. Diagnostics are best effort and may be unavailable for the same
+filesystem problem.
 
 Records include an invocation ID, UTC timestamps, Go build version and available VCS
 revision/modified status, hook start/finish, notice and state revisions/check reasons,

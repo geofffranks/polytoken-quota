@@ -1,6 +1,7 @@
 package notice
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -67,7 +68,7 @@ func newHookDiagnostics(d HookDeps, event string) *hookDiagnostics {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil
 	}
-	if event != hookEventTurnEnd && event != hookEventPrompt {
+	if event != hookEventTurnEnd && event != hookEventPrompt && event != hookEventStart {
 		event = "unknown"
 	}
 	b := diagnosticBuild{}
@@ -135,44 +136,11 @@ func (d HookDeps) diagnose(r diagnosticRecord) {
 // Symlinks, hardlinked files and non-private diagnostic files are refused.
 // The lock covers rotation and the whole record write, across processes too.
 func (l *hookDiagnostics) append(b []byte) {
-	root, err := os.OpenRoot(l.root)
-	if err != nil {
-		return
-	}
-	defer root.Close()
-	rootInfo, err := root.Stat(".")
-	if err != nil || !ownedDirectory(rootInfo) || rootInfo.Mode().Perm()&0o022 != 0 {
-		return
-	}
-	st, err := root.Lstat(l.session)
-	if err != nil || !ownedDirectory(st) || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm()&0o022 != 0 {
-		return
-	}
-	session, err := root.OpenRoot(l.session)
-	if err != nil {
-		return
-	}
-	defer session.Close()
-	opened, err := session.Stat(".")
-	if err != nil || !os.SameFile(st, opened) {
-		return
-	}
-	if err := session.Mkdir("polytoken-quota", 0o700); err != nil && !os.IsExist(err) {
-		return
-	}
-	st, err = session.Lstat("polytoken-quota")
-	if err != nil || !ownedDirectory(st) || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm() != 0o700 {
-		return
-	}
-	quota, err := session.OpenRoot("polytoken-quota")
-	if err != nil {
+	quota := privateSessionQuota(l.root, l.session)
+	if quota == nil {
 		return
 	}
 	defer quota.Close()
-	opened, err = quota.Stat(".")
-	if err != nil || !os.SameFile(st, opened) {
-		return
-	}
 	lock := privateDiagnosticFile(quota, ".diagnostics.lock")
 	if lock == nil {
 		return
@@ -191,7 +159,7 @@ func (l *hookDiagnostics) append(b []byte) {
 			_ = f.Close()
 		}
 	}()
-	st, err = f.Stat()
+	st, err := f.Stat()
 	if err != nil || st.Size() > diagnosticLimit {
 		return
 	}
@@ -336,14 +304,40 @@ func artifactBytes(path string) ([]byte, string) {
 	return b, "available"
 }
 
-func (d HookDeps) readState(path string) hookState {
-	b, reason := artifactBytes(path)
+func (d HookDeps) readState(path string) (hookState, bool) {
+	var b []byte
+	var reason string
+	if d.stateRoot != nil {
+		b, reason = rootedStateBytes(d.stateRoot)
+	} else {
+		b, reason = artifactBytes(path) // diagnostic-only fixture calls
+	}
 	var st hookState
-	if reason == "available" && json.Unmarshal(b, &st) != nil {
-		reason = "invalid_json"
+	if reason == "available" {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(b, &fields) != nil || fields == nil || json.Unmarshal(b, &st) != nil {
+			reason = "invalid_json"
+		} else {
+			// Null numeric/marker fields are not a missing legacy marker.
+			for _, key := range []string{"baseline_revision", "consumed_revision", "last_warned_revision", "last_prompt_consumed"} {
+				if raw, exists := fields[key]; exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+					reason = "invalid_json"
+				}
+			}
+		}
+	}
+	if reason == "missing" && d.stateRoot == nil {
+		// A dangling link is existing damaged state, not a fresh session.
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			reason = "read_failed"
+		}
 	}
 	d.diagnose(diagnosticRecord{Event: "state_check", Reason: reason, Consumed: st.ConsumedRevision, Warned: st.LastWarnedRevision, PromptConsumed: st.LastPromptConsumed})
-	return st
+	ok := reason == "available" || reason == "missing"
+	if !ok {
+		d.diagnose(diagnosticRecord{Event: "state_recovery", Reason: reason})
+	}
+	return st, ok
 }
 
 func (d HookDeps) markerResult(err error, st hookState) {

@@ -4,8 +4,10 @@ package notice
 // operator-installed hooks.json entries) at session boundaries; it dispatches
 // on POLYTOKEN_HOOK_EVENT:
 //
+//   - session_start: baseline the first valid notice without daemon requests.
+//     pre_user_prompt and post_model_turn can initialize if startup could not.
 //   - post_model_turn (fire-and-forget): when the published notice carries a
-//     revision newer than this session's consumed marker, check /state for
+//     revision newer than this session's baseline and consumed marker, check /state for
 //     explicit idle activity, resolving omitted/null legacy activity only with
 //     a matching idle /sync and /sync/summary pair before POST /reload to this
 //     session's own daemon (loopback address and bearer token from
@@ -32,9 +34,9 @@ import (
 	"time"
 )
 
-// hookEventTurnEnd and hookEventPrompt are the two Polytoken hook events the
-// handler subscribes to (installed by `install-hook`).
+// Hook events subscribed to by install-hook.
 const (
+	hookEventStart   = "session_start"
 	hookEventTurnEnd = "post_model_turn"
 	hookEventPrompt  = "pre_user_prompt"
 )
@@ -59,12 +61,17 @@ type HookDeps struct {
 	Now func() time.Time
 	// diagnostics is invocation-local; no caller can inject external log text.
 	diagnostics *hookDiagnostics
+	// stateRoot is pinned for the lifetime of the held state lock.
+	stateRoot *os.Root
 }
 
 // hookState is the per-session marker file persisted under
 // <sessions-dir>/<session-id>/polytoken-quota/state.json.
 type hookState struct {
-	ConsumedRevision uint64 `json:"consumed_revision,omitempty"`
+	// Presence, including revision zero, distinguishes an observed baseline
+	// from an uninitialized session. It does not imply a reload was applied.
+	BaselineRevision *uint64 `json:"baseline_revision,omitempty"`
+	ConsumedRevision uint64  `json:"consumed_revision,omitempty"`
 	// LastSeenModel is the active model observed at the previous
 	// pre_user_prompt; empty until the first prompt.
 	LastSeenModel string `json:"last_seen_model,omitempty"`
@@ -90,6 +97,10 @@ func RunHook(d HookDeps) int {
 		d.diagnose(diagnosticRecord{Event: "hook_finished", DurationMS: time.Since(started).Milliseconds()})
 	}()
 	switch event {
+	case hookEventStart:
+		d.initializeSession()
+		fmt.Fprintln(d.out(), `{"outcome":"allow"}`)
+		return 0
 	case hookEventTurnEnd:
 		d.reloadIfStale()
 		return 0
@@ -129,17 +140,39 @@ type noticeTarget struct {
 func (d HookDeps) handlePrompt() {
 	current := d.env("POLYTOKEN_MODEL_NAME")
 	sessDir, sessionID := d.sessionDir()
-	if current == "" || sessionID == "" {
+	if sessionID == "" {
 		d.diagnose(diagnosticRecord{Event: "noop", Reason: "missing_prompt_inputs"})
 		d.printAccept()
 		return
 	}
 	statePath := d.statePath(sessDir)
-	state := d.readState(statePath)
+	unlock, ok := d.lockState()
+	if !ok {
+		d.printAccept()
+		return
+	}
+	defer unlock()
+	state, ok := d.readState(statePath)
+	if !ok {
+		d.printAccept()
+		return
+	}
+	doc, validNotice := d.readNotice()
+	if validNotice {
+		if _, ok := d.ensureBaseline(&state, doc.Revision); !ok {
+			d.printAccept()
+			return
+		}
+	}
+	if current == "" {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "missing_prompt_inputs"})
+		d.printAccept()
+		return
+	}
 
 	var lines []string
 	var categories []string
-	if doc, ok := d.readNotice(); ok && !doc.ProviderOnly {
+	if validNotice && !doc.ProviderOnly {
 		chain, head := applicableChain(doc, d.env("POLYTOKEN_FACET_NAME"))
 		inChain := chainContains(chain, current)
 		// Drift warnings fire at most once per published notice revision (the
@@ -172,7 +205,7 @@ func (d HookDeps) handlePrompt() {
 	state.LastSeenModel = current
 	state.LastPromptConsumed = state.ConsumedRevision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	d.markerResult(writeHookState(statePath, state), state)
+	d.markerResult(d.writeState(state), state)
 
 	if len(lines) == 0 {
 		d.printAccept()
@@ -204,6 +237,8 @@ func (d HookDeps) readNotice() (noticeDoc, bool) {
 			reason = "invalid_json"
 		} else if doc.Schema != SchemaVersion {
 			reason = "unsupported_schema"
+		} else if !validNoticeRevision(b) {
+			reason = "invalid_revision"
 		}
 	}
 	d.noticeCheck(reason, doc.Revision, doc.ProviderOnly)
@@ -289,7 +324,24 @@ func (d HookDeps) reloadIfStale() {
 	if sessionID == "" {
 		return
 	}
-	state := d.readState(d.statePath(sessDir))
+	statePath := d.statePath(sessDir)
+	unlock, ok := d.lockState()
+	if !ok {
+		return
+	}
+	defer unlock()
+	state, ok := d.readState(statePath)
+	if !ok {
+		return
+	}
+	initialized, ok := d.ensureBaseline(&state, revision)
+	if !ok || initialized {
+		return
+	}
+	if *state.BaselineRevision >= revision {
+		d.diagnose(diagnosticRecord{Event: "noop", Reason: "revision_baselined", Revision: revision, Consumed: state.ConsumedRevision})
+		return
+	}
 	if state.ConsumedRevision >= revision {
 		d.diagnose(diagnosticRecord{Event: "noop", Reason: "revision_consumed", Revision: revision, Consumed: state.ConsumedRevision})
 		return
@@ -314,7 +366,7 @@ func (d HookDeps) reloadIfStale() {
 	}
 	state.ConsumedRevision = revision
 	state.UpdatedAt = d.now().UTC().Format(time.RFC3339)
-	d.markerResult(writeHookState(d.statePath(sessDir), state), state)
+	d.markerResult(d.writeState(state), state)
 }
 
 // noticeRevision reads just the revision from the notice document. Missing or
@@ -330,6 +382,8 @@ func (d HookDeps) noticeRevision() (uint64, bool) {
 			reason = "invalid_json"
 		} else if doc.Schema != SchemaVersion {
 			reason = "unsupported_schema"
+		} else if !validNoticeRevision(b) {
+			reason = "invalid_revision"
 		}
 	}
 	d.noticeCheck(reason, doc.Revision, false)
@@ -337,6 +391,16 @@ func (d HookDeps) noticeRevision() (uint64, bool) {
 		return 0, false
 	}
 	return doc.Revision, true
+}
+
+func validNoticeRevision(b []byte) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(b, &fields) != nil {
+		return false
+	}
+	raw, exists := fields["revision"]
+	var revision uint64
+	return exists && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) && json.Unmarshal(raw, &revision) == nil
 }
 
 func (d HookDeps) noticeBytes() ([]byte, string) {
@@ -360,7 +424,7 @@ func (d HookDeps) noticeCheck(reason string, revision uint64, providerOnly bool)
 
 func (d HookDeps) sessionDir() (dir, sessionID string) {
 	sessionID = d.env("POLYTOKEN_SESSION_ID")
-	if sessionID == "" {
+	if !safeSessionID(sessionID) || !filepath.IsAbs(d.sessionsRoot()) {
 		return "", ""
 	}
 	return filepath.Join(d.sessionsRoot(), sessionID), sessionID

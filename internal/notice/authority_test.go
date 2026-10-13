@@ -82,7 +82,8 @@ func TestHookAuthorityAdmission(t *testing.T) {
 			}))
 			defer h.server.Close()
 			writeJSON(t, filepath.Join(h.sessionsDir, h.sessionID, "startup.json"), map[string]any{"port": portOf(t, h.server.URL)})
-			writeJSON(t, h.statePath(), hookState{ConsumedRevision: 4, UpdatedAt: "unchanged"})
+			baseline := uint64(4)
+			writeJSON(t, h.statePath(), hookState{BaselineRevision: &baseline, ConsumedRevision: 4, UpdatedAt: "unchanged"})
 			before, err := os.ReadFile(h.statePath())
 			if err != nil {
 				t.Fatal(err)

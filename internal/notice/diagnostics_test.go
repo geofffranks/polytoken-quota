@@ -79,6 +79,9 @@ func TestHookDiagnosticReloadPolicyAndPrivacy(t *testing.T) {
 			d.NoticePath = filepath.Join(t.TempDir(), "notice.json")
 			writeJSON(t, d.NoticePath, map[string]any{"schema": 1, "revision": 9})
 			session := filepath.Join(d.SessionsDir, "sess-1")
+			if err := writeHookState(d.statePath(session), hookState{BaselineRevision: new(uint64)}); err != nil {
+				t.Fatal(err)
+			}
 			writeJSON(t, filepath.Join(session, "startup.json"), map[string]any{"port": 5})
 			writeJSON(t, filepath.Join(session, "credential.json"), map[string]any{"token": "secret-token"})
 			d.HTTPClient = &http.Client{Transport: diagnosticTransport(func(r *http.Request) (*http.Response, error) {
@@ -396,7 +399,7 @@ func TestHookDiagnosticTransportFailure(t *testing.T) {
 	}
 }
 
-func TestHookDiagnosticMarkerFailure(t *testing.T) {
+func TestHookDiagnosticStateReadFailure(t *testing.T) {
 	d := diagnosticDeps(t, hookEventPrompt)
 	d.NoticePath = filepath.Join(t.TempDir(), "missing")
 	quota := filepath.Dir(diagnosticPath(d))
@@ -413,11 +416,11 @@ func TestHookDiagnosticMarkerFailure(t *testing.T) {
 	records, _ := diagnosticRecords(t, diagnosticPath(d))
 	found := false
 	for _, r := range records {
-		if r.Event == "marker_write" && r.Reason == "write_failed" {
+		if r.Event == "state_recovery" && r.Reason == "unsafe_state" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("missing marker failure")
+		t.Fatal("missing recovery diagnostic")
 	}
 }

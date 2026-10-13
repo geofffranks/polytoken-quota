@@ -63,6 +63,8 @@ func newHookHarness(t *testing.T) *hookHarness {
 	writeJSON(t, filepath.Join(sessDir, "credential.json"), map[string]any{"version": 1, "kind": "polytoken-daemon-credential", "token": "tok-1"})
 	h.noticePath = filepath.Join(dir, "notice.json")
 	writeJSON(t, h.noticePath, map[string]any{"schema": 1, "revision": 9})
+	// Reload-focused fixtures represent a session that already observed zero.
+	writeJSON(t, h.statePath(), map[string]any{"baseline_revision": 0})
 	return h
 }
 

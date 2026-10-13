@@ -1,6 +1,6 @@
 package notice
 
-// install-hook: idempotently install (or remove) the two Polytoken hook
+// install-hook: idempotently install (or remove) the three Polytoken hook
 // entries that route session events to `notice-hook`. The merged document is
 // validated before any write, unrelated entries (including string negations)
 // keep their relative order verbatim, and every write is preceded by a
@@ -19,11 +19,12 @@ import (
 	"time"
 )
 
-// Names of the two installed hook entries. Project-level hooks.json files can
-// negate either with "!<name>".
+// Names of the installed hook entries. Project-level hooks.json files can
+// negate any of them with "!<name>".
 const (
-	reloadHookName = "polytoken-quota-reload"
-	driftHookName  = "polytoken-quota-drift"
+	reloadHookName   = "polytoken-quota-reload"
+	driftHookName    = "polytoken-quota-drift"
+	baselineHookName = "polytoken-quota-baseline"
 )
 
 // InstallOptions configures Install. Empty fields resolve defaults:
@@ -170,12 +171,12 @@ func validateHookEntry(e json.RawMessage) error {
 
 // mergeHookEntries returns the merged document and whether any managed entry
 // was present in the existing document. Every non-managed entry keeps its
-// original order; on install the two managed entries are appended (stale
+// original order; on install the three managed entries are appended (stale
 // same-name entries are thereby replaced); on remove they are dropped.
 func mergeHookEntries(existing []json.RawMessage, handlerPath, noticePath string, remove bool) ([]json.RawMessage, bool, error) {
-	ours := map[string]bool{reloadHookName: true, driftHookName: true}
+	ours := map[string]bool{reloadHookName: true, driftHookName: true, baselineHookName: true}
 	foundOurs := false
-	out := make([]json.RawMessage, 0, len(existing)+2)
+	out := make([]json.RawMessage, 0, len(existing)+3)
 	for _, e := range existing {
 		var obj struct {
 			Name string `json:"name"`
@@ -193,6 +194,7 @@ func mergeHookEntries(existing []json.RawMessage, handlerPath, noticePath string
 	for _, entry := range []struct{ name, event string }{
 		{reloadHookName, "post_model_turn"},
 		{driftHookName, "pre_user_prompt"},
+		{baselineHookName, "session_start"},
 	} {
 		raw, err := json.Marshal(map[string]any{
 			"name":    entry.name,
@@ -271,10 +273,11 @@ func printInstallSummary(w io.Writer, opts InstallOptions, noticePath string, no
 	} else if noop {
 		fmt.Fprintln(w, "hooks: already installed; nothing to do")
 	}
-	fmt.Fprintf(w, "hooks: %s %s (%s) and %s (%s) in hooks.json\n",
-		verb, reloadHookName, "post_model_turn", driftHookName, "pre_user_prompt")
+	fmt.Fprintf(w, "hooks: %s %s (%s), %s (%s) and %s (%s) in hooks.json\n",
+		verb, reloadHookName, hookEventTurnEnd, driftHookName, hookEventPrompt, baselineHookName, hookEventStart)
 	fmt.Fprintln(w, "existing sessions pick up new hook entries at their next config reload; new sessions immediately")
-	fmt.Fprintln(w, "projects can negate either entry in .polytoken/hooks.json with \"!"+reloadHookName+"\" / \"!"+driftHookName+"\"")
+	fmt.Fprintln(w, "the first valid notice observed is a baseline without reload; changes before that observation may be absorbed")
+	fmt.Fprintln(w, "projects can negate any entry in .polytoken/hooks.json with \"!"+reloadHookName+"\" / \"!"+driftHookName+"\" / \"!"+baselineHookName+"\"")
 	fmt.Fprintf(w, "notice path %s cannot be verified visible inside agent containers — bind-mount it at the same path (or set operational.notice_path to a shared location)\n", noticePath)
 }
 
