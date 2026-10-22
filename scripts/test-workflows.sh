@@ -67,6 +67,12 @@ assert_contains "$ci" 'go-version-file: go\.mod' 'CI setup-go reads repository G
 assert_contains "$ci" 'go env GOVERSION' 'CI checks the installed Go version'
 assert_contains "$ci" 'go test \./\.\.\.' 'CI runs standard Go tests'
 assert_contains "$ci" 'go test -race \./\.\.\.' 'CI runs race tests'
+assert_contains "$ci" "RAPID_CHECKS: '100'" 'CI bounds generated Rapid samples'
+assert_contains "$ci" "RAPID_SEED: '1'" 'CI fixes the Rapid sampling seed'
+assert_contains "$ci" "RAPID_SHRINKTIME: '10s'" 'CI bounds cooperative Rapid shrinking'
+assert_contains "$ci" 'go test \./\.\.\. -count=1 -timeout=5m' 'CI standard tests have a finite uncached deadline'
+assert_contains "$ci" 'go test -race \./\.\.\. -count=1 -timeout=10m' 'CI race tests have a finite uncached deadline'
+assert_exact_block "$ci" '      - name: Retain synthetic Rapid failures' $'        if: failure()\n        uses: actions/upload-artifact@v7\n        with:\n          name: rapid-failures\n          path: \'**/testdata/rapid/**/*.fail\'\n          if-no-files-found: ignore\n          retention-days: 7' 'CI retains only synthetic Rapid failure files after a failed step for seven days'
 assert_contains "$ci" 'go vet \./\.\.\.' 'CI runs go vet'
 assert_contains "$ci" 'go build \./\.\.\.' 'CI runs go build'
 

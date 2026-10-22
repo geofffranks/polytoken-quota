@@ -11,6 +11,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RAPID_CHECKS: '100'
+      RAPID_SEED: '1'
+      RAPID_SHRINKTIME: '10s'
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -29,9 +34,17 @@ jobs:
             exit 1
           }
       - name: Test
-        run: go test ./...
+        run: go test ./... -count=1 -timeout=5m
       - name: Race test
-        run: go test -race ./...
+        run: go test -race ./... -count=1 -timeout=10m
+      - name: Retain synthetic Rapid failures
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rapid-failures
+          path: '**/testdata/rapid/**/*.fail'
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Vet
         run: go vet ./...
       - name: Build

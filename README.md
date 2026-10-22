@@ -6,6 +6,8 @@ Quota polling participates per supported provider mapping: omitted or empty `quo
 
 The tool never contacts a running Polytoken daemon from host commands; change propagation to live sessions is opt-in and session-scoped (see [Change propagation to running sessions](#change-propagation-to-running-sessions)). Provider-only policies are an explicit opt-in: they gate enrolled Polytoken providers without managing groups, defaults, model flags, or facet/subagent assignments, and do not guarantee a particular fallback. The tool stores no provider credentials and persists no raw provider responses, auth headers, or account IDs.
 
+Developer checks and property-test discovery/replay commands are in [Testing](docs/testing.md).
+
 ## Minimum versions
 
 | Component | Minimum | Notes |
