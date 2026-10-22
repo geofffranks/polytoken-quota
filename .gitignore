@@ -22,3 +22,8 @@ docs/superpowers/
 
 # Built binary
 /polytoken-quota
+
+# Local Rapid fail files are replayed automatically and stay uncommitted
+# (narrow rule per the property-testing plan; curated regressions are real
+# test code, never generated files).
+**/testdata/rapid/**/*.fail
