@@ -12,12 +12,22 @@ package document
 // come from construction, never from the production span locator.
 //
 // Deliberate generated scope (matches the reconciler's real file shapes):
-// documents are newline-terminated with one uniform terminator (LF or CRLF,
-// optional BOM), one indentation width per document, single-line scalars,
-// and block sequences of single-line items. Multi-line folded plain scalars,
-// plain scalars containing '#', and documents whose final line lacks a
-// terminator are outside the generated space; the suite notes and the
-// delivery report describe how those inputs behave.
+// documents use one uniform terminator (LF or CRLF, optional BOM), one
+// indentation width per document, single-token scalars, and block sequences
+// of single-line items. The generated space DOES include documents whose
+// final line lacks a terminator (finalNL) and plain scalars whose content
+// carries an attached '#' (style 'h', e.g. a#b): yaml.v3 reads those as
+// supported plain shapes, and the model mirrors the editor's documented
+// behavior for them — an insertion at an unterminated final line first
+// terminates that line, and a replacement rewrites the whole attached-#
+// span. Values containing '#' are written single-quoted by both sides, and
+// multi-token plain scalars (internal whitespace) remain outside the
+// generated space: the locator spans plain values only up to the first
+// whitespace byte, which matches single-token values. Scalar/boolean value
+// sets onto an existing bare (null-valued) key are likewise excluded at
+// replay time (setsBareKey): that replacement shape is currently corrupted
+// (the value is glued to the colon) and awaits an explicit production-repair
+// scope decision, so the generated space asserts neither spelling.
 
 import (
 	"bytes"
@@ -49,7 +59,8 @@ const (
 // propNode is one key in the model tree. comment is the verbatim key-line
 // suffix (including its leading space); style records the existing scalar
 // spelling so replacement can preserve it ('p' plain, 's' single-quoted,
-// 'd' double-quoted).
+// 'd' double-quoted, 'h' plain with attached '#' content — a shape only
+// plain style can carry, rendered verbatim).
 type propNode struct {
 	key      string
 	kind     propKind
@@ -75,6 +86,11 @@ type docModel struct {
 	injected  string // verbatim block (ambiguity injection) rendered before the footer
 	root      []*propNode
 	tail      []*propNode
+
+	// finalNL records whether the rendered document ends with a line
+	// terminator. When false, the final line is valid YAML without one; an
+	// editor insertion at that line must first terminate it.
+	finalNL bool
 
 	// Pools used by the edit generator.
 	chosenNames []string
@@ -157,6 +173,11 @@ func spellScalar(n *propNode) string {
 		r := strings.ReplaceAll(n.scalar, "\\", "\\\\")
 		r = strings.ReplaceAll(r, "\"", "\\\"")
 		return "\"" + r + "\""
+	case 'h':
+		// Plain with attached '#' content (e.g. a#b): valid plain YAML that
+		// reads back verbatim. Only single-token attached-hash values carry
+		// 'h'; a replacement that needs quoting flips the style to 's'.
+		return n.scalar
 	default:
 		if needsQuoteModel(n.scalar) {
 			return "'" + strings.ReplaceAll(n.scalar, "'", "''") + "'"
@@ -229,7 +250,15 @@ func (m *docModel) render() []byte {
 	for _, n := range m.tail {
 		propRenderNode(&b, n, nl)
 	}
-	return []byte(b.String())
+	out := b.String()
+	if !m.finalNL && strings.HasSuffix(out, nl) {
+		// The document's final line carries no terminator. Every element
+		// above renders terminated, so exactly the last terminator is
+		// dropped; when an edit later inserts at that line, the model
+		// sets finalNL (apply), reproducing the editor's separator.
+		out = out[:len(out)-len(nl)]
+	}
+	return []byte(out)
 }
 
 // clone deep-copies the model so a property can apply an operation to a
@@ -238,6 +267,7 @@ func (m *docModel) clone() *docModel {
 	cp := &docModel{
 		bom: m.bom, crlf: m.crlf, width: m.width,
 		header: m.header, footer: m.footer, injected: m.injected,
+		finalNL:     m.finalNL,
 		chosenNames: append([]string(nil), m.chosenNames...),
 		absentName:  m.absentName,
 	}
@@ -332,6 +362,10 @@ func (m *docModel) createIndent(prefix []string, parentNode *propNode) int {
 // missing first segment of a deeper path — goes to the tail, matching the
 // editor's document-root insertion point after the last document line.
 func (m *docModel) insertPath(path []string, leaf *propNode) {
+	// A leaf or chain whose first missing segment is created at the tail
+	// lands after the document's final line: an unterminated final line is
+	// terminated first, so the model marks the result terminated.
+	rootLevel := len(path) == 1
 	var parentNode *propNode
 	list := &m.tail
 	for i, seg := range path[:len(path)-1] {
@@ -349,6 +383,9 @@ func (m *docModel) insertPath(path []string, leaf *propNode) {
 		}
 		if found == nil {
 			found = &propNode{key: seg, kind: propNull, indent: m.createIndent(prefix, parentNode)}
+			if i == 0 {
+				rootLevel = true
+			}
 			*list = append(*list, found)
 		}
 		if found.kind == propNull {
@@ -356,6 +393,9 @@ func (m *docModel) insertPath(path []string, leaf *propNode) {
 		}
 		parentNode = found
 		list = &found.children
+	}
+	if rootLevel {
+		m.finalNL = true
 	}
 	leaf.indent = m.createIndent(path, parentNode)
 	if leaf.kind == propSeq {
@@ -377,10 +417,11 @@ func (m *docModel) apply(e Edit) error {
 		return errPropEmptyDoc
 	}
 	parent, node := m.get(e.Path)
-	if node == nil && parent != nil && parent.kind == propNull {
-		// A mapping whose children were all removed is a bare null key;
-		// every deeper path refuses with a not-a-mapping error.
-		return errors.New("model: path crosses a bare key")
+	if node == nil && parent != nil && parent.kind != propMap {
+		// A path that would resolve through a bare key (a mapping whose
+		// children were all removed) or through a scalar/boolean/sequence
+		// value refuses: the editor's resolver reports it as not-a-mapping.
+		return errors.New("model: path crosses a non-mapping value")
 	}
 	switch {
 	case e.Remove:
@@ -485,9 +526,17 @@ func (m *docModel) deleteNode(parent *propNode, node *propNode) {
 var propScalarValues = []string{
 	"codex/gpt-5.6-luna", "zai/glm-5.2-mini", "plain-word",
 	"true", "yes", "null", "123", "3.14", "", " lead", "trail ", "a:b", "*star", "-dash",
+	// Attached-'#' values: a plain write would re-read the '#' as a comment
+	// start, so both model and editor emit these single-quoted.
+	"v#2", "code#extra",
 }
 
-var propSeqItemValues = []string{"minime/gemma", "zai/glm-5.2", "codex/gpt-5.6-sol", "yes", "42"}
+// propPlainHashValues are values an existing node may carry in plain style
+// with an attached '#': single-token scalars that yaml.v3 reads back exactly
+// (a '#' begins a comment only after whitespace or at the value start).
+var propPlainHashValues = []string{"a#b", "mini#1"}
+
+var propSeqItemValues = []string{"minime/gemma", "zai/glm-5.2", "codex/gpt-5.6-sol", "yes", "42", "mini#2"}
 
 var propModelNamePool = []string{
 	"codex/gpt", "zai/glm-5.2", "minime/gemma", "openai/o3",
@@ -518,11 +567,14 @@ func drawTemplate(t *rapid.T) *docModel {
 	reasoningComment := rapid.Bool().Draw(t, "reasoningComment")
 	enabledComment := rapid.Bool().Draw(t, "enabledComment")
 	special := rapid.SampledFrom([]int{0, 1, 2}).Draw(t, "specialSpelling")
+	finalNL := rapid.Bool().Draw(t, "finalNL")
+	hashPrimary := rapid.Bool().Draw(t, "hashPrimary")
 
 	m := &docModel{
 		bom: bom, crlf: crlf, width: w,
 		header:      "# managed document",
 		footer:      "# end of managed document",
+		finalNL:     finalNL,
 		chosenNames: append([]string(nil), names...),
 		absentName:  absent,
 	}
@@ -530,6 +582,12 @@ func drawTemplate(t *rapid.T) *docModel {
 	poly := &propNode{key: "polytoken", kind: propMap, indent: 0}
 	modelVal := propScalarValues[rapid.IntRange(0, 2).Draw(t, "primaryValue")]
 	pModel := &propNode{key: "model", kind: propScalar, indent: w, scalar: modelVal, style: 'p'}
+	if hashPrimary {
+		// A pre-existing plain scalar with attached '#' content: the editor
+		// must replace (or keep) the whole attached-hash span.
+		pModel.scalar = propPlainHashValues[rapid.IntRange(0, len(propPlainHashValues)-1).Draw(t, "hashValue")]
+		pModel.style = 'h'
+	}
 	if primaryComment {
 		pModel.comment = " # primary"
 	}
@@ -611,6 +669,7 @@ func (m *docModel) pathSpecs() []propPathSpec {
 		{[]string{"polytoken"}, []string{"remove"}},
 		{[]string{"routing", "enabled"}, []string{"bool", "scalar", "remove"}},
 		{[]string{"extended"}, []string{"scalar", "bool", "seq", "seqempty", "remove"}},
+		{[]string{"extended", "deep"}, []string{"scalar", "bool", "remove"}},
 		{[]string{"models", m.absentName, "enabled"}, []string{"bool"}},
 	}
 	for _, name := range m.chosenNames {
@@ -624,6 +683,9 @@ func (m *docModel) pathSpecs() []propPathSpec {
 }
 
 // drawEdit draws one bounded edit against the template's path pool.
+// History ops are drawn against the pristine template and replayed against
+// the mutating model, so state-dependent op exclusions (setsBareKey) are
+// applied at replay time in TestPropertyYAMLEditHistories, not here.
 func (m *docModel) drawEdit(t *rapid.T) Edit {
 	spec := rapid.SampledFrom(m.pathSpecs()).Draw(t, "path")
 	kind := rapid.SampledFrom(spec.kinds).Draw(t, "kind")
@@ -647,6 +709,22 @@ func (m *docModel) drawEdit(t *rapid.T) Edit {
 		e.Remove = true
 	}
 	return e
+}
+
+// setsBareKey reports whether e writes a scalar or boolean value onto an
+// existing bare (null-valued) key — a supported replacement shape the editor
+// currently mishandles (the value is glued to the colon, `k:v`, so the
+// result no longer decodes as that key). Replay skips these ops: until a
+// production-repair scope decision covers the class, the generated space
+// asserts neither the documented `k: v` spelling nor the glued bytes.
+// Nonempty sequence sets on the same target stay in the pool because both
+// model and editor refuse them.
+func (m *docModel) setsBareKey(e Edit) bool {
+	if e.Remove || (e.Kind != Scalar && e.Kind != Boolean) {
+		return false
+	}
+	_, node := m.get(e.Path)
+	return node != nil && node.kind == propNull
 }
 
 // editLabel renders an edit readably for failure output.

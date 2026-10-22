@@ -319,6 +319,11 @@ func (d *doc) insertSequenceKey(raw []byte, path []string, items []string) ([]by
 	itemInd := ind + 2
 	itemPad := strings.Repeat(" ", itemInd)
 	var b strings.Builder
+	if d.finalLineUnterminated(raw, insertAt) {
+		// The insertion point is the document's unterminated final line;
+		// terminate it so the new key starts on its own line.
+		b.WriteString(nl)
+	}
 	b.WriteString(pad)
 	b.WriteString(key + ":")
 	b.WriteString(nl)
@@ -406,9 +411,18 @@ func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 		}
 		return start, end
 	}
-	// Plain scalar: span the run of non-space, non-newline bytes from start.
+	// Plain scalar: span the run of scalar bytes from start. A '#' ends the
+	// value only where a comment may begin. It cannot begin one after scalar
+	// content (yaml.v3 reads `model: a#b` as the string a#b), and the scan
+	// already stops at the whitespace a comment would need, so a '#' reached
+	// past the first byte is part of the value. A '#' on the first value byte
+	// itself belongs to a comment (the value is empty; a null node's column
+	// can land there when no value precedes the comment).
 	end := start
 	for end < len(d.raw) && !isValueTerminator(d.raw[end]) {
+		if end == start && d.raw[end] == '#' {
+			break
+		}
 		end++
 	}
 	return start, end
@@ -570,6 +584,11 @@ func (d *doc) insertKey(raw []byte, path []string, value []byte) ([]byte, error)
 	if len(value) > 0 {
 		rendered += " " + string(value)
 	}
+	if d.finalLineUnterminated(raw, insertAt) {
+		// The insertion point is the document's unterminated final line;
+		// terminate it so the new entry starts on its own line.
+		rendered = string(d.newline) + rendered
+	}
 	rendered += string(d.newline)
 	return splice(raw, insertAt, insertAt, []byte(rendered)), nil
 }
@@ -700,12 +719,24 @@ func looksNumeric(v string) bool {
 }
 
 // isValueTerminator reports whether a byte ends an inline plain scalar value.
+// '#' is deliberately absent: a '#' terminates the value only where a comment
+// may start — on the value's first byte or after whitespace — and valueSpan
+// handles those positions explicitly, so a '#' attached to scalar content
+// (e.g. a#b) stays inside the span exactly as yaml.v3 parses it.
 func isValueTerminator(b byte) bool {
 	switch b {
-	case ' ', '\t', '\n', '\r', '#', ',', '[', ']', '{', '}':
+	case ' ', '\t', '\n', '\r', ',', '[', ']', '{', '}':
 		return true
 	}
 	return false
+}
+
+// finalLineUnterminated reports whether an insertion at offset would be glued
+// onto the document's final line because that line has no terminator. An
+// entry inserted there must emit the document's newline first so it starts on
+// its own line.
+func (d *doc) finalLineUnterminated(raw []byte, offset int) bool {
+	return offset == len(raw) && len(raw) > 0 && raw[len(raw)-1] != '\n'
 }
 
 // splice returns raw with bytes [start,end) replaced by rep.

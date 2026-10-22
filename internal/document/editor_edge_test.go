@@ -211,6 +211,180 @@ func TestEditorContractEdges(t *testing.T) {
 		// An empty frontmatter block cannot be edited (nothing to parse).
 		propExpectRefusal(t, "empty frontmatter block", []byte("---\n---\nbody\n"), []Edit{modelEdit("c/d")})
 	})
+
+	// Repairs for the two supported shapes the editors previously corrupted
+	// (insertion onto an unterminated final line; plain scalars with
+	// attached '#' content). Each case pins exact bytes.
+	t.Run("insertion into an unterminated final line starts a new line", func(t *testing.T) {
+		cases := []struct {
+			name string
+			in   string
+			edit Edit
+			want string
+		}{
+			{"bool insert", "a: 1\nb: 2",
+				Edit{Path: []string{"c"}, Kind: Boolean, Bool: boolPtr(true)},
+				"a: 1\nb: 2\nc: true\n"},
+			{"scalar insert under existing parent", "top:\n  a: 1",
+				Edit{Path: []string{"top", "b"}, Kind: Scalar, Scalar: strPtr("x")},
+				"top:\n  a: 1\n  b: x\n"},
+			{"missing-parent chain insert", "a: 1\nb: 2",
+				Edit{Path: []string{"top", "sub"}, Kind: Boolean, Bool: boolPtr(true)},
+				"a: 1\nb: 2\ntop:\n  sub: true\n"},
+			{"sequence insert", "a: 1\nb: 2",
+				Edit{Path: []string{"fallback_models"}, Kind: Sequence, Sequence: []string{"minime/gemma"}},
+				"a: 1\nb: 2\nfallback_models:\n  - minime/gemma\n"},
+			{"crlf document", "a: 1\r\nb: 2",
+				Edit{Path: []string{"c"}, Kind: Boolean, Bool: boolPtr(false)},
+				"a: 1\r\nb: 2\r\nc: false\r\n"},
+			{"single-line document", "a: 1",
+				Edit{Path: []string{"b"}, Kind: Boolean, Bool: boolPtr(true)},
+				"a: 1\nb: true\n"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				in := []byte(tc.in)
+				pre := propCloneBytes(in)
+				out, err := EditYAML(in, []Edit{tc.edit})
+				if err != nil {
+					t.Fatalf("valid insertion rejected: %v", err)
+				}
+				if got, want := string(out), tc.want; got != want {
+					t.Fatalf("insertion corrupted the document:\n got=%q\nwant=%q", got, want)
+				}
+				if !bytes.Equal(in, pre) {
+					t.Fatal("edit mutated caller bytes")
+				}
+				if _, err := EditYAML(out, nil); err != nil {
+					t.Fatalf("output does not parse: %v\n%q", err, out)
+				}
+			})
+		}
+		t.Run("replacement of an unterminated final value adds no terminator", func(t *testing.T) {
+			out, err := EditYAML([]byte("a: 1\nb: 2"), []Edit{{Path: []string{"b"}, Kind: Boolean, Bool: boolPtr(false)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(out), "a: 1\nb: false"; got != want {
+				t.Fatalf("got=%q want=%q", got, want)
+			}
+		})
+		t.Run("removal of the final unterminated key keeps prior bytes", func(t *testing.T) {
+			out, err := EditYAML([]byte("a: 1\nb: 2"), []Edit{{Path: []string{"b"}, Remove: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := string(out), "a: 1\n"; got != want {
+				t.Fatalf("got=%q want=%q", got, want)
+			}
+		})
+	})
+
+	t.Run("plain scalar with attached '#' is replaced exactly", func(t *testing.T) {
+		// yaml.v3 reads the value of `model: a#b` as the string a#b: a '#'
+		// begins a comment only at the value start or after whitespace.
+		out, err := EditYAML([]byte("model: a#b\n"), []Edit{{Path: []string{"model"}, Kind: Scalar, Scalar: strPtr("new")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(out), "model: new\n"; got != want {
+			t.Fatalf("replacement kept stale bytes:\n got=%q\nwant=%q", got, want)
+		}
+		var doc yaml.Node
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if v := findKeyPath(t, &doc, "model"); v == nil || v.Tag != "!!str" || v.Value != "new" {
+			t.Fatalf("decoded %s(%v), want str(new)", v.Tag, v.Value)
+		}
+
+		// The same replacement on an unterminated final line.
+		out, err = EditYAML([]byte("a: 1\nmodel: a#b"), []Edit{{Path: []string{"model"}, Kind: Scalar, Scalar: strPtr("new")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(out), "a: 1\nmodel: new"; got != want {
+			t.Fatalf("got=%q want=%q", got, want)
+		}
+
+		// A whitespace-delimited comment after the value stays untouched.
+		out, err = EditYAML([]byte("model: a#b # keep me\n"), []Edit{{Path: []string{"model"}, Kind: Scalar, Scalar: strPtr("new")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(out), "model: new # keep me\n"; got != want {
+			t.Fatalf("comment not preserved:\n got=%q\nwant=%q", got, want)
+		}
+
+		// The same span boundary applies through the frontmatter editor.
+		out, err = EditFrontmatter([]byte("---\nmodel: a#b\n---\nbody\n"), []Edit{{Path: []string{"model"}, Kind: Scalar, Scalar: strPtr("c/d")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(out), "---\nmodel: c/d\n---\nbody\n"; got != want {
+			t.Fatalf("frontmatter got=%q want=%q", got, want)
+		}
+
+		// A replacement value containing '#' is written single-quoted so it
+		// keeps its string meaning.
+		out, err = EditYAML([]byte("model: old\n"), []Edit{{Path: []string{"model"}, Kind: Scalar, Scalar: strPtr("v#2")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := string(out), "model: 'v#2'\n"; got != want {
+			t.Fatalf("got=%q want=%q", got, want)
+		}
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if v := findKeyPath(t, &doc, "model"); v == nil || v.Tag != "!!str" || v.Value != "v#2" {
+			t.Fatalf("decoded %s(%v), want str(v#2)", v.Tag, v.Value)
+		}
+	})
+
+	t.Run("FingerprintManaged distinguishes values with attached '#'", func(t *testing.T) {
+		paths := [][]string{{"model"}}
+		f := func(doc string) ([32]byte, error) { return FingerprintManaged([]byte(doc), paths) }
+		ab, err := f("model: a#b\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ac, err := f("model: a#c\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ab == ac {
+			t.Fatal("a#b and a#c collide: drift detection cannot tell the values apart")
+		}
+		abAgain, err := f("other: 1\nmodel: a#b\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if abAgain != ab {
+			t.Fatal("fingerprint changed when only unmanaged bytes changed")
+		}
+		// A whitespace-delimited comment is not part of the managed span.
+		withComment, err := f("model: a#b # note\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if withComment != ab {
+			t.Fatal("whitespace-delimited comment changed the managed fingerprint")
+		}
+		// A value whose '#' is comment-position still hashes the value bytes
+		// only (here: no value at all).
+		nullValue, err := f("model: # just a comment\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		emptyish, err := f("model:\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nullValue != emptyish {
+			t.Fatal("comment-only and bare null values fingerprint differently")
+		}
+	})
 }
 
 // findKeyPath walks the decoded document along path and returns the value
