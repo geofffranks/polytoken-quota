@@ -22,8 +22,10 @@ func FuzzFrontmatterBodyPreserved(f *testing.F) {
 	f.Add([]byte("body with --- dividers\n---\nstill body\n"))
 	f.Add([]byte(""))
 	f.Fuzz(func(t *testing.T, body []byte) {
-		// Avoid a body that itself begins with a frontmatter fence, which would
-		// shift the delimiter boundary; the contract is about a normal body.
+		// Conservative scope, not a correctness boundary: the closing fence
+		// is located before the body is scanned, so a body beginning with
+		// "---" does not shift the delimiter (the property suite covers that
+		// class); this target keeps bodies fence-free for simplicity.
 		if bytes.HasPrefix(body, []byte("---")) {
 			return
 		}
