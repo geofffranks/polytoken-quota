@@ -3,9 +3,11 @@ package reconcile
 // Task 14 reconcile property/fuzz corpus additions. FuzzReconcile (in
 // reconcile_fuzz_test.go) already pins determinism, no-disabled-references, and
 // no-injected-model. This file adds duplicate idempotence and stable-partition
-// determinism properties: applying the same seed twice yields identical plans,
-// and repeating a desired-chain entry does not change the projected survivor
-// ordering or introduce duplicates.
+// determinism properties: applying the same seed twice yields identical plans.
+// Repeating a desired-chain entry repeats its survivor occurrence in place —
+// the survivor projection preserves duplicate occurrences, so the fallback
+// list grows by exactly that repeated occurrence while the managed scalar
+// still surfaces only the first survivor.
 
 import (
 	"fmt"
@@ -19,9 +21,9 @@ import (
 // FuzzReconcileDuplicateIdempotent proves Build is idempotent under repeated
 // invocation and stable when a desired chain repeats an entry. For each seed it
 // builds a three-mapping target, duplicates the first survivor into the chain,
-// and asserts: (a) two Builds are identical, and (b) no emitted spelling is
-// duplicated beyond the explicit desired duplication, with survivors ordered as
-// a stable subsequence of the desired chain.
+// and asserts two Builds are identical. The duplicate occurrence survives in
+// place (the fallback list carries it); the scalar still carries only the
+// first survivor.
 func FuzzReconcileDuplicateIdempotent(f *testing.F) {
 	f.Add(uint8(0))
 	f.Add(uint8(0b000101)) // one reserve, one disabled
@@ -40,8 +42,9 @@ func FuzzReconcileDuplicateIdempotent(f *testing.F) {
 			t.Fatal("Build is not idempotent under duplicate entries")
 		}
 		// On a successful build, emitted full-default scalar spellings must each
-		// resolve to a managed, non-disabled mapping (no injected/duplicated
-		// survivor). An empty-chain error is a valid, deterministic outcome.
+		// resolve to a managed, non-disabled mapping (nothing injected; the
+		// duplicate occurrence lives in the fallback list, not the scalar). An
+		// empty-chain error is a valid, deterministic outcome.
 		if ea == nil {
 			assertNoInjectedOrDisabled(t, d, s, a)
 		}

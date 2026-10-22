@@ -49,8 +49,7 @@ func fuzzFixture(modes uint8) (policy.Desired, state.State, policy.Target) {
 
 // assertNoInjectedOrDisabled checks every emitted model spelling resolves to a
 // managed, non-disabled provider mapping (so the plan injects nothing foreign and
-// emits no disabled model). It uses the package's own mappingMode for an honest
-// check.
+// emits no disabled model). It uses the package's own MappingMode for the check.
 func assertNoInjectedOrDisabled(t *testing.T, d policy.Desired, s state.State, p Plan) {
 	t.Helper()
 	for _, e := range p.Edits {
