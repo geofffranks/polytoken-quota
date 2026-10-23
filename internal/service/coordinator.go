@@ -1068,6 +1068,10 @@ func (c *Coordinator) recordTargetOutcomes(s state.State, outcomes []TargetOutco
 			AttemptedAt:       now,
 		}
 		if o.Pending != nil {
+			// A failed attempt leaves the target on its last applied files.
+			// Carry that revision and time across consecutive failures.
+			ts.AppliedRevision = prior.AppliedRevision
+			ts.AppliedAt = prior.AppliedAt
 			pending := *o.Pending
 			pending.TargetID = o.TargetID
 			pending.AttemptedRevision = o.AttemptedRevision
