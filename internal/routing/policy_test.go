@@ -786,6 +786,107 @@ func TestRankSignalClustersChainTransitively(t *testing.T) {
 	eqOrder(t, Rank(in), "b", "c", "a")
 }
 
+// tieBandSnap builds a fresh, available snapshot with one qualifying two-day
+// window at exactly half elapsed relative to rankNow (reset 24h away), so the
+// use-it-or-lose-it signal is exactly 2 - 4*used. It reports available quota
+// data, which CheckEligibility requires before a provider can rank; the gate
+// tests' signalSnapshot intentionally omits that and cannot be reused here.
+func tieBandSnap(usedFrac float64) *quota.QuotaSnapshot {
+	return &quota.QuotaSnapshot{
+		MappingID:    "tieband",
+		CheckedAt:    rankNow,
+		Status:       quota.SourceFresh,
+		Availability: quota.QuotaAvailable,
+		Windows: []quota.QuotaWindow{{
+			Used:    fptr(usedFrac * 100),
+			Limit:   fptr(100),
+			ResetAt: tptr(rankNow.Add(24 * time.Hour)),
+			Period:  durptr(48 * time.Hour),
+		}},
+	}
+}
+
+// TestRankSignalTieBandBoundaryClasses pins cluster behavior at the 0.20
+// signal tie band itself, with below-band, exactly-at-band, and above-band
+// adjacent gaps in one deterministic fixture.
+//
+// Independent model (no production computation produces these expectations):
+// tieBandSnap uses one 48h window whose reset is exactly 24h away, so the
+// time-left and elapsed fractions are both exactly 0.5 and the signal is
+// 2*remaining - 2*used = 2 - 4*used:
+//
+//	used   0.48   0.50   0.52  -> +0.08    0.00   -0.08   (gaps 0.16: below)
+//	used   0.45   0.50   0.55  -> +0.20    0.00   -0.20   (gaps 0.20: at)
+//	used   0.44   0.50   0.56  -> +0.24    0.00   -0.24   (gaps 0.24: above)
+//
+// "gaps" are the adjacent differences of the sorted signals; with the zero
+// signal in the middle each adjacent gap equals the outer signal magnitude.
+// A new cluster starts when adjacent sorted signals differ by at least the
+// band, so the below case stays one cluster (one shared rank) while the at
+// and above cases split into three clusters (three ranks each). Floating
+// point: the computed at-band signals land just above the band constant
+// (0.20000000000000018 vs 0.200000000000000011, a fixed six-double gap that
+// the single-window arithmetic produces identically on every IEEE-754
+// platform), and the below-band gap lands at 0.16000000000000014 — both far
+// from a rounding flip.
+func TestRankSignalTieBandBoundaryClasses(t *testing.T) {
+	cases := []struct {
+		name      string
+		used      []float64 // per provider, high/mid/low signal order
+		weights   []int
+		wantOrder []string
+		wantRanks []int
+	}{
+		{
+			// Equal weights: with one cluster the semantic keys all tie, so
+			// the shared rank proves the single cluster; ID order breaks the
+			// presentation tie.
+			name:      "adjacent gaps 0.16 stay one cluster",
+			used:      []float64{0.48, 0.50, 0.52},
+			weights:   []int{1, 1, 1},
+			wantOrder: []string{"hi", "lo", "mid"},
+			wantRanks: []int{0, 0, 0},
+		},
+		{
+			// Inverted weights: the cluster key must decide before weight.
+			name:      "adjacent gaps exactly 0.20 split",
+			used:      []float64{0.45, 0.50, 0.55},
+			weights:   []int{1, 2, 3},
+			wantOrder: []string{"hi", "mid", "lo"},
+			wantRanks: []int{0, 1, 2},
+		},
+		{
+			name:      "adjacent gaps 0.24 split",
+			used:      []float64{0.44, 0.50, 0.56},
+			weights:   []int{1, 2, 3},
+			wantOrder: []string{"hi", "mid", "lo"},
+			wantRanks: []int{0, 1, 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ids := []string{"hi", "mid", "lo"}
+			var policies []ProviderPolicy
+			var obs []ProviderObs
+			for i, id := range ids {
+				policies = append(policies, ProviderPolicy{MappingID: id, Weight: tc.weights[i]})
+				obs = append(obs, ProviderObs{
+					MappingID: id, Mode: "normal",
+					Snapshot: tieBandSnap(tc.used[i]),
+				})
+			}
+			got := Rank(RankingInput{Now: rankNow, Policies: policies, Obs: obs})
+			eqOrder(t, got, tc.wantOrder...)
+			for i, wantRank := range tc.wantRanks {
+				if got.Entries[i].Rank != wantRank {
+					t.Fatalf("%s rank = %d, want %d (entries: %+v)",
+						got.Entries[i].MappingID, got.Entries[i].Rank, wantRank, got.Entries)
+				}
+			}
+		})
+	}
+}
+
 func TestRankSignalBeatsOffPeak(t *testing.T) {
 	offPeak := alwaysOffPeak(t)
 	// a: peak, signal +0.875. b: off-peak, signal -0.625. The signal gap

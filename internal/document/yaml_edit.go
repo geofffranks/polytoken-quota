@@ -277,7 +277,13 @@ func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, er
 	if val.Kind != yaml.SequenceNode {
 		if val.Kind == yaml.ScalarNode && val.Tag == "!!null" {
 			// A null-valued key (`key:` bare, or an explicit null spelling)
-			// becomes the parent of a new block sequence under the key line.
+			// becomes the parent of a new block sequence under the key line —
+			// unless it lives inside a flow-style collection, where the
+			// inserted block lines would break the flow context. Refuse
+			// before any bytes change.
+			if d.inFlowContext(val) {
+				return nil, newError("document: %q sits inside a flow-style collection (not editable; use block style)", strings.Join(path, "."))
+			}
 			return d.sequenceUnderKey(raw, val, keyNode, items)
 		}
 		return nil, newError("document: %q is not a sequence", strings.Join(path, "."))
@@ -309,21 +315,33 @@ func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, er
 // whose value is null. The key line is untouched except that an explicit null
 // spelling (null, ~, quoted "") is dropped from it, back to the separating
 // whitespace after the colon; a bare key keeps its line verbatim, including
-// any trailing comment. The block lands on the lines following the key, at
-// the key's indentation plus two spaces.
+// any trailing comment. When the null sits on its own line below the key,
+// that whole line (including any comment on it) is removed. The block lands
+// on the lines following the key, at the key's indentation plus two spaces.
 func (d *doc) sequenceUnderKey(raw []byte, val, keyNode *yaml.Node, items []string) ([]byte, error) {
 	if keyNode == nil {
 		return nil, newError("document: cannot locate key line for the null value")
 	}
+	if isImplicitNull(val) {
+		return d.appendSequenceBlock(raw, keyNode.Line, keyNode, items)
+	}
+	if val.Line > keyNode.Line {
+		// The null occupies its own line below the key (e.g. `k:\n  null`).
+		// Remove that line BEFORE inserting the block: the insertion point is
+		// the end of the key line, which precedes the removed region, so the
+		// insertion cannot shift it — while inserting first would shift the
+		// null's byte offsets and corrupt the removal.
+		out := splice(raw, d.offset(val.Line, 1), d.endOfLineWithNewline(val.Line), nil)
+		return d.appendSequenceBlock(out, keyNode.Line, keyNode, items)
+	}
+	// Key-line null: insert after the key line first, then remove the null
+	// token so the key reads bare above its new block, trimming back over its
+	// separating whitespace to the colon. The token's span precedes the
+	// insertion point, so the insertion does not shift these offsets.
 	out, err := d.appendSequenceBlock(raw, keyNode.Line, keyNode, items)
 	if err != nil {
 		return nil, err
 	}
-	if isImplicitNull(val) {
-		return out, nil
-	}
-	// Explicit null: remove the null token so the key reads bare above its
-	// new block, trimming back over its separating whitespace to the colon.
 	vs, ve := d.valueSpan(val)
 	ws := vs
 	for ws > 0 && (raw[ws-1] == ' ' || raw[ws-1] == '\t') {
@@ -451,8 +469,9 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 // Plain scalars span their complete source region: the first line's content
 // plus, in block context, every folded continuation line indented deeper than
 // the value's own key line. That covers multiline plain scalars (which
-// yaml.v3 reports at their first line/column only) and the content lines of
-// literal/folded block scalars, whose indicator the plain scan starts at.
+// yaml.v3 reports at their first line/column only). Literal/folded block
+// scalars span from their indicator through their last content line; see
+// blockScalarSpan.
 // Interior line breaks, blank lines, and continuation indentation belong to
 // the region; trailing whitespace on each line and a whitespace-delimited
 // comment do not. In flow context the region ends at the first flow
@@ -509,13 +528,17 @@ func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 	return d.blockPlainSpan(n, start)
 }
 
-// blockPlainSpan spans the source region of a plain (or block-indicator)
-// scalar value in block context. Continuation lines are those indented deeper
-// than the value's own line (the key line); blank lines join the region only
-// when a continuation follows them, and a comment line ends the scan (yaml
-// rejects a continuation after one). Trailing whitespace on each line and any
-// whitespace-delimited comment stay outside the span.
+// blockPlainSpan spans the source region of a plain scalar value in block
+// context. Continuation lines are those indented deeper than the value's own
+// line (the key line); blank lines join the region only when a continuation
+// follows them, and a comment line ends the scan (yaml rejects a continuation
+// after one). Trailing whitespace on each line and any whitespace-delimited
+// comment stay outside the span. Literal (|) and folded (>) block scalars are
+// content regions, not plain scalars, and get their own scan.
 func (d *doc) blockPlainSpan(n *yaml.Node, start int) (int, int) {
+	if n.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
+		return d.blockScalarSpan(n, start)
+	}
 	end := d.lineContentEnd(start)
 	keyIndent := d.lineIndent(d.offset(n.Line, 1))
 	for line := n.Line + 1; line < len(d.lines); line++ {
@@ -545,6 +568,72 @@ func (d *doc) blockPlainSpan(n *yaml.Node, start int) (int, int) {
 		end = d.lineContentEnd(lineStart)
 	}
 	return start, end
+}
+
+// blockScalarSpan spans the source region of a literal (|) or folded (>)
+// block scalar: the indicator on the key line through the last content line.
+// Inside the body every byte is content — a '#' begins no comment and blank
+// lines belong to the region — so the scan runs to the first non-empty line
+// indented shallower than the block's content indentation (or end of input).
+// The content indentation is the explicit indicator digit (relative to the
+// key line's indentation) when the header carries one, and otherwise the
+// indentation of the first non-empty body line; leading blank lines stay
+// inside the region either way. Trailing whitespace on the final content
+// line stays outside the span, matching the plain-scalar convention. A
+// comment on the header line ends that line's scan, but once a body extends
+// the region past it the comment sits inside the span (it presents the
+// value, like the quotes of a quoted scalar) and is replaced with it.
+func (d *doc) blockScalarSpan(n *yaml.Node, start int) (int, int) {
+	end := d.lineContentEnd(start)
+	keyIndent := d.lineIndent(d.offset(n.Line, 1))
+	contentIndent := 0
+	if digit := blockIndentIndicator(d.raw[start:end]); digit > 0 {
+		contentIndent = keyIndent + digit
+	}
+	for line := n.Line + 1; line < len(d.lines); line++ {
+		lineStart := d.lines[line]
+		if lineStart >= len(d.raw) {
+			break // nothing follows the final line terminator
+		}
+		ind := d.lineIndent(lineStart)
+		lineEnd := lineStart + ind
+		for lineEnd < len(d.raw) && d.raw[lineEnd] != '\n' && d.raw[lineEnd] != '\r' {
+			lineEnd++
+		}
+		if ind == lineEnd-lineStart {
+			continue // blank or whitespace-only line: block content candidate
+		}
+		if contentIndent == 0 {
+			contentIndent = ind // first non-empty body line fixes the indentation
+		}
+		if ind < contentIndent {
+			break // at or outside the block's indentation: not content
+		}
+		// The line is block content up to its last non-whitespace byte.
+		for lineEnd > lineStart && (d.raw[lineEnd-1] == ' ' || d.raw[lineEnd-1] == '\t') {
+			lineEnd--
+		}
+		end = lineEnd
+	}
+	return start, end
+}
+
+// blockIndentIndicator extracts the explicit indentation indicator digit from
+// a block scalar header (the bytes from the | or > indicator to the end of
+// its content, before any comment). It returns 0 when the header carries no
+// digit; the modifiers may appear in either order (|2-, |-2).
+func blockIndentIndicator(header []byte) int {
+	for i := 1; i < len(header); i++ {
+		switch c := header[i]; {
+		case c >= '1' && c <= '9':
+			return int(c - '0')
+		case c == '+' || c == '-':
+			// chomping indicator; keep scanning for the digit
+		default:
+			return 0
+		}
+	}
+	return 0
 }
 
 // flowPlainSpan spans a plain scalar inside a flow-style collection. Flow

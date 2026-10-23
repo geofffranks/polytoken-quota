@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // golden reads a testdata fixture, failing the test on any I/O error.
@@ -670,3 +672,279 @@ func TestBoolInsertMissingModelNonStandardIndent(t *testing.T) {
 		t.Fatalf("result does not parse: %v", err)
 	}
 }
+
+// ----- Block scalar regions (literal/folded) --------------------------------
+
+// TestScalarEditBlockLiteralHashContent pins the block scalar contract: a
+// literal/folded block body is a content region, so a '#' line inside it is
+// scalar text, not a comment, and the value's span covers the whole region.
+// Replacing or removing the value must leave no orphan body lines behind.
+func TestScalarEditBlockLiteralHashContent(t *testing.T) {
+	in := []byte("model: |\n  # content\n  next\nother: 1\n")
+	out, err := EditYAML(in, []Edit{scalarEdit("model", "new")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "model: new\nother: 1\n"; got != want {
+		t.Fatalf("block literal replace:\n got=%q\nwant=%q", got, want)
+	}
+	// Removing the value drops the whole region, leaving the sibling.
+	out, err = EditYAML(in, []Edit{{Path: []string{"model"}, Remove: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "other: 1\n"; got != want {
+		t.Fatalf("block literal remove:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestBlockScalarRegionExactPreservation exercises replace and remove across
+// the literal/folded shapes whose spans the plain-scalar scan historically
+// got wrong: hash-first content, inline '#', blank lines, explicit
+// indentation indicators (including one where auto-detection would pick the
+// wrong indent), chomping indicators, a header comment, and nesting.
+// Expectations are exact bytes; every case must also re-parse.
+func TestBlockScalarRegionExactPreservation(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          string
+		path        []string
+		wantSet     string // after replacing the value with "new"
+		wantRemoved string // after removing the key
+	}{
+		{
+			name:        "hash-first literal body",
+			in:          "model: |\n  # content\n  next\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "inline hash stays content",
+			in:          "model: |\n  a # not a comment\n  b\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "blank lines inside the body",
+			in:          "model: |\n  a\n\n  # c\n  b\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name: "explicit indicator with auto-detect trap",
+			// |2 fixes the block indent at 2: "    # four" (indent 4) and
+			// "  x" (indent 2) are both content; auto-detection from the
+			// first non-empty line would have picked 4 and cut "  x" off.
+			in:          "model: |2\n    # four\n  x\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "explicit indicator under a nested key",
+			in:          "top:\n  model: |2\n    # deep\n    v\n  keep: 1\n",
+			path:        []string{"top", "model"},
+			wantSet:     "top:\n  model: new\n  keep: 1\n",
+			wantRemoved: "top:\n  keep: 1\n",
+		},
+		{
+			name:        "folded style",
+			in:          "model: >\n  # folded\n  text\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "strip chomping indicator",
+			in:          "model: |-\n  # x\n  y\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			// The header comment sits on the key line physically between the
+			// indicator and the body, so it is part of the replaced region
+			// (like the quotes of a quoted scalar) and goes with the value.
+			name:        "header comment is part of the region",
+			in:          "model: | # header\n  a\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(tc.in)
+			out, err := EditYAML(in, []Edit{{Path: tc.path, Kind: Scalar, Scalar: strPtr("new")}})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("replaced output does not parse: %v", err)
+			}
+			out, err = EditYAML(in, []Edit{{Path: tc.path, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("removed output does not parse: %v", err)
+			}
+		})
+	}
+}
+
+// TestBlockScalarRegionFingerprintAndInsert proves the managed fingerprint
+// hashes the whole block region (not just the indicator) and that inserting
+// a sibling key next to a block scalar keeps every byte of the region.
+func TestBlockScalarRegionFingerprintAndInsert(t *testing.T) {
+	paths := [][]string{{"model"}}
+	a := []byte("model: |\n  # content\n  next\nother: 1\n")
+	// Same managed bytes in a different document position with different
+	// sibling content: the model fingerprint must not move.
+	b := []byte("other: 2\nmodel: |\n  # content\n  next\n")
+	// A changed '#' line is content, so it must change the fingerprint.
+	c := []byte("model: |\n  # CHANGED\n  next\nother: 1\n")
+	fpA, err := FingerprintManaged(a, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpB, err := FingerprintManaged(b, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpC, err := FingerprintManaged(c, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA != fpB {
+		t.Fatal("same block content fingerprinted differently across sibling changes")
+	}
+	if fpA == fpC {
+		t.Fatal("changed '#' block content did not change the fingerprint")
+	}
+	// Editing the sibling leaves the block region (and its fingerprint) alone.
+	out, err := EditYAML(a, []Edit{scalarEdit("other", "nine")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "model: |\n  # content\n  next\nother: nine\n"; got != want {
+		t.Fatalf("sibling edit touched the block region:\n got=%q\nwant=%q", got, want)
+	}
+	fpOut, err := FingerprintManaged(out, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpOut != fpA {
+		t.Fatal("sibling edit changed the model fingerprint")
+	}
+	// Inserting an absent key appends after the block scalar's sibling,
+	// byte-identical for the existing lines.
+	out, err = EditYAML(a, []Edit{scalarEdit("extra", "x")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "model: |\n  # content\n  next\nother: 1\nextra: x\n"; got != want {
+		t.Fatalf("insert beside a block scalar:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// ----- Sequence refusal inside flow collections ------------------------------
+
+// TestSequenceEditFlowNullRefused refuses a sequence set whose null-valued
+// target sits inside a flow-style collection: rendering a block sequence
+// under the key line would break the flow context and produce invalid YAML.
+// The refusal must happen before any byte changes, so the input is intact
+// after the failed edit.
+func TestSequenceEditFlowNullRefused(t *testing.T) {
+	in := []byte("d: {k: null, m: y}\n")
+	out, err := EditYAML(in, []Edit{{Path: []string{"d", "k"}, Kind: Sequence, Sequence: []string{"a", "b"}}})
+	if err == nil {
+		t.Fatalf("flow-enclosed null accepted, produced:\n%s", out)
+	}
+	if out != nil {
+		t.Fatalf("refused edit returned modified bytes:\n%s", out)
+	}
+	if !bytes.Equal(in, []byte("d: {k: null, m: y}\n")) {
+		t.Fatalf("refused edit mutated the input:\n%s", in)
+	}
+	// The same key outside a flow collection still converts (control).
+	out, err = EditYAML([]byte("d:\n  k: null\n  m: y\n"), []Edit{{Path: []string{"d", "k"}, Kind: Sequence, Sequence: []string{"a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "d:\n  k:\n    - a\n  m: y\n"; got != want {
+		t.Fatalf("block control case:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// ----- Sequence onto a null on its own line ----------------------------------
+
+// TestSequenceEditUnderLaterLineNull covers the null value spelled on its
+// own line below the key: the null's line must be removed BEFORE the item
+// block is inserted, or the insertion shifts the removal offsets and the
+// output keeps the null and loses the first item.
+func TestSequenceEditUnderLaterLineNull(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "plain null below the key",
+			in:   "k:\n  null\nother: 1\n",
+			want: "k:\n  - a\n  - b\nother: 1\n",
+		},
+		{
+			name: "tilde below the key with a comment above",
+			// The comment line above the null is untouched; the null's own
+			// line (indent plus token) is what disappears.
+			in:   "k:\n  # note\n  ~\nother: 1\n",
+			want: "k:\n  - a\n  - b\n  # note\nother: 1\n",
+		},
+		{
+			name: "null with trailing comment on its own line",
+			// The comment documents the removed null, so it goes with it.
+			in:   "k:\n  null # trailing\nother: 1\n",
+			want: "k:\n  - a\n  - b\nother: 1\n",
+		},
+		{
+			name: "null on the unterminated final line",
+			in:   "other: 0\nk:\n  null",
+			want: "other: 0\nk:\n  - a\n  - b\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := EditYAML([]byte(tc.in), []Edit{{Path: []string{"k"}, Kind: Sequence, Sequence: []string{"a", "b"}}})
+			if err != nil {
+				t.Fatalf("later-line null sequence set rejected: %v", err)
+			}
+			if got, want := string(out), tc.want; got != want {
+				t.Fatalf("later-line null sequence set:\n got=%q\nwant=%q", got, want)
+			}
+			var doc yaml.Node
+			if err := yaml.Unmarshal(out, &doc); err != nil {
+				t.Fatalf("output does not parse: %v\n%q", err, out)
+			}
+		})
+	}
+	// CRLF variant: the removed null line takes its CRLF terminator with it.
+	in := "k:\r\n  null\r\nother: 1\r\n"
+	out, err := EditYAML([]byte(in), []Edit{{Path: []string{"k"}, Kind: Sequence, Sequence: []string{"a", "b"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "k:\r\n  - a\r\n  - b\r\nother: 1\r\n"; got != want {
+		t.Fatalf("CRLF later-line null sequence set:\n got=%q\nwant=%q", got, want)
+	}
+}
+
