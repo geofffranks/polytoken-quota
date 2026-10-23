@@ -13,21 +13,19 @@ package document
 //
 // Deliberate generated scope (matches the reconciler's real file shapes):
 // documents use one uniform terminator (LF or CRLF, optional BOM), one
-// indentation width per document, single-token scalars, and block sequences
-// of single-line items. The generated space DOES include documents whose
-// final line lacks a terminator (finalNL) and plain scalars whose content
-// carries an attached '#' (style 'h', e.g. a#b): yaml.v3 reads those as
-// supported plain shapes, and the model mirrors the editor's documented
-// behavior for them — an insertion at an unterminated final line first
-// terminates that line, and a replacement rewrites the whole attached-#
-// span. Values containing '#' are written single-quoted by both sides, and
-// multi-token plain scalars (internal whitespace) remain outside the
-// generated space: the locator spans plain values only up to the first
-// whitespace byte, which matches single-token values. Scalar/boolean value
-// sets onto an existing bare (null-valued) key are likewise excluded at
-// replay time (setsBareKey): that replacement shape is currently corrupted
-// (the value is glued to the colon) and awaits an explicit production-repair
-// scope decision, so the generated space asserts neither spelling.
+// indentation width per document, and block sequences of single-line items.
+// The generated space DOES include documents whose final line lacks a
+// terminator (finalNL), plain scalars whose content carries an attached '#'
+// (style 'h', e.g. a#b), multi-token plain scalars with internal whitespace
+// (style 'p'), and a folded two-line plain scalar (style 'm'): yaml.v3 reads
+// all of those as supported plain shapes, and the model mirrors the editor's
+// documented behavior for them — an insertion at an unterminated final line
+// first terminates that line, an attached-'#'/whitespace value span is
+// replaced whole, and a folded scalar's replacement is written inline. Values
+// containing '#' are written single-quoted by both sides. Scalar, boolean,
+// and nonempty sequence sets onto an existing bare (null-valued) key are in
+// the generated space: a bare key gains the documented ": " separation, and a
+// sequence set renders the block beneath the key line.
 
 import (
 	"bytes"
@@ -60,7 +58,8 @@ const (
 // suffix (including its leading space); style records the existing scalar
 // spelling so replacement can preserve it ('p' plain, 's' single-quoted,
 // 'd' double-quoted, 'h' plain with attached '#' content — a shape only
-// plain style can carry, rendered verbatim).
+// plain style can carry, rendered verbatim, and 'm' a folded two-line plain
+// scalar rendered across a continuation line indented two past the key).
 type propNode struct {
 	key      string
 	kind     propKind
@@ -202,6 +201,21 @@ func propRenderNode(b *strings.Builder, n *propNode, nl string) {
 	b.WriteString(":")
 	switch n.kind {
 	case propScalar:
+		if n.style == 'm' {
+			// A folded two-line plain scalar: the first token on the key
+			// line, the second on a continuation line indented two past the
+			// key. yaml.v3 folds it to the single spaced string in n.scalar.
+			first, second, ok := strings.Cut(n.scalar, " ")
+			if !ok {
+				panic("model: 'm' scalar must contain exactly one space: " + n.scalar)
+			}
+			b.WriteString(" ")
+			b.WriteString(first)
+			b.WriteString(nl)
+			b.WriteString(propSpaces(n.indent + 2))
+			b.WriteString(second)
+			break
+		}
 		b.WriteString(" ")
 		b.WriteString(spellScalar(n))
 	case propBool:
@@ -458,6 +472,18 @@ func (m *docModel) apply(e Edit) error {
 			m.deleteNode(parent, node)
 			return nil
 		}
+		if node.kind == propNull {
+			// A bare key gains the sequence block beneath its line at the
+			// key's indentation plus two. When the key is the document's
+			// final line, the block also terminates it.
+			node.kind = propSeq
+			node.items = append([]string(nil), e.Sequence...)
+			node.seqInd = node.indent + 2
+			if !m.finalNL && m.isLastNode(node) {
+				m.finalNL = true
+			}
+			return nil
+		}
 		if node.kind != propSeq {
 			return errors.New("model: not a sequence")
 		}
@@ -480,6 +506,10 @@ func (m *docModel) apply(e Edit) error {
 		}
 		node.kind = propScalar
 		node.scalar = *e.Scalar
+		if node.style == 'm' {
+			// The folded two-line spelling is replaced by an inline write.
+			node.style = 'p'
+		}
 		if node.style != 's' && node.style != 'd' && needsQuoteModel(*e.Scalar) {
 			// A plain node whose replacement needs quoting is re-parsed as
 			// single-quoted, so later replacements inherit that style.
@@ -520,6 +550,15 @@ func (m *docModel) deleteNode(parent *propNode, node *propNode) {
 	}
 }
 
+// isLastNode reports whether node renders as the document's final line (the
+// last tail key, or the last root key when the tail is empty).
+func (m *docModel) isLastNode(node *propNode) bool {
+	if len(m.tail) > 0 {
+		return m.tail[len(m.tail)-1] == node
+	}
+	return len(m.root) > 0 && m.root[len(m.root)-1] == node
+}
+
 // ---------------------------------------------------------------------------
 // Constructed template and edit generation
 
@@ -529,12 +568,16 @@ var propScalarValues = []string{
 	// Attached-'#' values: a plain write would re-read the '#' as a comment
 	// start, so both model and editor emit these single-quoted.
 	"v#2", "code#extra",
+	// Multi-token plain scalars: yaml.v3 reads the whole internal-whitespace
+	// run as one value, and the editor replaces the whole span.
+	"hello world", "two plain words",
 }
 
 // propPlainHashValues are values an existing node may carry in plain style
-// with an attached '#': single-token scalars that yaml.v3 reads back exactly
-// (a '#' begins a comment only after whitespace or at the value start).
-var propPlainHashValues = []string{"a#b", "mini#1"}
+// with an attached '#': scalars that yaml.v3 reads back exactly (a '#'
+// begins a comment only after whitespace or at the value start). The last
+// entry also carries internal whitespace, covering the combined shape.
+var propPlainHashValues = []string{"a#b", "mini#1", "two w#rds"}
 
 var propSeqItemValues = []string{"minime/gemma", "zai/glm-5.2", "codex/gpt-5.6-sol", "yes", "42", "mini#2"}
 
@@ -594,13 +637,20 @@ func drawTemplate(t *rapid.T) *docModel {
 	poly.children = append(poly.children, pModel)
 
 	pReason := &propNode{key: "reasoning", kind: propScalar, indent: w}
-	switch special {
-	case 0:
-		pReason.scalar, pReason.style = "high", 'p'
-	case 1:
-		pReason.scalar, pReason.style = "it's fine", 's'
-	default:
-		pReason.scalar, pReason.style = `say "hi"`, 'd'
+	multilinePlain := rapid.Bool().Draw(t, "multilinePlain")
+	if multilinePlain {
+		// A folded two-line plain scalar: two tokens across a continuation
+		// line, read back by yaml.v3 as one spaced string.
+		pReason.scalar, pReason.style = "high plus", 'm'
+	} else {
+		switch special {
+		case 0:
+			pReason.scalar, pReason.style = "high", 'p'
+		case 1:
+			pReason.scalar, pReason.style = "it's fine", 's'
+		default:
+			pReason.scalar, pReason.style = `say "hi"`, 'd'
+		}
 	}
 	if reasoningComment {
 		pReason.comment = " # reasoning"
@@ -684,8 +734,8 @@ func (m *docModel) pathSpecs() []propPathSpec {
 
 // drawEdit draws one bounded edit against the template's path pool.
 // History ops are drawn against the pristine template and replayed against
-// the mutating model, so state-dependent op exclusions (setsBareKey) are
-// applied at replay time in TestPropertyYAMLEditHistories, not here.
+// the mutating model, so state-dependent acceptance is evaluated at replay
+// time by the model itself in TestPropertyYAMLEditHistories.
 func (m *docModel) drawEdit(t *rapid.T) Edit {
 	spec := rapid.SampledFrom(m.pathSpecs()).Draw(t, "path")
 	kind := rapid.SampledFrom(spec.kinds).Draw(t, "kind")
@@ -709,22 +759,6 @@ func (m *docModel) drawEdit(t *rapid.T) Edit {
 		e.Remove = true
 	}
 	return e
-}
-
-// setsBareKey reports whether e writes a scalar or boolean value onto an
-// existing bare (null-valued) key — a supported replacement shape the editor
-// currently mishandles (the value is glued to the colon, `k:v`, so the
-// result no longer decodes as that key). Replay skips these ops: until a
-// production-repair scope decision covers the class, the generated space
-// asserts neither the documented `k: v` spelling nor the glued bytes.
-// Nonempty sequence sets on the same target stay in the pool because both
-// model and editor refuse them.
-func (m *docModel) setsBareKey(e Edit) bool {
-	if e.Remove || (e.Kind != Scalar && e.Kind != Boolean) {
-		return false
-	}
-	_, node := m.get(e.Path)
-	return node != nil && node.kind == propNull
 }
 
 // editLabel renders an edit readably for failure output.

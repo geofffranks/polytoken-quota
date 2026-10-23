@@ -9,18 +9,16 @@ package document
 // caller-byte immutability on every refusal.
 //
 // Generated scope notes: valid generated documents use one uniform
-// terminator and indentation width, single-token scalars, and block
-// sequences of single-line items. Documents whose final line lacks a
-// terminator and plain scalars with attached '#' content (e.g. a#b) ARE in
-// the generated space; the independent model mirrors the editor's documented
-// behavior for both (insertions terminate an unterminated final line first;
-// attached-'#' spans are replaced whole and '#' values are written quoted).
-// Multi-token plain scalars (internal whitespace) remain outside the
-// generated space: the locator spans plain values only up to the first
-// whitespace byte. Scalar/boolean value sets onto an existing bare
-// (null-valued) key are excluded at replay time (setsBareKey) for the same
-// reason: that supported replacement shape is currently corrupted, and the
-// suite awaits an explicit production-repair scope decision for it.
+// terminator and indentation width and block sequences of single-line items.
+// Documents whose final line lacks a terminator and plain scalars with
+// attached '#' content (e.g. a#b) ARE in the generated space; the independent
+// model mirrors the editor's documented behavior for both (insertions
+// terminate an unterminated final line first; attached-'#' spans are replaced
+// whole and '#' values are written quoted). So are multi-token plain scalars
+// with internal whitespace, a folded two-line plain scalar, and scalar,
+// boolean, and nonempty sequence sets onto an existing bare (null-valued)
+// key: bare-key value sets write the documented ": " separation, and a
+// sequence set renders the block beneath the key line.
 
 import (
 	"bytes"
@@ -155,6 +153,11 @@ func propInverseOp(pre *docModel, e Edit) (Edit, bool) {
 		// the original position.
 		return Edit{}, false
 	}
+	if node.kind == propNull {
+		// A set onto a bare key adds ": v" or the block beneath the key
+		// line; restoring the value cannot restore the bare spelling.
+		return Edit{}, false
+	}
 	switch node.kind {
 	case propBool:
 		v := node.boolV
@@ -164,6 +167,11 @@ func propInverseOp(pre *docModel, e Edit) (Edit, bool) {
 			// An attached-'#' original is only valid as plain bytes, but any
 			// restore write of it is re-emitted single-quoted, so no scalar
 			// restore of an 'h' node is byte-exact.
+			return Edit{}, false
+		}
+		if node.style == 'm' {
+			// A folded two-line original is restored inline, not across its
+			// continuation line, so the restore is not byte-exact.
 			return Edit{}, false
 		}
 		if (node.style == 'p') && e.Kind == Scalar && e.Scalar != nil && needsQuoteModel(*e.Scalar) {
@@ -197,12 +205,6 @@ func TestPropertyYAMLEditHistories(t *testing.T) {
 		cur := tpl.render()
 		for i, op := range ops {
 			stage := "history op " + editLabel(op)
-			if tpl.setsBareKey(op) {
-				// State-dependent exclusion (see setsBareKey): replay skips
-				// value sets onto bare keys instead of asserting either
-				// spelling of a mishandled supported shape.
-				continue
-			}
 			pre := propCloneBytes(cur)
 			modelErr := tpl.apply(op)
 			out, err := EditYAML(cur, []Edit{op})

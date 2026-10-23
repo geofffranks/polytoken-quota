@@ -190,7 +190,8 @@ func (d *doc) resolveValue(path []string) (val *yaml.Node, keyNode *yaml.Node, p
 
 // setScalar replaces the scalar value at path with v, preserving any surrounding
 // quoting style. If the key is absent, it is inserted at the parent mapping's
-// indentation (or the document's for a top-level key).
+// indentation (or the document's for a top-level key). A bare key (`k:` with no
+// value) gains the documented ": " separation instead of a glued `k:v`.
 func (d *doc) setScalar(raw []byte, path []string, v string) ([]byte, error) {
 	val, _, _, exists, err := d.resolveValue(path)
 	if err != nil {
@@ -201,6 +202,12 @@ func (d *doc) setScalar(raw []byte, path []string, v string) ([]byte, error) {
 	}
 	if val == nil || val.Kind != yaml.ScalarNode {
 		return nil, newError("document: %q is not a scalar", strings.Join(path, "."))
+	}
+	if isImplicitNull(val) {
+		// `key:` with no value: the null node occupies no bytes, so splice the
+		// separated value in place (any trailing comment keeps its spacing).
+		start := d.offset(val.Line, val.Column)
+		return splice(raw, start, start, []byte(" "+encodeScalar(v, 0))), nil
 	}
 	start, end := d.valueSpan(val)
 	return splice(raw, start, end, []byte(emitScalarValue(val, v))), nil
@@ -228,18 +235,23 @@ func (d *doc) setBool(raw []byte, path []string, v bool) ([]byte, error) {
 	if val == nil {
 		return nil, newError("document: %q has no value node", strings.Join(path, "."))
 	}
-	if val == nil || val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
-		// Allow editing a bool that happens to be untyped-tagged; still replace
-		// the span. But refuse sequences/mappings.
-		if val != nil && (val.Kind == yaml.MappingNode || val.Kind == yaml.SequenceNode) {
-			return nil, newError("document: %q is not a boolean", strings.Join(path, "."))
-		}
-	}
-	start, end := d.valueSpan(val)
 	rep := "false"
 	if v {
 		rep = "true"
 	}
+	if isImplicitNull(val) {
+		// `key:` with no value: write the separated literal, not `k:true`.
+		start := d.offset(val.Line, val.Column)
+		return splice(raw, start, start, []byte(" "+rep)), nil
+	}
+	if val.Kind != yaml.ScalarNode || val.Tag != "!!bool" {
+		// Allow editing a bool that happens to be untyped-tagged; still replace
+		// the span. But refuse sequences/mappings.
+		if val.Kind == yaml.MappingNode || val.Kind == yaml.SequenceNode {
+			return nil, newError("document: %q is not a boolean", strings.Join(path, "."))
+		}
+	}
+	start, end := d.valueSpan(val)
 	return splice(raw, start, end, []byte(rep)), nil
 }
 
@@ -249,7 +261,7 @@ func (d *doc) setBool(raw []byte, path []string, v bool) ([]byte, error) {
 // the key is absent. An empty list removes the key (matching the reconciler's
 // Remove semantics for fallback_models).
 func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, error) {
-	val, _, _, exists, err := d.resolveValue(path)
+	val, keyNode, _, exists, err := d.resolveValue(path)
 	if err != nil {
 		return nil, err
 	}
@@ -263,6 +275,11 @@ func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, er
 		return d.removeKey(raw, path)
 	}
 	if val.Kind != yaml.SequenceNode {
+		if val.Kind == yaml.ScalarNode && val.Tag == "!!null" {
+			// A null-valued key (`key:` bare, or an explicit null spelling)
+			// becomes the parent of a new block sequence under the key line.
+			return d.sequenceUnderKey(raw, val, keyNode, items)
+		}
 		return nil, newError("document: %q is not a sequence", strings.Join(path, "."))
 	}
 	// A flow-style sequence (`k: [a, b]`) shares the key's line, so a block-style
@@ -286,6 +303,67 @@ func (d *doc) setSequence(raw []byte, path []string, items []string) ([]byte, er
 	}
 	block := sequenceBlock(items, ind, string(d.newline))
 	return splice(raw, start, end, block), nil
+}
+
+// sequenceUnderKey renders items as a block sequence beneath an existing key
+// whose value is null. The key line is untouched except that an explicit null
+// spelling (null, ~, quoted "") is dropped from it, back to the separating
+// whitespace after the colon; a bare key keeps its line verbatim, including
+// any trailing comment. The block lands on the lines following the key, at
+// the key's indentation plus two spaces.
+func (d *doc) sequenceUnderKey(raw []byte, val, keyNode *yaml.Node, items []string) ([]byte, error) {
+	if keyNode == nil {
+		return nil, newError("document: cannot locate key line for the null value")
+	}
+	out, err := d.appendSequenceBlock(raw, keyNode.Line, keyNode, items)
+	if err != nil {
+		return nil, err
+	}
+	if isImplicitNull(val) {
+		return out, nil
+	}
+	// Explicit null: remove the null token so the key reads bare above its
+	// new block, trimming back over its separating whitespace to the colon.
+	vs, ve := d.valueSpan(val)
+	ws := vs
+	for ws > 0 && (raw[ws-1] == ' ' || raw[ws-1] == '\t') {
+		ws--
+	}
+	if ws == 0 || raw[ws-1] != ':' {
+		ws = vs // defensive: only strip separation space that follows a colon
+	}
+	return splice(out, ws, ve, nil), nil
+}
+
+// appendSequenceBlock inserts the item lines of a block sequence (one
+// "- item" line per item, at the key's indentation plus two) directly after
+// the given key line. When the key line is the document's unterminated final
+// line, it is terminated first so the block starts on its own line.
+func (d *doc) appendSequenceBlock(raw []byte, keyLine int, keyNode *yaml.Node, items []string) ([]byte, error) {
+	itemInd := d.keyIndent(keyNode) + 2
+	insertAt := d.endOfLineWithNewline(keyLine)
+	nl := string(d.newline)
+	pad := strings.Repeat(" ", itemInd)
+	var b strings.Builder
+	if d.finalLineUnterminated(raw, insertAt) {
+		b.WriteString(nl)
+	}
+	for _, it := range items {
+		b.WriteString(pad)
+		b.WriteString("- ")
+		b.WriteString(encodeScalar(it, itemInd))
+		b.WriteString(nl)
+	}
+	return splice(raw, insertAt, insertAt, []byte(b.String())), nil
+}
+
+// keyIndent returns the indentation of the line carrying the given key node;
+// it is the base indentation for blocks written beneath that key.
+func (d *doc) keyIndent(keyNode *yaml.Node) int {
+	if keyNode == nil {
+		return 0
+	}
+	return d.lineIndent(d.offset(keyNode.Line, 1))
 }
 
 // insertSequenceKey inserts a new block-sequence key (e.g. fallback_models)
@@ -359,17 +437,9 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 		return nil, newError("document: %q is inside a flow-style mapping (not removable; use block style)", strings.Join(path, "."))
 	}
 	lineStart := d.offset(keyNode.Line, 1)
-	// End of the removed region: end of the last line occupied by the value.
-	lastLine := val.Line
-	if val.Content != nil {
-		for _, c := range allNodes(val) {
-			if c != nil && c.Line > lastLine {
-				lastLine = c.Line
-			}
-		}
-	}
-	// Erase from lineStart up to and including the newline that ends lastLine.
-	lineEnd := d.endOfLineWithNewline(lastLine)
+	// End of the removed region: end of the last line occupied by the value,
+	// including the later lines of a multiline scalar value.
+	lineEnd := d.endOfLineWithNewline(d.valueBlockEnd(val))
 	return splice(raw, lineStart, lineEnd, nil), nil
 }
 
@@ -377,6 +447,16 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 // including its surrounding quotes for quoted scalars. yaml.v3 reports the
 // node column at the opening quote for single/double-quoted scalars and at the
 // first value byte for plain scalars, so unquoted values need no adjustment.
+//
+// Plain scalars span their complete source region: the first line's content
+// plus, in block context, every folded continuation line indented deeper than
+// the value's own key line. That covers multiline plain scalars (which
+// yaml.v3 reports at their first line/column only) and the content lines of
+// literal/folded block scalars, whose indicator the plain scan starts at.
+// Interior line breaks, blank lines, and continuation indentation belong to
+// the region; trailing whitespace on each line and a whitespace-delimited
+// comment do not. In flow context the region ends at the first flow
+// indicator instead.
 func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 	start := d.offset(n.Line, n.Column)
 	if n.Style == yaml.DoubleQuotedStyle {
@@ -411,21 +491,144 @@ func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 		}
 		return start, end
 	}
-	// Plain scalar: span the run of scalar bytes from start. A '#' ends the
-	// value only where a comment may begin. It cannot begin one after scalar
-	// content (yaml.v3 reads `model: a#b` as the string a#b), and the scan
-	// already stops at the whitespace a comment would need, so a '#' reached
-	// past the first byte is part of the value. A '#' on the first value byte
-	// itself belongs to a comment (the value is empty; a null node's column
-	// can land there when no value precedes the comment).
+	if n.Kind != yaml.ScalarNode {
+		// Non-scalar value reached through the generic fingerprint path: keep
+		// the historical inline scan for that shape.
+		end := start
+		for end < len(d.raw) && !isValueTerminator(d.raw[end]) {
+			if end == start && d.raw[end] == '#' {
+				break
+			}
+			end++
+		}
+		return start, end
+	}
+	if d.inFlowContext(n) {
+		return d.flowPlainSpan(start)
+	}
+	return d.blockPlainSpan(n, start)
+}
+
+// blockPlainSpan spans the source region of a plain (or block-indicator)
+// scalar value in block context. Continuation lines are those indented deeper
+// than the value's own line (the key line); blank lines join the region only
+// when a continuation follows them, and a comment line ends the scan (yaml
+// rejects a continuation after one). Trailing whitespace on each line and any
+// whitespace-delimited comment stay outside the span.
+func (d *doc) blockPlainSpan(n *yaml.Node, start int) (int, int) {
+	end := d.lineContentEnd(start)
+	keyIndent := d.lineIndent(d.offset(n.Line, 1))
+	for line := n.Line + 1; line < len(d.lines); line++ {
+		lineStart := d.lines[line]
+		if lineStart >= len(d.raw) {
+			break // nothing follows the final line terminator
+		}
+		i := lineStart
+		for i < len(d.raw) && d.raw[i] == ' ' {
+			i++
+		}
+		lineEnd := i
+		for lineEnd < len(d.raw) && d.raw[lineEnd] != '\n' && d.raw[lineEnd] != '\r' {
+			lineEnd++
+		}
+		if i == lineEnd {
+			continue // blank or whitespace-only line: folded newline candidate
+		}
+		if d.raw[i] == '#' {
+			break // a comment line cannot precede a continuation
+		}
+		if i-lineStart <= keyIndent {
+			break // at or outside the mapping's indentation: not a continuation
+		}
+		// The line continues the scalar up to its content end: a
+		// whitespace-delimited comment and trailing whitespace stay outside.
+		end = d.lineContentEnd(lineStart)
+	}
+	return start, end
+}
+
+// flowPlainSpan spans a plain scalar inside a flow-style collection. Flow
+// indicators (, [ ] { }) end the scalar, as does a whitespace-preceded '#'
+// comment; internal whitespace and a '#' attached to content stay inside it.
+// The scan continues across line breaks (a flow scalar may fold over lines)
+// and trims trailing whitespace, including the final line break when the
+// scalar closes on a later line.
+func (d *doc) flowPlainSpan(start int) (int, int) {
 	end := start
-	for end < len(d.raw) && !isValueTerminator(d.raw[end]) {
-		if end == start && d.raw[end] == '#' {
+	for end < len(d.raw) {
+		b := d.raw[end]
+		if b == ',' || b == '[' || b == ']' || b == '{' || b == '}' {
+			break
+		}
+		if b == '#' && (end == start || d.raw[end-1] == ' ' || d.raw[end-1] == '\t') {
 			break
 		}
 		end++
 	}
+	for end > start && (d.raw[end-1] == ' ' || d.raw[end-1] == '\t') {
+		end--
+	}
+	if end > start && d.raw[end-1] == '\n' {
+		end--
+		if end > start && d.raw[end-1] == '\r' {
+			end--
+		}
+	}
 	return start, end
+}
+
+// lineContentEnd returns the offset just past a line's content, scanning from
+// offset o to the line terminator, a whitespace-delimited '#' comment, and
+// then back over trailing spaces and tabs. A '#' at o itself begins a comment
+// (an empty value).
+func (d *doc) lineContentEnd(o int) int {
+	end := o
+	for end < len(d.raw) && d.raw[end] != '\n' && d.raw[end] != '\r' {
+		if d.raw[end] == '#' && (end == o || d.raw[end-1] == ' ' || d.raw[end-1] == '\t') {
+			break
+		}
+		end++
+	}
+	for end > o && (d.raw[end-1] == ' ' || d.raw[end-1] == '\t') {
+		end--
+	}
+	return end
+}
+
+// inFlowContext reports whether n sits inside a flow-style mapping or
+// sequence between the document root and n. Flow context changes which bytes
+// terminate a plain scalar and disables block-style line continuation.
+func (d *doc) inFlowContext(n *yaml.Node) bool {
+	if n == nil {
+		return false
+	}
+	var walk func(cur *yaml.Node, flow bool) bool
+	walk = func(cur *yaml.Node, flow bool) bool {
+		if cur == nil {
+			return false
+		}
+		if cur == n {
+			return flow
+		}
+		childFlow := flow ||
+			(cur.Kind == yaml.MappingNode || cur.Kind == yaml.SequenceNode) &&
+				cur.Style&yaml.FlowStyle != 0
+		for _, c := range cur.Content {
+			if walk(c, childFlow) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(d.root, false)
+}
+
+// isImplicitNull reports whether n is the valueless `key:` form: a plain
+// empty null node occupying no bytes of its own. Explicit null spellings
+// (null, ~, quoted "") carry bytes and keep the ordinary span path.
+func isImplicitNull(n *yaml.Node) bool {
+	return n != nil && n.Kind == yaml.ScalarNode &&
+		n.Tag == "!!null" && n.Value == "" && n.Style == 0
 }
 
 // sequenceSpan returns the byte range covering all lines of a block sequence
@@ -606,13 +809,41 @@ func (d *doc) parentInsertLine(parentPath []string) int {
 	if err != nil || !exists || val == nil {
 		return len(d.lines) - 1
 	}
+	return d.valueBlockEnd(val)
+}
+
+// valueBlockEnd returns the last line occupied by val's source region: for a
+// scalar, the end of its value span (a multiline plain, quoted, or block
+// scalar may occupy several lines that yaml.v3 does not report); for mappings
+// and sequences, the last line of any descendant.
+func (d *doc) valueBlockEnd(val *yaml.Node) int {
 	lastLine := val.Line
 	for _, c := range allNodes(val) {
-		if c != nil && c.Line > lastLine {
-			lastLine = c.Line
+		if c == nil {
+			continue
+		}
+		line := c.Line
+		if c.Kind == yaml.ScalarNode {
+			if _, end := d.valueSpan(c); end > d.offset(line, 1) {
+				if le := d.lineOf(end); le > line {
+					line = le
+				}
+			}
+		}
+		if line > lastLine {
+			lastLine = line
 		}
 	}
 	return lastLine
+}
+
+// lineOf returns the 1-based line containing byte offset o.
+func (d *doc) lineOf(o int) int {
+	line := 1
+	for line+1 < len(d.lines) && d.lines[line+1] <= o {
+		line++
+	}
+	return line
 }
 
 // allNodes returns val and every descendant node (depth-first).
@@ -719,10 +950,10 @@ func looksNumeric(v string) bool {
 }
 
 // isValueTerminator reports whether a byte ends an inline plain scalar value.
-// '#' is deliberately absent: a '#' terminates the value only where a comment
-// may start — on the value's first byte or after whitespace — and valueSpan
-// handles those positions explicitly, so a '#' attached to scalar content
-// (e.g. a#b) stays inside the span exactly as yaml.v3 parses it.
+// It is only used for the non-scalar generic fingerprint path: real scalar
+// spans are computed by blockPlainSpan/flowPlainSpan, which treat '#' the way
+// yaml.v3 does (a comment begins only at the value start or after
+// whitespace).
 func isValueTerminator(b byte) bool {
 	switch b {
 	case ' ', '\t', '\n', '\r', ',', '[', ']', '{', '}':
