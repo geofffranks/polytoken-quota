@@ -410,9 +410,13 @@ func assertCoherentTarget(t *testing.T, env *stagedEnv, s state.State, report Re
 			t.Fatalf("roll-forward live mismatch:\n%s", got)
 		}
 	case ActionRestore:
-		// Files restored to last-known-good; target pending.
+		// Files restored to last-known-good; target pending, not marked
+		// applied at the accepted event's revision.
 		if ts.Pending == nil {
 			t.Fatalf("restore left target applied; expected pending")
+		}
+		if ts.AppliedRevision != env.Prior.Targets[env.Tx.TargetID].AppliedRevision {
+			t.Fatalf("restore applied revision=%d want prior applied revision=%d", ts.AppliedRevision, env.Prior.Targets[env.Tx.TargetID].AppliedRevision)
 		}
 		got, err := os.ReadFile(env.LivePath)
 		if err != nil {
