@@ -1,0 +1,363 @@
+name: Property discovery
+
+on:
+  schedule:
+    - cron: '17 6 * * 3'
+  workflow_dispatch:
+    inputs:
+      replay_seed:
+        description: Optional positive decimal replay seed
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: property-discovery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  filesystem-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PUBLISH_HISTORY_MODE: full
+      PUBLISH_HISTORY_SEED: ${{ inputs.replay_seed || github.run_id }}
+      PUBLISH_MULTI_SEED: ${{ inputs.replay_seed || github.run_id }}
+      PUBLISH_HISTORY_CASES: '80'
+      PUBLISH_MULTI_CASES: '48'
+      NOTICE_HISTORY_MODE: full
+      NOTICE_HISTORY_SEED: ${{ inputs.replay_seed || github.run_id }}
+      NOTICE_AUTHORITY_CASES: '48'
+      NOTICE_HISTORY_CASES: '48'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate replay seed
+        env:
+          REPLAY_SEED: "${{ inputs.replay_seed }}"
+        shell: bash
+        run: if [[ -n "$REPLAY_SEED" && ! "$REPLAY_SEED" =~ ^[1-9][0-9]{0,17}$ ]]; then echo 'invalid replay seed' >&2; exit 2; fi
+      - name: Write safe metadata before search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts"
+          printf 'suite=filesystem\nevent=%s\nplatform=linux/%s\nsha=%s\ngo=%s\npublish_seed=%s\npublish_cases=%s\nmulti_seed=%s\nmulti_cases=%s\nnotice_seed=%s\nnotice_cases=%s\nauthority_cases=%s\nmode=full\n' "$GITHUB_EVENT_NAME" "$RUNNER_ARCH" "$GITHUB_SHA" "$(go env GOVERSION)" "$PUBLISH_HISTORY_SEED" "$PUBLISH_HISTORY_CASES" "$PUBLISH_MULTI_SEED" "$PUBLISH_MULTI_CASES" "$NOTICE_HISTORY_SEED" "$NOTICE_HISTORY_CASES" "$NOTICE_AUTHORITY_CASES" > "$RUNNER_TEMP/property-artifacts/manifest.txt"
+          { printf 'command='; printf '%q ' env PUBLISH_HISTORY_MODE=full "PUBLISH_HISTORY_SEED=$PUBLISH_HISTORY_SEED" "PUBLISH_HISTORY_CASES=$PUBLISH_HISTORY_CASES" "PUBLISH_MULTI_SEED=$PUBLISH_MULTI_SEED" "PUBLISH_MULTI_CASES=$PUBLISH_MULTI_CASES" NOTICE_HISTORY_MODE=full "NOTICE_HISTORY_SEED=$NOTICE_HISTORY_SEED" "NOTICE_HISTORY_CASES=$NOTICE_HISTORY_CASES" "NOTICE_AUTHORITY_CASES=$NOTICE_AUTHORITY_CASES" go test ./internal/publish ./internal/notice ./internal/service -run 'Generated|History|ReloadAuthority|ReaderAtRename' -count=1 -timeout=15m; printf '\n'; } >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - name: Run filesystem discovery histories
+        id: histories
+        run: go test ./internal/publish ./internal/notice ./internal/service -run 'Generated|History|ReloadAuthority|ReaderAtRename' -count=1 -timeout=15m
+      - name: Capture allowlisted failure inputs
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts/failures"
+          for d in internal/publish/testdata/rapid internal/notice/testdata/rapid internal/service/testdata/rapid; do
+            if [[ -d "$d" ]]; then while IFS= read -r -d '' f; do rel=${f#*/testdata/rapid/}; area=$(basename "$(dirname "$(dirname "$f")")"); mkdir -p "$RUNNER_TEMP/property-artifacts/failures/$area"; cp -- "$f" "$RUNNER_TEMP/property-artifacts/failures/$area/$rel"; done < <(find "$d" -type f -name '*.fail' -print0); fi
+          done
+      - name: Capture safe outcome
+        if: always()
+        env:
+          OUTCOME: "${{ steps.histories.outcome }}"
+        run: printf 'step_outcome=%s\nrun=%s/%s/actions/runs/%s\n' "$OUTCOME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: property-filesystem-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/property-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: "${{ steps.histories.outcome }}"
+        run: >-
+          printf 'Filesystem histories: %s; Linux/%s; SHA=%s; publish seed/budget=%s/%s; multi seed/budget=%s/%s; notice seed/budget=%s/%s; replay command and timeout are in the manifest. A failed or interrupted run needs triage; it is not a minimized counterexample.\n' "$OUTCOME" "$RUNNER_ARCH" "$GITHUB_SHA" "$PUBLISH_HISTORY_SEED" "$PUBLISH_HISTORY_CASES" "$PUBLISH_MULTI_SEED" "$PUBLISH_MULTI_CASES" "$NOTICE_HISTORY_SEED" "$NOTICE_HISTORY_CASES" >> "$GITHUB_STEP_SUMMARY"
+
+  filesystem-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      PUBLISH_HISTORY_MODE: full
+      PUBLISH_HISTORY_SEED: ${{ inputs.replay_seed || github.run_id }}
+      PUBLISH_MULTI_SEED: ${{ inputs.replay_seed || github.run_id }}
+      PUBLISH_HISTORY_CASES: '80'
+      PUBLISH_MULTI_CASES: '48'
+      NOTICE_HISTORY_MODE: full
+      NOTICE_HISTORY_SEED: ${{ inputs.replay_seed || github.run_id }}
+      NOTICE_AUTHORITY_CASES: '48'
+      NOTICE_HISTORY_CASES: '48'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate replay seed
+        env:
+          REPLAY_SEED: "${{ inputs.replay_seed }}"
+        shell: bash
+        run: if [[ -n "$REPLAY_SEED" && ! "$REPLAY_SEED" =~ ^[1-9][0-9]{0,17}$ ]]; then echo 'invalid replay seed' >&2; exit 2; fi
+      - name: Write safe metadata before search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts"
+          printf 'suite=filesystem\nevent=%s\nplatform=macos/%s\nsha=%s\ngo=%s\npublish_seed=%s\npublish_cases=%s\nmulti_seed=%s\nmulti_cases=%s\nnotice_seed=%s\nnotice_cases=%s\nauthority_cases=%s\nmode=full\n' "$GITHUB_EVENT_NAME" "$RUNNER_ARCH" "$GITHUB_SHA" "$(go env GOVERSION)" "$PUBLISH_HISTORY_SEED" "$PUBLISH_HISTORY_CASES" "$PUBLISH_MULTI_SEED" "$PUBLISH_MULTI_CASES" "$NOTICE_HISTORY_SEED" "$NOTICE_HISTORY_CASES" "$NOTICE_AUTHORITY_CASES" > "$RUNNER_TEMP/property-artifacts/manifest.txt"
+          { printf 'command='; printf '%q ' env PUBLISH_HISTORY_MODE=full "PUBLISH_HISTORY_SEED=$PUBLISH_HISTORY_SEED" "PUBLISH_HISTORY_CASES=$PUBLISH_HISTORY_CASES" "PUBLISH_MULTI_SEED=$PUBLISH_MULTI_SEED" "PUBLISH_MULTI_CASES=$PUBLISH_MULTI_CASES" NOTICE_HISTORY_MODE=full "NOTICE_HISTORY_SEED=$NOTICE_HISTORY_SEED" "NOTICE_HISTORY_CASES=$NOTICE_HISTORY_CASES" "NOTICE_AUTHORITY_CASES=$NOTICE_AUTHORITY_CASES" go test ./internal/publish ./internal/notice ./internal/service -run 'Generated|History|ReloadAuthority|ReaderAtRename' -count=1 -timeout=15m; printf '\n'; } >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - name: Run filesystem discovery histories
+        id: histories
+        run: go test ./internal/publish ./internal/notice ./internal/service -run 'Generated|History|ReloadAuthority|ReaderAtRename' -count=1 -timeout=15m
+      - name: Capture allowlisted failure inputs
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts/failures"
+          for d in internal/publish/testdata/rapid internal/notice/testdata/rapid internal/service/testdata/rapid; do
+            if [[ -d "$d" ]]; then while IFS= read -r -d '' f; do rel=${f#*/testdata/rapid/}; area=$(basename "$(dirname "$(dirname "$f")")"); mkdir -p "$RUNNER_TEMP/property-artifacts/failures/$area"; cp -- "$f" "$RUNNER_TEMP/property-artifacts/failures/$area/$rel"; done < <(find "$d" -type f -name '*.fail' -print0); fi
+          done
+      - name: Capture safe outcome
+        if: always()
+        env:
+          OUTCOME: "${{ steps.histories.outcome }}"
+        run: printf 'step_outcome=%s\nrun=%s/%s/actions/runs/%s\n' "$OUTCOME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: property-filesystem-macos-${{ github.run_id }}
+          path: ${{ runner.temp }}/property-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: "${{ steps.histories.outcome }}"
+        run: >-
+          printf 'Filesystem histories: %s; macOS/%s; SHA=%s; publish seed/budget=%s/%s; multi seed/budget=%s/%s; notice seed/budget=%s/%s; replay command and timeout are in the manifest. A failed or interrupted run needs triage; it is not a minimized counterexample.\n' "$OUTCOME" "$RUNNER_ARCH" "$GITHUB_SHA" "$PUBLISH_HISTORY_SEED" "$PUBLISH_HISTORY_CASES" "$PUBLISH_MULTI_SEED" "$PUBLISH_MULTI_CASES" "$NOTICE_HISTORY_SEED" "$NOTICE_HISTORY_CASES" >> "$GITHUB_STEP_SUMMARY"
+
+  linux-rapid:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      RAPID_CHECKS: '1000'
+      RAPID_SEED: ${{ inputs.replay_seed || github.run_id }}
+      RAPID_SHRINKTIME: '10s'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate replay seed
+        env:
+          REPLAY_SEED: "${{ inputs.replay_seed }}"
+        shell: bash
+        run: if [[ -n "$REPLAY_SEED" && ! "$REPLAY_SEED" =~ ^[1-9][0-9]{0,17}$ ]]; then echo 'invalid replay seed' >&2; exit 2; fi
+      - name: Write safe metadata before search
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts"
+          printf 'suite=rapid\nevent=%s\nplatform=linux/%s\nsha=%s\ngo=%s\nmode=full\nseed=%s\nchecks=%s\nshrink=%s\ntimeout=15m\ncommand=RAPID_CHECKS=%s RAPID_SEED=%s RAPID_SHRINKTIME=%s go test ./internal/state ./internal/reconcile ./internal/document ./internal/routing ./internal/selection ./internal/policy ./internal/target ./internal/quota -count=1 -timeout=15m\n' "$GITHUB_EVENT_NAME" "$RUNNER_ARCH" "$GITHUB_SHA" "$(go env GOVERSION)" "$RAPID_SEED" "$RAPID_CHECKS" "$RAPID_SHRINKTIME" "$RAPID_CHECKS" "$RAPID_SEED" "$RAPID_SHRINKTIME" > "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - name: Run Rapid discovery
+        id: rapid
+        run: go test ./internal/state ./internal/reconcile ./internal/document ./internal/routing ./internal/selection ./internal/policy ./internal/target ./internal/quota -count=1 -timeout=15m
+      - name: Capture allowlisted Rapid failures
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts/failures"
+          for d in internal/state/testdata/rapid internal/reconcile/testdata/rapid internal/document/testdata/rapid internal/routing/testdata/rapid internal/selection/testdata/rapid internal/policy/testdata/rapid internal/target/testdata/rapid internal/quota/testdata/rapid; do
+            if [[ -d "$d" ]]; then while IFS= read -r -d '' f; do rel=${f#*/testdata/rapid/}; area=$(basename "$(dirname "$(dirname "$f")")"); mkdir -p "$RUNNER_TEMP/property-artifacts/failures/$area"; cp -- "$f" "$RUNNER_TEMP/property-artifacts/failures/$area/$rel"; done < <(find "$d" -type f -name '*.fail' -print0); fi
+          done
+      - name: Capture safe outcome
+        if: always()
+        env:
+          OUTCOME: "${{ steps.rapid.outcome }}"
+        run: printf 'step_outcome=%s\nrun=%s/%s/actions/runs/%s\n' "$OUTCOME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: property-rapid-linux-${{ github.run_id }}
+          path: ${{ runner.temp }}/property-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: "${{ steps.rapid.outcome }}"
+        run: >-
+          printf 'Rapid: %s; Linux/%s; SHA=%s; seed=%s; checks=%s; replay command and 15m timeout are in manifest. A failed or interrupted run needs triage; it is not a minimized counterexample.\n' "$OUTCOME" "$RUNNER_ARCH" "$GITHUB_SHA" "$RAPID_SEED" "$RAPID_CHECKS" >> "$GITHUB_STEP_SUMMARY"
+
+  fuzz:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - package: ./internal/quota
+            target: FuzzRemainingBoundsAndMonotonicity
+          - package: ./internal/quota
+            target: FuzzCodexIndividualLimitPrecedence
+          - package: ./internal/document
+            target: FuzzFrontmatterBodyPreserved
+          - package: ./internal/document
+            target: FuzzDisableEnableByteIdentity
+          - package: ./internal/reconcile
+            target: FuzzReconcile
+          - package: ./internal/reconcile
+            target: FuzzReconcileDuplicateIdempotent
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate replay seed
+        env:
+          REPLAY_SEED: "${{ inputs.replay_seed }}"
+        shell: bash
+        run: if [[ -n "$REPLAY_SEED" && ! "$REPLAY_SEED" =~ ^[1-9][0-9]{0,17}$ ]]; then echo 'invalid replay seed' >&2; exit 2; fi
+      - name: Write safe metadata before search
+        shell: bash
+        env:
+          REPLAY_SEED: "${{ inputs.replay_seed }}"
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts"
+          printf 'suite=fuzz\nevent=%s\nplatform=linux/%s\nsha=%s\ngo=%s\nreplay_seed_input=%s\nrng_seed=not-controllable\nreplay=retained-corpus-only\nbudget=60s\ntarget=%s\ncommand=go test %s -run=^$ -fuzz=^%s$ -fuzztime=60s -parallel=1 -timeout=90s\n' "$GITHUB_EVENT_NAME" "$RUNNER_ARCH" "$GITHUB_SHA" "$(go env GOVERSION)" "${REPLAY_SEED:-not-applicable-go-fuzz-seed-not-controllable}" '${{ matrix.target }}' '${{ matrix.package }}' '${{ matrix.target }}' > "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - name: Run one allowlisted fuzz target
+        id: fuzzrun
+        run: go test ${{ matrix.package }} -run='^$' -fuzz='^${{ matrix.target }}$' -fuzztime=60s -parallel=1 -timeout=90s
+      - name: Capture allowlisted fuzz failure input
+        if: failure()
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/property-artifacts/failures"
+          case "$PACKAGE:$TARGET" in
+            ./internal/quota:FuzzRemainingBoundsAndMonotonicity|./internal/quota:FuzzCodexIndividualLimitPrecedence|./internal/document:FuzzFrontmatterBodyPreserved|./internal/document:FuzzDisableEnableByteIdentity|./internal/reconcile:FuzzReconcile|./internal/reconcile:FuzzReconcileDuplicateIdempotent)
+              dir="${PACKAGE#./}/testdata/fuzz/$TARGET"
+              if [[ -d "$dir" ]]; then cp -R "$dir" "$RUNNER_TEMP/property-artifacts/failures/"; fi
+              ;;
+            *) echo 'refusing non-allowlisted fuzz target' >&2; exit 2 ;;
+          esac
+      - name: Capture safe outcome
+        if: always()
+        env:
+          OUTCOME: "${{ steps.fuzzrun.outcome }}"
+        run: printf 'step_outcome=%s\nrun=%s/%s/actions/runs/%s\n' "$OUTCOME" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" >> "$RUNNER_TEMP/property-artifacts/manifest.txt"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: property-fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/property-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: "${{ steps.fuzzrun.outcome }}"
+        run: >-
+          printf 'Fuzz %s: %s; Linux/%s; SHA=%s; budget=60s; Go fuzz does not provide a replayable RNG seed. Replay command is in manifest; inspect retained corpus only after failure. A failed or interrupted run is inconclusive, not a minimized counterexample.\n' '${{ matrix.target }}' "$OUTCOME" "$RUNNER_ARCH" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    needs: [filesystem-linux, filesystem-macos, linux-rapid, fuzz]
+    if: always() && github.repository == 'geofffranks/polytoken-quota' && github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (needs.filesystem-linux.result == 'failure' || needs.filesystem-macos.result == 'failure' || needs.linux-rapid.result == 'failure' || needs.fuzz.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    concurrency:
+      group: property-discovery-issue-report
+      cancel-in-progress: false
+    steps:
+      - name: Report fixed safe triage notices
+        uses: actions/github-script@v7
+        env:
+          GH_SERVER_URL: ${{ github.server_url }}
+          FS_LINUX: ${{ needs.filesystem-linux.result }}
+          FS_MACOS: ${{ needs.filesystem-macos.result }}
+          RAPID: ${{ needs.linux-rapid.result }}
+          FUZZ: ${{ needs.fuzz.result }}
+        with:
+          script: |
+            const repo = context.repo;
+            const allowedRepo = 'geofffranks/polytoken-quota';
+            const allowedServer = 'https://github.com';
+            const ref = context.ref;
+            const event = context.eventName;
+            const sha = context.sha;
+            const runId = String(context.runId);
+            const server = process.env.GH_SERVER_URL;
+            if (`${repo.owner}/${repo.repo}` !== allowedRepo || ref !== 'refs/heads/main' || !['schedule', 'workflow_dispatch'].includes(event) || server !== allowedServer || !/^[0-9a-f]{40}$/.test(sha) || !/^\d+$/.test(runId)) throw new Error('Reporter provenance validation failed');
+            const categories = [
+              ['filesystem', 'linux-x64', process.env.FS_LINUX],
+              ['filesystem', 'macos-arm64', process.env.FS_MACOS],
+              ['rapid', 'linux-x64', process.env.RAPID],
+              ['fuzz', 'linux-x64', process.env.FUZZ],
+            ];
+            const runUrl = `${allowedServer}/${allowedRepo}/actions/runs/${runId}`;
+            const failures = categories.filter(([, , outcome]) => outcome === 'failure');
+            const results = [];
+            for (const [suite, platform] of failures) {
+              const marker = `<!-- polytoken-quota-property-discovery:${suite}:${platform}:v1 -->`;
+              const title = `[Automated property discovery] ${suite}/${platform} needs triage`;
+              const runEntry = `- ${sha}: ${runUrl}`;
+              const body = `${marker}\nNeeds triage: the discovery job failed or was inconclusive; inspect the run to distinguish a property failure from timeout or infrastructure trouble.\nSuite: ${suite}\nPlatform: ${platform}\nTested revision: ${sha}\nRecent runs:\n${runEntry}`;
+              const validBody = candidate => {
+                if (typeof candidate !== 'string' || candidate.length > 5000) return false;
+                const lines = candidate.split('\n');
+                if (lines.length < 7 || lines[0] !== marker || lines[1] !== 'Needs triage: the discovery job failed or was inconclusive; inspect the run to distinguish a property failure from timeout or infrastructure trouble.' || lines[2] !== `Suite: ${suite}` || lines[3] !== `Platform: ${platform}` || !/^Tested revision: [0-9a-f]{40}$/.test(lines[4]) || lines[5] !== 'Recent runs:') return false;
+                const links = lines.slice(6);
+                return links.length > 0 && links.length <= 10 && links.every(line => /^- [0-9a-f]{40}: https:\/\/github\.com\/geofffranks\/polytoken-quota\/actions\/runs\/[0-9]+$/.test(line));
+              };
+              try {
+                let issue = null;
+                for (let page = 1; ; page++) {
+                  const response = await github.rest.issues.listForRepo({ owner: repo.owner, repo: repo.repo, state: 'open', per_page: 100, page });
+                  if (!Array.isArray(response.data)) throw new Error('Unexpected issue list response');
+                  issue = response.data.find(item => !item.pull_request && item.user?.login === 'github-actions[bot]' && typeof item.body === 'string' && item.body === `${marker}\nAutomated triage issue; details are maintained in its marked comment.`) || issue;
+                  if (response.data.length < 100) break;
+                }
+                if (!issue) {
+                  const created = await github.rest.issues.create({ owner: repo.owner, repo: repo.repo, title, body: `${marker}\nAutomated triage issue; details are maintained in its marked comment.` });
+                  issue = created.data;
+                }
+                const comments = await github.rest.issues.listComments({ owner: repo.owner, repo: repo.repo, issue_number: issue.number, per_page: 100 });
+                if (!Array.isArray(comments.data)) throw new Error('Unexpected comment list response');
+                const owned = comments.data.find(comment => comment.user?.login === 'github-actions[bot]' && validBody(comment.body));
+                const prior = owned ? owned.body.split('\n').slice(6).filter(line => line !== runEntry) : [];
+                const updatedBody = `${marker}\nNeeds triage: the discovery job failed or was inconclusive; inspect the run to distinguish a property failure from timeout or infrastructure trouble.\nSuite: ${suite}\nPlatform: ${platform}\nTested revision: ${sha}\nRecent runs:\n${[runEntry, ...prior].slice(0, 10).join('\n')}`;
+                if (owned) await github.rest.issues.updateComment({ owner: repo.owner, repo: repo.repo, comment_id: owned.id, body: updatedBody });
+                else await github.rest.issues.createComment({ owner: repo.owner, repo: repo.repo, issue_number: issue.number, body: updatedBody });
+                results.push(`${suite}/${platform}: reported (inconclusive; inspect run)`);
+              } catch (_) {
+                results.push(`${suite}/${platform}: reporting failed (check issue permissions and API availability)`);
+              }
+            }
+            core.summary.addHeading('Property discovery reporting');
+            core.summary.addList(results.length ? results : ['No failed suite categories to report']);
+            await core.summary.write();
+            if (results.some(item => item.includes('reporting failed'))) core.setFailed('One or more issue reports failed; discovery results are unchanged.');

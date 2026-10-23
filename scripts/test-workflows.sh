@@ -75,6 +75,61 @@ assert_contains "$ci" 'go test -race \./\.\.\. -count=1 -timeout=10m' 'CI race t
 assert_exact_block "$ci" '      - name: Retain synthetic Rapid failures' $'        if: failure()\n        uses: actions/upload-artifact@v7\n        with:\n          name: rapid-failures\n          path: \'**/testdata/rapid/**/*.fail\'\n          if-no-files-found: ignore\n          retention-days: 7' 'CI retains only synthetic Rapid failure files after a failed step for seven days'
 assert_contains "$ci" 'go vet \./\.\.\.' 'CI runs go vet'
 assert_contains "$ci" 'go build \./\.\.\.' 'CI runs go build'
+assert_contains "$ci" 'scripts/test-workflows\.sh' 'CI runs workflow-policy fixtures'
+assert_contains "$ci" 'scripts/test-property-report\.sh' 'CI runs reporter fixture tests'
+
+property="$workflow_dir/property-discovery.yml"
+[[ -f "$property" ]] || { echo "error: property discovery workflow not found: $property" >&2; exit 1; }
+assert_contains "$property" "cron: '17 6 \\* \\* 3'" 'property discovery runs weekly Wednesday at 06:17 UTC'
+assert_contains "$property" 'workflow_dispatch:' 'property discovery supports manual replay'
+assert_contains "$property" 'timeout-minutes: 20' 'property discovery jobs have finite outer deadlines'
+assert_contains "$property" 'RAPID_CHECKS: '\''1000'\''' 'Linux discovery runs 1,000 Rapid checks'
+assert_contains "$property" 'linux-rapid:' 'Linux Rapid discovery runs as an independent job'
+assert_contains "$property" 'fuzz:' 'native fuzz targets run in separate matrix jobs'
+assert_contains "$property" 'max-parallel: 2' 'fuzz target concurrency is bounded'
+assert_contains "$property" 'fuzztime=60s' 'Linux discovery bounds each allowlisted fuzz target'
+assert_contains "$property" 'fail-fast: false' 'fuzz targets run independently without fail-fast'
+assert_contains "$property" 'max-parallel: 2' 'fuzz target concurrency is bounded'
+assert_contains "$property" 'matrix:' 'fuzz targets use independent matrix jobs'
+assert_contains "$property" 'timeout-minutes: 20' 'each fuzz job has a finite outer timeout'
+assert_contains "$property" 'retention-days: 14' 'property discovery retains scoped artifacts for 14 days'
+property_check_tmp=$(mktemp)
+awk '/^  report:/{report=1} report{print}' "$property" > "$property_check_tmp"
+report_job="$property_check_tmp"
+test -s "$report_job" || { echo 'FAIL: missing isolated reporter job' >&2; exit 1; }
+if grep -Eq 'actions/checkout|go test|upload-artifact|download-artifact' "$report_job"; then echo 'FAIL: issue reporter checks out or executes tested code/artifacts' >&2; exit 1; fi
+assert_contains "$report_job" 'issues: write' 'only reporter job receives issue write permission'
+assert_contains "$report_job" 'concurrency:' 'issue reporter serializes issue updates'
+assert_contains "$property" 'needs: \[filesystem-linux, filesystem-macos, linux-rapid, fuzz\]' 'reporter waits for all discovery jobs'
+assert_contains "$property" 'FS_LINUX:' 'reporter receives trusted Linux filesystem result'
+assert_contains "$property" 'FS_MACOS:' 'reporter receives trusted macOS filesystem result'
+assert_contains "$property" 'RAPID:' 'reporter receives trusted Rapid result'
+assert_contains "$property" 'FUZZ:' 'reporter receives trusted fuzz matrix result'
+assert_contains "$property" 'github.ref == '\''refs/heads/main'\''' 'reporter requires default-branch provenance'
+assert_contains "$property" 'actions/github-script@v7' 'reporter executes isolated fixed inline JavaScript without checkout'
+assert_contains "$property" 'github-actions\[bot\]' 'reporter requires the automation account to own a marked issue'
+assert_contains "$property" 'listForRepo' 'reporter paginates issue search through the API'
+assert_contains "$property" 'page\+\+' 'reporter searches beyond the first 100 open issues'
+assert_contains "$property" 'issues\.updateComment' 'reporter updates only a validated bot-owned comment'
+assert_contains "$property" 'issues\.createComment' 'reporter stores history in marked comments'
+assert_contains "$property" 'validBody' 'reporter validates complete generated comment schema'
+if grep -Eq 'issues\.update\(' "$report_job"; then echo 'FAIL: reporter edits issue body' >&2; exit 1; fi
+assert_contains "$property" 'outcome === '\''failure'\''' 'reporter ignores non-failure outcomes'
+assert_contains "$property" 'slice\(0, 10\)' 'reporter bounds retained run links to ten'
+assert_contains "$property" 'const allowedServer = '\''https://github\.com'\'';' 'reporter validates trusted server URL'
+assert_contains "$property" 'issues: write' 'only reporter job receives issue write permission'
+assert_contains "$property" 'property-artifacts/failures' 'discovery scopes uploaded failure inputs'
+assert_contains "$property" 'testdata/fuzz' 'fuzz artifacts come only from the explicit target corpus'
+assert_contains "$property" 'timeout-minutes: 20' 'fuzz jobs have sufficient finite outer ceiling'
+assert_contains "$property" 'timeout=90s' 'fuzz and metadata replay commands have bounded Go timeouts'
+assert_contains "$property" 'Write safe metadata before search' 'each suite records metadata before searching'
+assert_contains "$property" 'manifest.txt' 'property discovery writes a replay manifest'
+assert_contains "$property" 'NOTICE_HISTORY_SEED: \$\{\{ inputs\.replay_seed \|\| github\.run_id \}\}' 'filesystem jobs seed notice histories from validated replay input'
+assert_contains "$property" "notice_seed=%s" 'filesystem manifest records notice seed before search'
+assert_contains "$property" "notice seed/budget=%s/%s" 'filesystem summary reports notice seed and budget'
+assert_contains "$property" "-run 'Generated[|]History[|]ReloadAuthority[|]ReaderAtRename'" 'manifest command shell-quotes the history regex'
+assert_contains "$property" 'printf '\''%q '\''' 'manifest command is emitted with shell-safe quoting'
+assert_contains "$property" 'results.some' 'reporting API errors are visible in reporter summary'
 
 # All action references must use approved major tags, keeping upgrades explicit.
 for changed_workflow in "$ci" "$workflow_dir/go-version-bump.yml" "$workflow_dir/release.yml" "$workflow_dir/weekly-patch-release.yml"; do
@@ -139,7 +194,7 @@ assert_contains "$weekly" '-f[[:space:]]+"tag=' 'weekly release dispatch include
 # Exercise tag selection locally with no GitHub, network, or remote Git calls.
 weekly_tmp=$(mktemp -d)
 archive_tmp=''
-trap 'rm -rf "$archive_tmp" "$weekly_tmp"' EXIT
+trap 'rm -rf "$archive_tmp" "$weekly_tmp"; rm -f "$property_check_tmp"' EXIT
 printf '%s\n' v1.2.3 v1.10.0 v2.0.0-rc1 v9.9.9 not-a-tag > "$weekly_tmp/released-tags"
 printf '%s\n' v10.0.0 v2.0.0 > "$weekly_tmp/repository-only-tags"
 selected=$(awk -F. '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { printf "%09d.%09d.%09d %s\n", substr($1,2), $2, $3, $0 }' "$weekly_tmp/released-tags" | sort | tail -n1 | cut -d' ' -f2)
@@ -213,7 +268,7 @@ for workspace in a b; do
     chmod 0755 "$staging/polytoken-quota"
     chmod 0644 "$staging/VERSION"
     archive="$output_dir/polytoken-quota-$target.tar.gz"
-    (cd "$staging" && if tar --version 2>/dev/null | grep -q 'GNU tar'; then tar --format=ustar --mtime='1970-01-01 00:00:00' --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota; else tar --format=ustar --mtime='1970-01-01 00:00:00' --uid=0 --gid=0 --uname='' --gname='' -cf - VERSION polytoken-quota; fi | gzip -n > "$archive")
+    (cd "$staging" && tar_cmd=tar; if ! "$tar_cmd" --version 2>/dev/null | grep -q 'GNU tar'; then for candidate in /opt/homebrew/opt/gnu-tar/libexec/gnubin/tar /usr/local/opt/gnu-tar/libexec/gnubin/tar; do if [[ -x "$candidate" ]] && "$candidate" --version 2>/dev/null | grep -q 'GNU tar'; then tar_cmd=$candidate; break; fi; done; fi; if ! "$tar_cmd" --version 2>/dev/null | grep -q 'GNU tar'; then echo 'FAIL: deterministic archive check requires GNU tar; install it and put its bin directory first on PATH' >&2; exit 1; fi; "$tar_cmd" --format=ustar --mtime='1970-01-01 00:00:00' --owner=0 --group=0 --numeric-owner --mode='u+rw,go+r-w' -cf - VERSION polytoken-quota | gzip -n > "$archive")
     tar -tzf "$archive" | diff -u <(printf 'VERSION\npolytoken-quota\n') -
     tar -xOzf "$archive" VERSION > "$archive_tmp/$workspace-$target-VERSION"
     cmp "$archive_tmp/$workspace-$target-VERSION" <(printf 'v1.2.3\n')
@@ -289,6 +344,7 @@ assert_contains "$agents" 'first release' 'AGENTS documents weekly first-release
 assert_contains "$agents" 'Dependabot Auto-Merge.*dependabot-auto-merge\.yml.*patch/minor.*auto-merge' 'AGENTS documents Dependabot auto-merge policy'
 assert_contains "$agents" 'Go Version Bump.*go-version-bump\.yml.*Monday `10:00 UTC`.*pull request' 'AGENTS documents Go version schedule and pull-request behavior'
 assert_contains "$agents" 'Dependabot.*\.github/dependabot\.yml.*weekly Go module and GitHub Actions update' 'AGENTS documents Dependabot update configuration'
+assert_contains "$agents" 'Property Discovery.*property-discovery\.yml.*Wednesday `06:17 UTC`.*Linux/macOS' 'AGENTS documents property discovery cadence and platforms'
 
 for archive in \
   polytoken-quota-darwin-arm64.tar.gz \

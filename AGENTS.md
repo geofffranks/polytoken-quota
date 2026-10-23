@@ -35,7 +35,7 @@ Build locally with `go build` or `go install`, or download a published release a
 
 The `go` directive in `go.mod` is the sole authority for the required Go version; the current directive is `go 1.26.5`. CI and release use `actions/setup-go` with `go-version-file: go.mod` and verify `go env GOVERSION` against that directive; the copies in `README.md` and this file are maintained by the Go Version Bump workflow.
 
-The six repository automation surfaces are:
+The seven repository automation surfaces are:
 
 - **CI** (`.github/workflows/ci.yml`): pull requests and pushes to `main`; test, race-test, vet, and build.
 - **Release** (`.github/workflows/release.yml`): build the four archives for an existing `vX.Y.Z` GitHub release and upload checksums.
@@ -43,6 +43,7 @@ The six repository automation surfaces are:
 - **Dependabot Auto-Merge** (`.github/workflows/dependabot-auto-merge.yml`): metadata-only patch/minor dependency updates with auto-merge.
 - **Go Version Bump** (`.github/workflows/go-version-bump.yml`): Monday `10:00 UTC` plus manual dispatch; update `go.mod`, `go.sum`, and documentation through an auto-merged pull request.
 - **Dependabot** (`.github/dependabot.yml`): weekly Go module and GitHub Actions update proposals.
+- **Property Discovery** (`.github/workflows/property-discovery.yml`): Wednesday `06:17 UTC` and manual replay; bounded filesystem history tests on Linux/macOS, Linux Rapid/fuzz expansion, safe metadata artifacts, and an isolated trusted reporter job.
 
 Before relying on weekly automation, a maintainer must manually create the first stable `vX.Y.Z` GitHub release and matching repository tag, then manually dispatch **Release** with that tag to publish its archives. The weekly workflow deliberately refuses to create the first release. If the Release workflow cannot be dispatched, create the release and run the release packaging workflow manually from its `workflow_dispatch` input; do not remove the first-release guard.
 

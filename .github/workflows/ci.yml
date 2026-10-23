@@ -49,5 +49,9 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: Workflow and reporter policy fixtures
+        run: |
+          scripts/test-workflows.sh
+          bash scripts/test-property-report.sh
       - name: SwiftBar plugin fixture tests
         run: swiftbar/tests/run_tests.sh
