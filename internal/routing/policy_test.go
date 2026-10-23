@@ -895,10 +895,11 @@ func TestRankSignalTieBandBoundaryClasses(t *testing.T) {
 }
 
 // TestAssignSignalClustersExactTieBandThreshold pins the cluster boundary at
-// the literal signalTieBand constant, which no end-to-end Rank fixture can
-// reach: the single-window arithmetic lands a fixed six-double gap above the
-// band (see TestRankSignalTieBandBoundaryClasses), so flipping the cluster
-// comparison from >= to > would survive every routing case. This test calls
+// the literal signalTieBand constant, which no end-to-end Rank fixture in
+// this package reaches: the single-window arithmetic lands a fixed six-double
+// gap above the band (see TestRankSignalTieBandBoundaryClasses), so flipping
+// the cluster comparison from >= to > would survive every routing case here.
+// This test calls
 // assignSignalClusters directly with signals 0.5 and 0.3 — their float64
 // difference is exactly the double nearest 0.20, i.e. signalTieBand itself —
 // plus the adjacent doubles that put the gap one double below and one double

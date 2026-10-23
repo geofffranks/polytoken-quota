@@ -1230,6 +1230,195 @@ func TestBlockScalarTrailingWhitespaceIsSemantic(t *testing.T) {
 	}
 }
 
+// TestBlockScalarFinalTerminatorFingerprintAndEdits pins the newline
+// semantics of the block region's final content line. yaml.v3 parses that
+// line's break as part of the value (clip/keep: "a\n" terminated vs "a"
+// unterminated at EOF), so the managed span must carry the terminator:
+// terminated and unterminated documents fingerprint differently, while a
+// terminator outside the region — a following sibling's own line break —
+// moves nothing. Replacement re-emits the consumed separation; removal and
+// insertion address whole lines, so no byte is lost or duplicated.
+func TestBlockScalarFinalTerminatorFingerprintAndEdits(t *testing.T) {
+	paths := [][]string{{"model"}}
+	fp := func(doc string) [32]byte {
+		t.Helper()
+		h, err := FingerprintManaged([]byte(doc), paths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	// Terminated vs unterminated at EOF: different parsed values (a\n vs
+	// a) under clip and keep, so the fingerprints must differ — LF, CRLF,
+	// folded, and multi-line alike.
+	for _, tc := range []struct{ name, term, unterm, termValue string }{
+		{"clip lf", "model: |\n  a\n", "model: |\n  a", "a\n"},
+		{"keep lf", "model: |+\n  a\n", "model: |+\n  a", "a\n"},
+		{"clip crlf", "model: |\r\n  a\r\n", "model: |\r\n  a", "a\n"},
+		{"keep crlf", "model: |+\r\n  a\r\n", "model: |+\r\n  a", "a\n"},
+		{"folded lf", "model: >\n  a\n", "model: >\n  a", "a\n"},
+		{"multiline lf", "model: |\n  a\n  b\n", "model: |\n  a\n  b", "a\nb\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Ground the inequality in the parsed values it protects: the
+			// terminated document really does carry the extra newline.
+			var root yaml.Node
+			if err := yaml.Unmarshal([]byte(tc.term), &root); err != nil {
+				t.Fatal(err)
+			}
+			if v := findKeyPath(t, &root, "model"); v == nil || v.Value != tc.termValue {
+				t.Fatalf("terminated value = %v, want %q", v, tc.termValue)
+			}
+			if err := yaml.Unmarshal([]byte(tc.unterm), &root); err != nil {
+				t.Fatal(err)
+			}
+			if v := findKeyPath(t, &root, "model"); v == nil || v.Value == tc.termValue {
+				t.Fatalf("unterminated value %v should differ from terminated %q", v, tc.termValue)
+			}
+			if got, want := fp(tc.term), fp(tc.unterm); got == want {
+				t.Fatalf("terminated %q and unterminated %q share a fingerprint", tc.term, tc.unterm)
+			}
+		})
+	}
+
+	// A tail's own terminator is unmanaged: the block parses to the same
+	// value with or without the document's final line break, and the
+	// fingerprint must not move.
+	for _, tc := range []struct{ name, term, unterm string }{
+		{"clip lf", "model: |\n  a\nother: 1\n", "model: |\n  a\nother: 1"},
+		{"keep lf", "model: |+\n  a\nother: 1\n", "model: |+\n  a\nother: 1"},
+		{"clip crlf", "model: |\r\n  a\r\nother: 1\r\n", "model: |\r\n  a\r\nother: 1"},
+		{"blank line before sibling lf", "model: |\n  a\n\nother: 1\n", "model: |\n  a\n\nother: 1"},
+	} {
+		t.Run("unmanaged tail terminator "+tc.name, func(t *testing.T) {
+			if got, want := fp(tc.term), fp(tc.unterm); got != want {
+				t.Fatalf("unmanaged tail terminator moved the fingerprint:\n %q\nvs\n %q", tc.term, tc.unterm)
+			}
+		})
+	}
+
+	// Empty and whitespace-only bodies have no content line to terminate.
+	// The empty body's span is the bare indicator, so it must keep matching
+	// across the document's final terminator (both documents parse "").
+	if got, want := fp("model: |\n"), fp("model: |"); got != want {
+		t.Fatal("empty body fingerprint changed across the document's final newline")
+	}
+	if got, want := fp("model: |\r\n"), fp("model: |"); got != want {
+		t.Fatal("empty CRLF body fingerprint changed across the document's final newline")
+	}
+
+	// Exact replacement, removal, and insertion bytes. The span's consumed
+	// terminator is re-emitted on replacement — the sibling keeps its own
+	// separation, an unterminated final sibling stays unterminated, and a
+	// terminated file stays terminated at EOF — while insertion appends
+	// after the last line, terminating an unterminated one first.
+	for _, tc := range []struct {
+		name        string
+		in          string
+		wantSet     string
+		wantRemoved string
+		wantInsert  string
+	}{
+		{"lf sibling terminated", "model: |\n  a\nother: 1\n",
+			"model: new\nother: 1\n", "other: 1\n",
+			"model: |\n  a\nother: 1\nextra: x\n"},
+		{"lf sibling unterminated", "model: |\n  a\nother: 1",
+			"model: new\nother: 1", "other: 1",
+			"model: |\n  a\nother: 1\nextra: x\n"},
+		{"lf eof terminated", "model: |\n  a\n",
+			"model: new\n", "",
+			"model: |\n  a\nextra: x\n"},
+		{"lf eof unterminated", "model: |\n  a",
+			"model: new", "",
+			"model: |\n  a\nextra: x\n"},
+		{"crlf sibling terminated", "model: |\r\n  a\r\nother: 1\r\n",
+			"model: new\r\nother: 1\r\n", "other: 1\r\n",
+			"model: |\r\n  a\r\nother: 1\r\nextra: x\r\n"},
+		{"crlf sibling unterminated", "model: |\r\n  a\r\nother: 1",
+			"model: new\r\nother: 1", "other: 1",
+			"model: |\r\n  a\r\nother: 1\r\nextra: x\r\n"},
+		{"crlf eof terminated", "model: |\r\n  a\r\n",
+			"model: new\r\n", "",
+			"model: |\r\n  a\r\nextra: x\r\n"},
+		{"crlf eof unterminated", "model: |\r\n  a",
+			"model: new", "",
+			"model: |\r\n  a\r\nextra: x\r\n"},
+		{"crlf eof unterminated keep", "model: |+\r\n  a",
+			"model: new", "",
+			"model: |+\r\n  a\r\nextra: x\r\n"},
+	} {
+		t.Run("edits "+tc.name, func(t *testing.T) {
+			in := []byte(tc.in)
+			out, err := EditYAML(in, []Edit{scalarEdit("model", "new")})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			var root yaml.Node
+			if err := yaml.Unmarshal(out, &root); err != nil {
+				t.Fatalf("replaced output does not parse: %v", err)
+			}
+			if v := findKeyPath(t, &root, "model"); v == nil || v.Value != "new" {
+				t.Fatalf("replaced model value = %v, want new", v)
+			}
+			if v := findKeyPath(t, &root, "other"); v != nil && v.Value != "1" {
+				t.Fatalf("sibling other value = %v, want 1", v)
+			}
+			out, err = EditYAML(in, []Edit{{Path: []string{"model"}, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+			if len(out) > 0 {
+				if _, err := EditYAML(out, nil); err != nil {
+					t.Fatalf("removed output does not parse: %v", err)
+				}
+			}
+			out, err = EditYAML(in, []Edit{scalarEdit("extra", "x")})
+			if err != nil {
+				t.Fatalf("insert rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantInsert; got != want {
+				t.Fatalf("insert:\n got=%q\nwant=%q", got, want)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("inserted output does not parse: %v", err)
+			}
+		})
+	}
+
+	// A whitespace-only body's lines are blank block bytes whose terminators
+	// the region already carries: replacement and removal consume them up to
+	// the sibling, unchanged by the final-content-line semantics.
+	for _, tc := range []struct{ name, in, wantSet, wantRemoved string }{
+		{"lf", "model: |\n  \n\nother: 1\n", "model: new\nother: 1\n", "other: 1\n"},
+		{"crlf", "model: |\r\n  \r\n\r\nother: 1\r\n", "model: new\r\nother: 1\r\n", "other: 1\r\n"},
+	} {
+		t.Run("whitespace-only body "+tc.name, func(t *testing.T) {
+			in := []byte(tc.in)
+			out, err := EditYAML(in, []Edit{scalarEdit("model", "new")})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			out, err = EditYAML(in, []Edit{{Path: []string{"model"}, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+		})
+	}
+}
+
 // ----- Block scalar shapes (constructed combinations) -----------------------
 
 // TestBlockScalarShapeCombinations replaces and removes across constructed
@@ -1239,9 +1428,14 @@ func TestBlockScalarTrailingWhitespaceIsSemantic(t *testing.T) {
 // terminator (LF/EOF-unterminated) — in flat and nested wrappers.
 // Expectations are built from the axes (never from the production scanner):
 // exact set/remove bytes, sibling survival, and that each non-empty output
-// re-parses. For every shape it also asserts that terminal body spaces and a
-// trailing blank line change the managed fingerprint, and that inserting an
-// unrelated sibling keeps every block byte identical.
+// re-parses. Newline semantics are part of the axes: a block line's
+// terminator — the final content line's included — is a block byte, so with
+// an EOF tail the terminated and unterminated variants fingerprint
+// differently (clip/keep parse different values there), while a tail's own
+// terminator is unmanaged and moves nothing. For every shape it also asserts
+// that terminal body spaces and a trailing blank line change the managed
+// fingerprint, and that inserting an unrelated sibling keeps every block
+// byte identical.
 func TestBlockScalarShapeCombinations(t *testing.T) {
 	styles := []struct{ name, marker string }{
 		{"literal", "|"},
@@ -1383,10 +1577,39 @@ func TestBlockScalarShapeCombinations(t *testing.T) {
 									t.Fatalf("%s: terminal body spaces did not change the fingerprint", label)
 								}
 							}
-							// For an unterminated document with no tail, the
-							// "extra blank" degenerates into line 1's own
-							// terminator and is not a block byte; skip it.
-							if !(unterminated && tail.src == "") {
+							// The final content line's terminator is a
+							// block byte: with no tail, an unterminated
+							// document ends the region at the line's last
+							// byte while its terminated counterpart
+							// carries the break (clip/keep parse
+							// different values there). A tail's own
+							// terminator is unmanaged and must not move
+							// the fingerprint. The empty body has no
+							// content line, so its span is the bare
+							// indicator either way and both sides skip.
+							if len(body.lines) > 0 {
+								terminatedSrc := build(header, body, tail, false, false, false)
+								fpTerm, err := FingerprintManaged([]byte(terminatedSrc), paths)
+								if err != nil {
+									t.Fatalf("%s: fingerprint: %v", label, err)
+								}
+								if tail.src == "" {
+									if unterminated && fpTerm == fpSrc {
+										t.Fatalf("%s: terminating the final content line did not change the fingerprint", label)
+									}
+								} else if fpTerm != fpSrc {
+									t.Fatalf("%s: the tail's unmanaged terminator moved the fingerprint", label)
+								}
+							}
+							// An extra trailing blank line is a block byte.
+							// With a tail it trails the body like any kept
+							// blank; with no tail it becomes the final
+							// content line's own terminator — the same
+							// a\n-vs-a byte the check above pins. Only the
+							// empty body has no content line to terminate:
+							// there the extra blank degenerates into the
+							// header line's own unmanaged terminator.
+							if !(unterminated && tail.src == "" && len(body.lines) == 0) {
 								blanked := build(header, body, tail, unterminated, false, true)
 								fpBlanked, err := FingerprintManaged([]byte(blanked), paths)
 								if err != nil {

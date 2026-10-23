@@ -213,11 +213,12 @@ func (d *doc) setScalar(raw []byte, path []string, v string) ([]byte, error) {
 }
 
 // replaceSpan splices rep over the value node's source span. A block scalar
-// whose body ends with trailing blank lines consumes those lines'
-// terminators, so its span can end just past a line break; the document's
-// own newline is re-emitted so the replacement remains separated from the
-// line that follows (or keeps the file terminated at EOF). Every other span
-// shape ends mid-line and is spliced unchanged.
+// region ends just past a line break — the final content line's terminator,
+// or a trailing blank line's — so the document's own newline is re-emitted
+// over the consumed one and the replacement remains separated from the line
+// that follows (or keeps the file terminated at EOF). Every other span shape
+// ends mid-line and is spliced unchanged; an EOF-unterminated final block
+// line also has no terminator to re-emit.
 func (d *doc) replaceSpan(raw []byte, val *yaml.Node, rep []byte) []byte {
 	start, end := d.valueSpan(val)
 	if end > start && end <= len(d.raw) && d.raw[end-1] == '\n' {
@@ -482,7 +483,7 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 // plus, in block context, every folded continuation line indented deeper
 // than the value's own key line. That covers multiline plain scalars (which
 // yaml.v3 reports at their first line/column only). Literal/folded block
-// scalars span from their indicator through the last byte of the block; see
+// scalars span from their indicator through the block's final line break; see
 // blockScalarSpan.
 // Interior line breaks, blank lines, and continuation indentation belong to
 // the region; trailing whitespace on each line and a whitespace-delimited
@@ -584,8 +585,12 @@ func (d *doc) blockPlainSpan(n *yaml.Node, start int) (int, int) {
 }
 
 // blockScalarSpan spans the source region of a literal (|) or folded (>)
-// block scalar: the indicator on the key line through the last byte of the
-// block. Inside the body every byte is content — a '#' begins no comment,
+// block scalar: the indicator on the key line through the last line break of
+// the block. A block line's terminator — content or blank — is the value's
+// own line break and belongs to the region; an EOF-unterminated final line
+// has none, which is exactly how a terminated and an unterminated document
+// carry different values (a\n vs a) out of byte-identical content. Inside
+// the body every byte is content — a '#' begins no comment,
 // trailing spaces and tabs are scalar text, and blank lines belong to the
 // region (the header's chomping indicator applies to them) — so the scan
 // runs to the first non-empty line at or outside the block's indentation
@@ -643,9 +648,16 @@ func (d *doc) blockScalarSpan(n *yaml.Node, start int) (int, int) {
 			break // at or outside the block's indentation: not content
 		}
 		// The line is block content: inside the body trailing whitespace
-		// is scalar text, so the region runs to the line terminator (not
-		// past it — a following sibling still needs its own line break).
-		end = lineEnd
+		// is scalar text, and the line's terminator is the value's own
+		// line break, so the region runs through it — for every block
+		// line alike, content or blank. An EOF-unterminated final line
+		// has no terminator and the region simply ends at its last byte;
+		// that missing break is exactly what makes an unterminated
+		// document's value differ from a terminated one's. Consumers
+		// keep the separation: replaceSpan re-emits the document's
+		// newline over a span that ends past one, and removal and
+		// insertion address whole lines.
+		end = d.endOfLineWithNewline(line)
 	}
 	return start, end
 }
@@ -945,11 +957,12 @@ func (d *doc) valueBlockEnd(val *yaml.Node) int {
 		}
 		line := c.Line
 		if c.Kind == yaml.ScalarNode {
-			// end is exclusive, and a block scalar with trailing blank
-			// lines ends just past their terminators — at the first byte
-			// of the line AFTER the block. end-1 is the block's last byte,
-			// which always lies on the block's own last line; using it
-			// keeps an unrelated following line out of the removal span.
+			// end is exclusive, and a block scalar region ends just past a
+			// line break — the final content line's terminator, or a
+			// trailing blank line's — at the first byte of the line AFTER
+			// the block. end-1 is that terminator byte, which always lies
+			// on the block's own last line; using it keeps an unrelated
+			// following line out of the removal span.
 			if _, end := d.valueSpan(c); end > d.offset(line, 1) {
 				if le := d.lineOf(end - 1); le > line {
 					line = le
@@ -1134,7 +1147,9 @@ func sequenceBlock(items []string, ind int, nl string) []byte {
 
 // FingerprintManaged computes the SHA-256 hash of only the managed spans of raw
 // addressed by paths. Managed spans are the exact value bytes of the scalar or
-// sequence at each path (including quotes for quoted scalars). Missing paths
+// sequence at each path (including quotes for quoted scalars, and including a
+// block scalar's final line break so a terminated and an unterminated document
+// whose parsed values differ — a\n vs a — never share a hash). Missing paths
 // contribute an empty span. The hash is order-independent: paths are sorted
 // before hashing so two files with the same managed values (in any key order)
 // share a fingerprint. This feeds drift detection.
