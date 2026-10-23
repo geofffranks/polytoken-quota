@@ -806,9 +806,9 @@ func tieBandSnap(usedFrac float64) *quota.QuotaSnapshot {
 	}
 }
 
-// TestRankSignalTieBandBoundaryClasses pins cluster behavior at the 0.20
-// signal tie band itself, with below-band, exactly-at-band, and above-band
-// adjacent gaps in one deterministic fixture.
+// TestRankSignalTieBandBoundaryClasses pins cluster behavior near the 0.20
+// signal tie band, with below-band and above-band adjacent gaps in one
+// deterministic end-to-end fixture.
 //
 // Independent model (no production computation produces these expectations):
 // tieBandSnap uses one 48h window whose reset is exactly 24h away, so the
@@ -816,19 +816,23 @@ func tieBandSnap(usedFrac float64) *quota.QuotaSnapshot {
 // 2*remaining - 2*used = 2 - 4*used:
 //
 //	used   0.48   0.50   0.52  -> +0.08    0.00   -0.08   (gaps 0.16: below)
-//	used   0.45   0.50   0.55  -> +0.20    0.00   -0.20   (gaps 0.20: at)
+//	used   0.45   0.50   0.55  -> +0.20    0.00   -0.20   (nominally at)
 //	used   0.44   0.50   0.56  -> +0.24    0.00   -0.24   (gaps 0.24: above)
 //
 // "gaps" are the adjacent differences of the sorted signals; with the zero
 // signal in the middle each adjacent gap equals the outer signal magnitude.
 // A new cluster starts when adjacent sorted signals differ by at least the
-// band, so the below case stays one cluster (one shared rank) while the at
-// and above cases split into three clusters (three ranks each). Floating
-// point: the computed at-band signals land just above the band constant
-// (0.20000000000000018 vs 0.200000000000000011, a fixed six-double gap that
-// the single-window arithmetic produces identically on every IEEE-754
-// platform), and the below-band gap lands at 0.16000000000000014 — both far
-// from a rounding flip.
+// band, so the below case stays one cluster (one shared rank) while the
+// above case splits into three clusters (three ranks each).
+//
+// Floating point: the nominal-at fixture's computed gaps land just ABOVE the
+// band constant (0.20000000000000018 vs 0.200000000000000011, a fixed
+// six-double gap that the single-window arithmetic produces identically on
+// every IEEE-754 platform), and the below-band gap lands at
+// 0.16000000000000014 — both far from a rounding flip. The nominal-at case
+// therefore exercises the strictly-above side of the comparison end to end;
+// the exactly-at-the-band boundary itself is pinned deterministically and
+// directly in TestAssignSignalClustersExactTieBandThreshold.
 func TestRankSignalTieBandBoundaryClasses(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -849,7 +853,10 @@ func TestRankSignalTieBandBoundaryClasses(t *testing.T) {
 		},
 		{
 			// Inverted weights: the cluster key must decide before weight.
-			name:      "adjacent gaps exactly 0.20 split",
+			// The computed gaps land at 0.20000000000000018 — above the
+			// band, not exactly at it — so this case exercises the
+			// strictly-above side end to end.
+			name:      "adjacent gaps land just above 0.20, split",
 			used:      []float64{0.45, 0.50, 0.55},
 			weights:   []int{1, 2, 3},
 			wantOrder: []string{"hi", "mid", "lo"},
@@ -881,6 +888,88 @@ func TestRankSignalTieBandBoundaryClasses(t *testing.T) {
 				if got.Entries[i].Rank != wantRank {
 					t.Fatalf("%s rank = %d, want %d (entries: %+v)",
 						got.Entries[i].MappingID, got.Entries[i].Rank, wantRank, got.Entries)
+				}
+			}
+		})
+	}
+}
+
+// TestAssignSignalClustersExactTieBandThreshold pins the cluster boundary at
+// the literal signalTieBand constant, which no end-to-end Rank fixture can
+// reach: the single-window arithmetic lands a fixed six-double gap above the
+// band (see TestRankSignalTieBandBoundaryClasses), so flipping the cluster
+// comparison from >= to > would survive every routing case. This test calls
+// assignSignalClusters directly with signals 0.5 and 0.3 — their float64
+// difference is exactly the double nearest 0.20, i.e. signalTieBand itself —
+// plus the adjacent doubles that put the gap one double below and one double
+// above the band.
+//
+// Membership is stated independently of the function under test, from the
+// documented contract: entries share a cluster exactly while adjacent sorted
+// signals differ by less than the band, so a new cluster (the lower-signal
+// entry in cluster 1) starts precisely when the gap is >= 0.20. One double
+// below: same cluster. Exactly at, or one double above: split.
+func TestAssignSignalClustersExactTieBandThreshold(t *testing.T) {
+	const hi, lo = 0.5, 0.3
+	// Pin the arithmetic identities the membership expectations rest on: if
+	// a toolchain ever moved these literals off the exact-at pair, the test
+	// must fail loudly instead of silently degrading to the above case.
+	if gap := hi - lo; gap != signalTieBand {
+		t.Fatalf("fixture gap %.20g != signalTieBand %.20g: the exactly-at construction drifted", gap, signalTieBand)
+	}
+	if below, above := math.Nextafter(lo, math.Inf(1)), math.Nextafter(lo, 0); !(hi-below < signalTieBand) || !(hi-above > signalTieBand) {
+		t.Fatalf("adjacent-double construction drifted: hi-below=%.20g hi-above=%.20g band=%.20g",
+			hi-below, hi-above, signalTieBand)
+	}
+	cases := []struct {
+		name      string
+		lo        float64
+		gapClass  string
+		wantSplit bool
+	}{
+		{"gap one double below the band", math.Nextafter(lo, math.Inf(1)), "below", false},
+		{"gap exactly the band", lo, "at", true},
+		{"gap one double above the band", math.Nextafter(lo, 0), "above", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gap := hi - tc.lo
+			// Independent gap classification: membership follows from this
+			// classification and the contract (split iff gap >= band), not
+			// from calling the function under test.
+			var split bool
+			switch {
+			case gap < signalTieBand:
+				if tc.gapClass != "below" {
+					t.Fatalf("gap %.20g classified %s but is below the band %.20g", gap, tc.gapClass, signalTieBand)
+				}
+			case gap == signalTieBand:
+				if tc.gapClass != "at" {
+					t.Fatalf("gap %.20g classified %s but equals the band %.20g", gap, tc.gapClass, signalTieBand)
+				}
+				split = true
+			default:
+				if tc.gapClass != "above" {
+					t.Fatalf("gap %.20g classified %s but is above the band %.20g", gap, tc.gapClass, signalTieBand)
+				}
+				split = true
+			}
+			if split != tc.wantSplit {
+				t.Fatalf("gap %.20g should %s, per the stated membership", gap, map[bool]string{true: "split", false: "stay one cluster"}[tc.wantSplit])
+			}
+			for _, order := range [][]int{{0, 1}, {1, 0}} {
+				hiS, loS := hi, tc.lo
+				items := make([]entry, 2)
+				items[order[0]] = entry{item: rankItem{signal: &hiS, cluster: -1}}
+				items[order[1]] = entry{item: rankItem{signal: &loS, cluster: -1}}
+				assignSignalClusters(items)
+				wantLo := 0
+				if tc.wantSplit {
+					wantLo = 1
+				}
+				if items[order[0]].item.cluster != 0 || items[order[1]].item.cluster != wantLo {
+					t.Fatalf("input order %v: clusters = [%d, %d], want [0, %d] (gap %.20g vs band %.20g)",
+						order, items[order[0]].item.cluster, items[order[1]].item.cluster, wantLo, gap, signalTieBand)
 				}
 			}
 		})

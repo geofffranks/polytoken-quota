@@ -209,8 +209,21 @@ func (d *doc) setScalar(raw []byte, path []string, v string) ([]byte, error) {
 		start := d.offset(val.Line, val.Column)
 		return splice(raw, start, start, []byte(" "+encodeScalar(v, 0))), nil
 	}
+	return d.replaceSpan(raw, val, []byte(emitScalarValue(val, v))), nil
+}
+
+// replaceSpan splices rep over the value node's source span. A block scalar
+// whose body ends with trailing blank lines consumes those lines'
+// terminators, so its span can end just past a line break; the document's
+// own newline is re-emitted so the replacement remains separated from the
+// line that follows (or keeps the file terminated at EOF). Every other span
+// shape ends mid-line and is spliced unchanged.
+func (d *doc) replaceSpan(raw []byte, val *yaml.Node, rep []byte) []byte {
 	start, end := d.valueSpan(val)
-	return splice(raw, start, end, []byte(emitScalarValue(val, v))), nil
+	if end > start && end <= len(d.raw) && d.raw[end-1] == '\n' {
+		rep = append(rep, d.newline...)
+	}
+	return splice(raw, start, end, rep)
 }
 
 // setBool replaces the boolean value at path with v. If the key is absent, it is
@@ -251,8 +264,7 @@ func (d *doc) setBool(raw []byte, path []string, v bool) ([]byte, error) {
 			return nil, newError("document: %q is not a boolean", strings.Join(path, "."))
 		}
 	}
-	start, end := d.valueSpan(val)
-	return splice(raw, start, end, []byte(rep)), nil
+	return d.replaceSpan(raw, val, []byte(rep)), nil
 }
 
 // setSequence replaces the sequence at path with the items. It rewrites the
@@ -467,15 +479,16 @@ func (d *doc) removeKey(raw []byte, path []string) ([]byte, error) {
 // first value byte for plain scalars, so unquoted values need no adjustment.
 //
 // Plain scalars span their complete source region: the first line's content
-// plus, in block context, every folded continuation line indented deeper than
-// the value's own key line. That covers multiline plain scalars (which
+// plus, in block context, every folded continuation line indented deeper
+// than the value's own key line. That covers multiline plain scalars (which
 // yaml.v3 reports at their first line/column only). Literal/folded block
-// scalars span from their indicator through their last content line; see
+// scalars span from their indicator through the last byte of the block; see
 // blockScalarSpan.
 // Interior line breaks, blank lines, and continuation indentation belong to
 // the region; trailing whitespace on each line and a whitespace-delimited
-// comment do not. In flow context the region ends at the first flow
-// indicator instead.
+// comment do not — except inside block scalars, where trailing whitespace
+// and blank lines are content the header's chomping indicator applies to.
+// In flow context the region ends at the first flow indicator instead.
 func (d *doc) valueSpan(n *yaml.Node) (int, int) {
 	start := d.offset(n.Line, n.Column)
 	if n.Style == yaml.DoubleQuotedStyle {
@@ -571,18 +584,22 @@ func (d *doc) blockPlainSpan(n *yaml.Node, start int) (int, int) {
 }
 
 // blockScalarSpan spans the source region of a literal (|) or folded (>)
-// block scalar: the indicator on the key line through the last content line.
-// Inside the body every byte is content — a '#' begins no comment and blank
-// lines belong to the region — so the scan runs to the first non-empty line
-// indented shallower than the block's content indentation (or end of input).
-// The content indentation is the explicit indicator digit (relative to the
-// key line's indentation) when the header carries one, and otherwise the
-// indentation of the first non-empty body line; leading blank lines stay
-// inside the region either way. Trailing whitespace on the final content
-// line stays outside the span, matching the plain-scalar convention. A
-// comment on the header line ends that line's scan, but once a body extends
-// the region past it the comment sits inside the span (it presents the
-// value, like the quotes of a quoted scalar) and is replaced with it.
+// block scalar: the indicator on the key line through the last byte of the
+// block. Inside the body every byte is content — a '#' begins no comment,
+// trailing spaces and tabs are scalar text, and blank lines belong to the
+// region (the header's chomping indicator applies to them) — so the scan
+// runs to the first non-empty line at or outside the block's indentation
+// (or end of input), with any trailing blank lines staying inside the
+// region up to that line. The content indentation is the explicit indicator
+// digit (relative to the key line's indentation) when the header carries
+// one, and otherwise the indentation of the first non-empty body line. An
+// inferred body whose first non-empty line is not indented deeper than the
+// key line is empty: the sibling or dedented line ends the scan and an
+// empty body can never swallow it. Leading blank lines stay inside the
+// region either way. A comment on the header line ends that line's scan,
+// but once a body extends the region past it the comment sits inside the
+// span (it presents the value, like the quotes of a quoted scalar) and is
+// replaced with it.
 func (d *doc) blockScalarSpan(n *yaml.Node, start int) (int, int) {
 	end := d.lineContentEnd(start)
 	keyIndent := d.lineIndent(d.offset(n.Line, 1))
@@ -600,19 +617,34 @@ func (d *doc) blockScalarSpan(n *yaml.Node, start int) (int, int) {
 		for lineEnd < len(d.raw) && d.raw[lineEnd] != '\n' && d.raw[lineEnd] != '\r' {
 			lineEnd++
 		}
-		if ind == lineEnd-lineStart {
-			continue // blank or whitespace-only line: block content candidate
+		whitespaceOnly := true
+		for i := lineStart; i < lineEnd; i++ {
+			if d.raw[i] != ' ' && d.raw[i] != '\t' {
+				whitespaceOnly = false
+				break
+			}
+		}
+		if whitespaceOnly {
+			// Blank or whitespace-only line: its bytes and terminator are
+			// block bytes (chomping applies to them), so the region
+			// extends through the line terminator. Whether these lines
+			// turn out to be body or trailing lines, they are not
+			// sibling lines, so extending here cannot swallow one.
+			end = d.endOfLineWithNewline(line)
+			continue
 		}
 		if contentIndent == 0 {
+			if ind <= keyIndent {
+				break // empty body: the sibling/dedent line is not content
+			}
 			contentIndent = ind // first non-empty body line fixes the indentation
 		}
 		if ind < contentIndent {
 			break // at or outside the block's indentation: not content
 		}
-		// The line is block content up to its last non-whitespace byte.
-		for lineEnd > lineStart && (d.raw[lineEnd-1] == ' ' || d.raw[lineEnd-1] == '\t') {
-			lineEnd--
-		}
+		// The line is block content: inside the body trailing whitespace
+		// is scalar text, so the region runs to the line terminator (not
+		// past it — a following sibling still needs its own line break).
 		end = lineEnd
 	}
 	return start, end
@@ -913,8 +945,13 @@ func (d *doc) valueBlockEnd(val *yaml.Node) int {
 		}
 		line := c.Line
 		if c.Kind == yaml.ScalarNode {
+			// end is exclusive, and a block scalar with trailing blank
+			// lines ends just past their terminators — at the first byte
+			// of the line AFTER the block. end-1 is the block's last byte,
+			// which always lies on the block's own last line; using it
+			// keeps an unrelated following line out of the removal span.
 			if _, end := d.valueSpan(c); end > d.offset(line, 1) {
-				if le := d.lineOf(end); le > line {
+				if le := d.lineOf(end - 1); le > line {
 					line = le
 				}
 			}

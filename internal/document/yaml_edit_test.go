@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -948,3 +949,502 @@ func TestSequenceEditUnderLaterLineNull(t *testing.T) {
 	}
 }
 
+// ----- Block scalar empty bodies (sibling-swallow regressions) ---------------
+
+// TestBlockScalarEmptyBodyKeepsSibling pins the empty-body boundary: a block
+// scalar whose body is empty (no non-blank line indented deeper than the key
+// before a sibling or dedented line) ends at the key line. Setting a value or
+// removing the key must leave the sibling — and everything after it — intact.
+// Expectations are exact bytes; every result must also re-parse.
+func TestBlockScalarEmptyBodyKeepsSibling(t *testing.T) {
+	cases := []struct {
+		name        string
+		in          string
+		path        []string
+		wantSet     string
+		wantRemoved string
+	}{
+		{
+			name:        "empty inferred body at top level",
+			in:          "model: |\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "empty inferred body nested under a key",
+			in:          "top:\n  model: >\n  keep: 1\noutside: 2\n",
+			path:        []string{"top", "model"},
+			wantSet:     "top:\n  model: new\n  keep: 1\noutside: 2\n",
+			wantRemoved: "top:\n  keep: 1\noutside: 2\n",
+		},
+		{
+			name:        "empty explicit-indicator body",
+			in:          "model: |2\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			// The blank line belongs to the block (chomping applies to it),
+			// so both edits consume it; the sibling still survives.
+			name:        "empty body with blank line before sibling",
+			in:          "model: |\n\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "empty body before dedented comment",
+			in:          "model: |\n# c\nother: 1\n",
+			path:        []string{"model"},
+			wantSet:     "model: new\n# c\nother: 1\n",
+			wantRemoved: "# c\nother: 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(tc.in)
+			out, err := EditYAML(in, []Edit{{Path: tc.path, Kind: Scalar, Scalar: strPtr("new")}})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("replaced output does not parse: %v", err)
+			}
+			out, err = EditYAML(in, []Edit{{Path: tc.path, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+			if _, err := EditYAML(out, nil); err != nil {
+				t.Fatalf("removed output does not parse: %v", err)
+			}
+		})
+	}
+}
+
+// TestBlockScalarEmptyBodyFingerprintAndInsert proves the empty body's
+// fingerprint covers only the key line (a swallowed sibling line would move
+// it) and that inserting a sibling key lands at the sibling position instead
+// of inside the region a broken scanner would swallow.
+func TestBlockScalarEmptyBodyFingerprintAndInsert(t *testing.T) {
+	paths := [][]string{{"model"}}
+	empty := []byte("model: |\nother: 1\n")
+	nonEmpty := []byte("model: |\n  x\nother: 1\n")
+	fpEmpty, err := FingerprintManaged(empty, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpNonEmpty, err := FingerprintManaged(nonEmpty, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpEmpty == fpNonEmpty {
+		t.Fatal("empty and non-empty block bodies fingerprinted the same")
+	}
+	// The same empty body in a different sibling context: fingerprint must
+	// not move.
+	moved := []byte("other: 2\nmodel: |\n")
+	fpMoved, err := FingerprintManaged(moved, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpMoved != fpEmpty {
+		t.Fatal("empty body fingerprint moved across sibling changes")
+	}
+	// Inserting a sibling at top level appends after the existing sibling.
+	out, err := EditYAML(empty, []Edit{scalarEdit("extra", "x")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "model: |\nother: 1\nextra: x\n"; got != want {
+		t.Fatalf("insert beside an empty-body block:\n got=%q\nwant=%q", got, want)
+	}
+	// Inserting under a nested empty-body block must insert at the nested
+	// indentation, before the dedented sibling — not after it.
+	nested := []byte("top:\n  model: |\noutside: 2\n")
+	out, err = EditYAML(nested, []Edit{{Path: []string{"top", "extra"}, Kind: Scalar, Scalar: strPtr("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(out), "top:\n  model: |\n  extra: x\noutside: 2\n"; got != want {
+		t.Fatalf("insert under a nested empty-body block:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// ----- Block scalar trailing whitespace (semantic-data regressions) ---------
+
+// TestBlockScalarTrailingWhitespaceIsSemantic pins that terminal spaces and
+// tabs on a block body line, and blank lines after the last content line,
+// are scalar source bytes — not presentation: they are part of the parsed
+// value (under keep chomping verbatim), they change the managed fingerprint,
+// and replacing the value consumes the complete body (including those bytes)
+// without leaving orphan lines or touching the following sibling.
+func TestBlockScalarTrailingWhitespaceIsSemantic(t *testing.T) {
+	paths := [][]string{{"model"}}
+	// Terminal spaces on the last content line change the value ("a\n" vs
+	// "a  \n") and must change the fingerprint.
+	fpA, err := FingerprintManaged([]byte("model: |\n  a\n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpSpaces, err := FingerprintManaged([]byte("model: |\n  a  \n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpA == fpSpaces {
+		t.Fatal("terminal body spaces did not change the fingerprint")
+	}
+	// A keep-chomp trailing blank line is kept in the value and must change
+	// the fingerprint.
+	fpB, err := FingerprintManaged([]byte("model: |+\n  a\n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBlank, err := FingerprintManaged([]byte("model: |+\n  a\n\n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpB == fpBlank {
+		t.Fatal("keep-chomp trailing blank line did not change the fingerprint")
+	}
+	// Same for CRLF documents.
+	fpCRLF, err := FingerprintManaged([]byte("model: |\r\n  a\r\n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpCRLFSpaces, err := FingerprintManaged([]byte("model: |\r\n  a  \r\n"), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fpCRLF == fpCRLFSpaces {
+		t.Fatal("CRLF terminal body spaces did not change the fingerprint")
+	}
+
+	// The parsed value independently proves the bytes are scalar data: keep
+	// chomping preserves the terminal spaces and every kept line's newline.
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte("model: |+\n  a  \n  \n\nother: 1\n"), &root); err != nil {
+		t.Fatal(err)
+	}
+	if v := findKeyPath(t, &root, "model"); v == nil || v.Value != "a  \n\n\n" {
+		t.Fatalf("keep-chomp semantic value = %v, want %q", v, "a  \n\n\n")
+	}
+
+	// Replacement and removal must consume the complete body — terminal
+	// spaces, whitespace-only lines, and kept blank lines included — with no
+	// leftovers, while the sibling survives untouched.
+	cases := []struct {
+		name        string
+		in          string
+		wantSet     string
+		wantRemoved string
+	}{
+		{
+			name:        "keep body with terminal spaces and kept blanks",
+			in:          "model: |+\n  a  \n  \n\nother: 1\n",
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "trailing blank line before sibling (clip)",
+			in:          "model: |\n  a\n\nother: 1\n",
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "trailing blanks at terminated EOF",
+			in:          "other: 1\nmodel: |+\n  a\n\n",
+			wantSet:     "other: 1\nmodel: new\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "terminal spaces on unterminated final line",
+			in:          "model: |\n  a  ",
+			wantSet:     "model: new",
+			wantRemoved: "",
+		},
+		{
+			name:        "CRLF body with terminal spaces and kept blank",
+			in:          "model: |+\r\n  a  \r\n\r\nother: 1\r\n",
+			wantSet:     "model: new\r\nother: 1\r\n",
+			wantRemoved: "other: 1\r\n",
+		},
+		{
+			// The header comment sits between the indicator and the body, so
+			// the whole region including it is replaced; the body's trailing
+			// spaces and blank line are consumed with it.
+			name:        "header comment with spaces and kept blanks",
+			in:          "model: | # h\n  a  \n\nother: 1\n",
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+		{
+			name:        "folded body with terminal spaces and kept blank",
+			in:          "model: >+\n  a  \n\nother: 1\n",
+			wantSet:     "model: new\nother: 1\n",
+			wantRemoved: "other: 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []byte(tc.in)
+			out, err := EditYAML(in, []Edit{scalarEdit("model", "new")})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			// The replacement value must parse back as the plain scalar we
+			// set, and a sibling must keep its value.
+			var root yaml.Node
+			if err := yaml.Unmarshal(out, &root); err != nil {
+				t.Fatalf("replaced output does not parse: %v", err)
+			}
+			if v := findKeyPath(t, &root, "model"); v == nil || v.Value != "new" {
+				t.Fatalf("replaced model value = %v, want new", v)
+			}
+			if v := findKeyPath(t, &root, "other"); v != nil && v.Value != "1" {
+				t.Fatalf("sibling other value = %v, want 1", v)
+			}
+			out, err = EditYAML(in, []Edit{{Path: []string{"model"}, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), tc.wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+			if len(out) > 0 {
+				if _, err := EditYAML(out, nil); err != nil {
+					t.Fatalf("removed output does not parse: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// ----- Block scalar shapes (constructed combinations) -----------------------
+
+// TestBlockScalarShapeCombinations replaces and removes across constructed
+// block scalar shapes — style (literal/folded) x chomping (clip/keep/strip) x
+// indentation (inferred/explicit 2) x body (empty/plain/terminal-space/
+// inner-blank) x tail (sibling/blank-then-sibling/terminated EOF) x line
+// terminator (LF/EOF-unterminated) — in flat and nested wrappers.
+// Expectations are built from the axes (never from the production scanner):
+// exact set/remove bytes, sibling survival, and that each non-empty output
+// re-parses. For every shape it also asserts that terminal body spaces and a
+// trailing blank line change the managed fingerprint, and that inserting an
+// unrelated sibling keeps every block byte identical.
+func TestBlockScalarShapeCombinations(t *testing.T) {
+	styles := []struct{ name, marker string }{
+		{"literal", "|"},
+		{"folded", ">"},
+	}
+	chompings := []struct{ name, marker string }{
+		{"clip", ""},
+		{"keep", "+"},
+		{"strip", "-"},
+	}
+	indents := []struct{ name, marker string }{
+		{"inferred", ""},
+		{"explicit2", "2"},
+	}
+	bodies := []struct {
+		name  string
+		lines []string
+	}{
+		{"empty", nil},
+		{"plain", []string{"a", "b"}},
+		{"terminal-space", []string{"a", "b  "}},
+		{"inner-blank", []string{"a", "", "b"}},
+	}
+	tails := []struct {
+		name       string
+		src        string // appended after the body
+		setTail    string // what follows the replaced key line
+		removeRest string // what remains after removal
+	}{
+		{"sibling", "other: 1\n", "other: 1\n", "other: 1\n"},
+		// The blank line is a block byte (chomping applies to it), so both
+		// edits consume it and the sibling directly follows the key line.
+		{"blank-then-sibling", "\nother: 1\n", "other: 1\n", "other: 1\n"},
+		{"eof-terminated", "", "", ""},
+	}
+	// build renders the document for the given axes; spacesLast appends two
+	// terminal spaces to the last non-empty body line, extraBlank inserts one
+	// more blank line after the body.
+	build := func(header string, body struct {
+		name  string
+		lines []string
+	}, tail struct {
+		name       string
+		src        string
+		setTail    string
+		removeRest string
+	}, unterminated, spacesLast, extraBlank bool) string {
+		src := header + "\n"
+		for i, l := range body.lines {
+			if l == "" {
+				src += "\n"
+				continue
+			}
+			if spacesLast && i == len(body.lines)-1 {
+				l += "  "
+			}
+			src += "  " + l + "\n"
+		}
+		if extraBlank {
+			src += "\n"
+		}
+		src += tail.src
+		if unterminated && len(src) > 0 && src[len(src)-1] == '\n' {
+			src = src[:len(src)-1]
+		}
+		return src
+	}
+	run := func(name, in, wantSet, wantRemoved string, path []string) {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(in)
+			out, err := EditYAML(raw, []Edit{{Path: path, Kind: Scalar, Scalar: strPtr("new")}})
+			if err != nil {
+				t.Fatalf("replace rejected: %v", err)
+			}
+			if got, want := string(out), wantSet; got != want {
+				t.Fatalf("replace:\n got=%q\nwant=%q", got, want)
+			}
+			var root yaml.Node
+			if err := yaml.Unmarshal(out, &root); err != nil {
+				t.Fatalf("replaced output does not parse: %v", err)
+			}
+			if v := findKeyPath(t, &root, path...); v == nil || v.Value != "new" {
+				t.Fatalf("replaced value at %v = %v, want new", path, v)
+			}
+			out, err = EditYAML(raw, []Edit{{Path: path, Remove: true}})
+			if err != nil {
+				t.Fatalf("remove rejected: %v", err)
+			}
+			if got, want := string(out), wantRemoved; got != want {
+				t.Fatalf("remove:\n got=%q\nwant=%q", got, want)
+			}
+			if len(out) > 0 {
+				if _, err := EditYAML(out, nil); err != nil {
+					t.Fatalf("removed output does not parse: %v", err)
+				}
+			}
+		})
+	}
+	for _, style := range styles {
+		for _, chomp := range chompings {
+			for _, indent := range indents {
+				for _, body := range bodies {
+					for _, tail := range tails {
+						for _, unterminated := range []bool{false, true} {
+							header := "model: " + style.marker + indent.marker + chomp.marker
+							src := build(header, body, tail, unterminated, false, false)
+							wantSet := "model: new\n" + tail.setTail
+							wantRemoved := tail.removeRest
+							if unterminated {
+								// The document's final line is unterminated:
+								// the key line when no tail follows, otherwise
+								// the sibling line. Either way nothing at EOF
+								// is terminated, and a following sibling keeps
+								// its unterminated final byte.
+								wantSet = "model: new"
+								if tail.setTail != "" {
+									wantSet = "model: new\n" + strings.TrimSuffix(tail.setTail, "\n")
+								}
+								wantRemoved = strings.TrimSuffix(tail.removeRest, "\n")
+							}
+							label := style.name + "/" + chomp.name + "/" + indent.name + "/" +
+								body.name + "/" + tail.name
+							run(label+"/lf", src, wantSet, wantRemoved, []string{"model"})
+
+							// Terminal body spaces and a trailing blank line
+							// are block bytes: each must move the fingerprint.
+							paths := [][]string{{"model"}}
+							fpSrc, err := FingerprintManaged([]byte(src), paths)
+							if err != nil {
+								t.Fatalf("%s: fingerprint: %v", label, err)
+							}
+							if len(body.lines) > 0 && body.lines[len(body.lines)-1] != "" {
+								spaced := build(header, body, tail, unterminated, true, false)
+								fpSpaced, err := FingerprintManaged([]byte(spaced), paths)
+								if err != nil {
+									t.Fatalf("%s: fingerprint: %v", label, err)
+								}
+								if fpSpaced == fpSrc {
+									t.Fatalf("%s: terminal body spaces did not change the fingerprint", label)
+								}
+							}
+							// For an unterminated document with no tail, the
+							// "extra blank" degenerates into line 1's own
+							// terminator and is not a block byte; skip it.
+							if !(unterminated && tail.src == "") {
+								blanked := build(header, body, tail, unterminated, false, true)
+								fpBlanked, err := FingerprintManaged([]byte(blanked), paths)
+								if err != nil {
+									t.Fatalf("%s: fingerprint: %v", label, err)
+								}
+								if fpBlanked == fpSrc {
+									t.Fatalf("%s: trailing blank line did not change the fingerprint", label)
+								}
+							}
+
+							// Inserting an unrelated sibling keeps every block
+							// byte identical: the entry appends after the last
+							// line (terminating an unterminated final line).
+							wantInsert := src + "extra: x\n"
+							if unterminated {
+								wantInsert = src + "\nextra: x\n"
+							}
+							out, err := EditYAML([]byte(src), []Edit{scalarEdit("extra", "x")})
+							if err != nil {
+								t.Fatalf("%s: insert rejected: %v", label, err)
+							}
+							if got, want := string(out), wantInsert; got != want {
+								t.Fatalf("%s: insert beside the block:\n got=%q\nwant=%q", label, got, want)
+							}
+
+							// Nested variant: wrap in a top-level mapping one
+							// indentation level deeper.
+							ind := func(s string) string {
+								out := "top:\n"
+								for len(s) > 0 {
+									nl := -1
+									for i := 0; i < len(s); i++ {
+										if s[i] == '\n' {
+											nl = i
+											break
+										}
+									}
+									if nl < 0 {
+										out += "  " + s
+										break
+									}
+									out += "  " + s[:nl+1]
+									s = s[nl+1:]
+								}
+								return out
+							}
+							wrappedSet, wrappedRemoved := ind(wantSet), ind(wantRemoved)
+							if wantSet == "" {
+								wrappedSet = "top:\n"
+							}
+							if wantRemoved == "" {
+								wrappedRemoved = "top:\n"
+							}
+							run(label+"/nested", ind(src), wrappedSet, wrappedRemoved, []string{"top", "model"})
+						}
+					}
+				}
+			}
+		}
+	}
+}
