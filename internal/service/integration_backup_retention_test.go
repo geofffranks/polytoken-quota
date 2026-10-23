@@ -64,6 +64,14 @@ func TestCoordinatorAppliesPolicyBackupRetention(t *testing.T) {
 					"providers:\n  codex:\n    api_key: inert\n"+
 					"defaults:\n  full: codex/gpt\n")
 			writeFile(t, agentPath, liveBefore)
+			// Resolve the source root before seeding: macOS may spell the
+			// same temporary directory as /var or /private/var, while backup
+			// identities include the exact cleaned live path.
+			canonicalSource, err := filepath.EvalSymlinks(sourceDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			canonicalAgentPath := filepath.Join(canonicalSource, "subagents", "agent.md")
 
 			// --- durable utility paths ---
 			desiredPath := filepath.Join(root, "desired.yaml")
@@ -112,7 +120,7 @@ func TestCoordinatorAppliesPolicyBackupRetention(t *testing.T) {
 			seeder := publish.BackupStore{Root: backupRoot, Limit: 99}
 			var agentBase string
 			for i := 0; i < 3; i++ {
-				bp, err := seeder.Snapshot(agentPath)
+				bp, err := seeder.Snapshot(canonicalAgentPath)
 				if err != nil {
 					t.Fatalf("seed backup %d: %v", i+1, err)
 				}
@@ -175,8 +183,8 @@ func TestCoordinatorAppliesPolicyBackupRetention(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read live agent: %v", err)
 			}
-			if !strings.Contains(string(liveAfter), "zai/glm") {
-				t.Fatalf("live file not published with reconciled content:\n%s", liveAfter)
+			if !strings.Contains(string(liveAfter), "zai/glm") || string(liveAfter) == liveBefore {
+				t.Fatalf("live file not changed by reconciliation:\n%s", liveAfter)
 			}
 
 			// Runtime retention equals the loaded policy count per managed
@@ -244,7 +252,7 @@ func backupFiles(t *testing.T, root string) []backupFile {
 func agentBackups(files []backupFile, base string) []backupFile {
 	out := make([]backupFile, 0, len(files))
 	for _, f := range files {
-		if strings.HasPrefix(f.name, base) {
+		if strings.HasPrefix(f.name, base+".") {
 			out = append(out, f)
 		}
 	}
