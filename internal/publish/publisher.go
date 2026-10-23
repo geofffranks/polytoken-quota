@@ -597,6 +597,10 @@ func advanceState(prior state.State, j Journal, applied bool, now time.Time) sta
 		t.AttemptedAt = now
 		t.Pending = nil
 	} else {
+		// The journal's intended outcome describes success. A restore puts
+		// the prior bytes back, so preserve the last actually applied target
+		// metadata while recording the newly accepted failed attempt.
+		t = next.Targets[j.TargetID]
 		t.AttemptedRevision = j.NextRevision
 		t.AttemptedAt = now
 		t.Pending = &state.ApplyFailure{
