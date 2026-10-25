@@ -294,7 +294,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Report fixed safe triage notices
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           GH_SERVER_URL: ${{ github.server_url }}
           FS_LINUX: ${{ needs.filesystem-linux.result }}
