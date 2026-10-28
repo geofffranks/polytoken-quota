@@ -138,7 +138,10 @@ func (m *authorityHistoryModel) observe() {
 	}
 	m.wantRequest = append(m.wantRequest, "POST /reload")
 	m.loads++
-	if m.reload != http.StatusOK || m.failMarker {
+	if m.reload != http.StatusOK {
+		return
+	}
+	if m.failMarker {
 		m.failMarker = false
 		return
 	}
@@ -249,6 +252,67 @@ func TestReloadAuthorityGeneratedHistory(t *testing.T) {
 		})
 	}
 }
+func TestReloadAuthorityMarkerFailureSurvivesUnsuccessfulReloads(t *testing.T) {
+	h := newHookHarness(t)
+	t.Cleanup(h.server.Close)
+	base := uint64(4)
+	writeJSON(t, h.noticePath, map[string]any{"schema": SchemaVersion, "revision": 15})
+	writeJSON(t, h.statePath(), hookState{BaselineRevision: &base, ConsumedRevision: 9})
+	tr := &authorityHistoryTransport{t: t, statePath: h.statePath(), failMarker: true}
+	deps := HookDeps{NoticePath: h.noticePath, SessionsDir: h.sessionsDir, HTTPClient: &http.Client{Transport: tr}, Stdout: io.Discard, Environ: func(k string) string { return h.env[k] }}
+	m := authorityHistoryModel{revision: 15, consumed: 9, failMarker: true}
+	steps := []struct {
+		name         string
+		status       int
+		consumed     uint64
+		pending      bool
+		markerFailed bool
+	}{
+		{"conflict", http.StatusConflict, 9, true, false},
+		{"unauthorized", http.StatusUnauthorized, 9, true, false},
+		{"unavailable", http.StatusServiceUnavailable, 9, true, false},
+		{"marker_write_failure", http.StatusOK, 9, false, true},
+		{"successful_retry", http.StatusOK, 15, false, false},
+	}
+	for i, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			m.reload, tr.reloadStatus = step.status, step.status
+			m.wantRequest, tr.calls = nil, nil
+			m.observe()
+			if RunHook(deps) != 0 {
+				t.Fatal("hook did not fail open")
+			}
+			if m.consumed != step.consumed || m.failMarker != step.pending {
+				t.Fatalf("model consumed=%d pending=%t want consumed=%d pending=%t", m.consumed, m.failMarker, step.consumed, step.pending)
+			}
+			if tr.failMarker != step.pending || tr.markerFailed != step.markerFailed {
+				t.Fatalf("transport pending=%t markerFailed=%t want pending=%t markerFailed=%t", tr.failMarker, tr.markerFailed, step.pending, step.markerFailed)
+			}
+			if tr.markerFailed {
+				// Remove the obstruction and restore the last durable marker for retry.
+				if err := os.Remove(h.statePath()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(h.statePath(), tr.oldMarker, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				tr.markerFailed = false
+			}
+			st := readHookState(h.statePath())
+			if st.ConsumedRevision != step.consumed || st.BaselineRevision == nil || *st.BaselineRevision != base {
+				t.Fatalf("marker=%+v want consumed=%d baseline=%d", st, step.consumed, base)
+			}
+			wantCalls := "GET /state,GET /sync,GET /sync/summary,POST /reload"
+			if strings.Join(tr.calls, ",") != wantCalls || strings.Join(m.wantRequest, ",") != wantCalls || tr.loads != i+1 || m.loads != i+1 {
+				t.Fatalf("transport calls=%v loads=%d model calls=%v loads=%d want calls=%s loads=%d", tr.calls, tr.loads, m.wantRequest, m.loads, wantCalls, i+1)
+			}
+		})
+		if t.Failed() {
+			return
+		}
+	}
+}
+
 func TestReloadAuthorityStateLockContentionSkipsThenRetries(t *testing.T) {
 	h := newHookHarness(t)
 	t.Cleanup(h.server.Close)
