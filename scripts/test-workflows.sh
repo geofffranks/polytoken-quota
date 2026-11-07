@@ -106,7 +106,7 @@ assert_contains "$property" 'FS_MACOS:' 'reporter receives trusted macOS filesys
 assert_contains "$property" 'RAPID:' 'reporter receives trusted Rapid result'
 assert_contains "$property" 'FUZZ:' 'reporter receives trusted fuzz matrix result'
 assert_contains "$property" 'github.ref == '\''refs/heads/main'\''' 'reporter requires default-branch provenance'
-assert_contains "$property" 'actions/github-script@v7' 'reporter executes isolated fixed inline JavaScript without checkout'
+assert_contains "$property" 'actions/github-script@v9' 'reporter executes isolated fixed inline JavaScript without checkout'
 assert_contains "$property" 'github-actions\[bot\]' 'reporter requires the automation account to own a marked issue'
 assert_contains "$property" 'listForRepo' 'reporter paginates issue search through the API'
 assert_contains "$property" 'page\+\+' 'reporter searches beyond the first 100 open issues'
