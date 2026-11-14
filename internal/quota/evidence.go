@@ -3,9 +3,9 @@
 //
 // An Evidence record contains NO secrets — only public endpoint paths, auth
 // type categories, schema notes, and dates. The evaluation rule is fail-closed:
-// absent, expired, or incomplete evidence yields an unsupported SupportStatus so
-// that no provider request is made and a sanitized remediation diagnostic is
-// reported.
+// absent or incomplete evidence yields an unsupported SupportStatus so that no
+// provider request is made and a sanitized remediation diagnostic is reported.
+// ReviewBy is retained as descriptive metadata and does not impose a runtime age deadline.
 //
 // Adapters (added in a later task) register their evidence in an
 // EvidenceRegistry and translate its evaluated status into a SupportStatus via
@@ -34,7 +34,7 @@ type Evidence struct {
 	SchemaNote  string    // brief response schema summary (for human review)
 	FixturePath string    // path to a sanitized test fixture (relative to repo root)
 	RecordedAt  time.Time // when this evidence was recorded/verified
-	ReviewBy    time.Time // review/expiry date — evidence is stale after this
+	ReviewBy    time.Time // descriptive review date retained for compatibility; not a runtime deadline
 }
 
 // EvidenceState classifies the freshness of an evidence record.
@@ -42,7 +42,7 @@ type EvidenceState string
 
 const (
 	EvidenceFresh      EvidenceState = "fresh"
-	EvidenceExpired    EvidenceState = "expired"    // past ReviewBy
+	EvidenceExpired    EvidenceState = "expired"    // serialized compatibility state; not produced by EvaluateEvidence
 	EvidenceIncomplete EvidenceState = "incomplete" // missing required fields
 	EvidenceAbsent     EvidenceState = "absent"     // no record at all
 )
@@ -79,14 +79,11 @@ func missingEvidenceFields(e *Evidence) []string {
 	return missing
 }
 
-// EvaluateEvidence returns the freshness status of evidence for a provider.
+// EvaluateEvidence returns the status of contract evidence for a provider.
 // A nil evidence pointer yields EvidenceAbsent. A record missing required
 // fields (Provider, Endpoint, Method, AuthType, or zero RecordedAt/ReviewBy)
-// yields EvidenceIncomplete. A record past its ReviewBy date yields
-// EvidenceExpired. Otherwise EvidenceFresh.
-//
-// Incomplete is checked before expired so that a missing ReviewBy date is never
-// mistaken for a stale one (a zero time is technically "in the past").
+// yields EvidenceIncomplete. Otherwise EvidenceFresh. ReviewBy is retained as
+// descriptive metadata and does not impose a runtime age deadline.
 func EvaluateEvidence(e *Evidence, now time.Time) EvidenceStatus {
 	if e == nil {
 		return EvidenceStatus{State: EvidenceAbsent}
@@ -97,14 +94,6 @@ func EvaluateEvidence(e *Evidence, now time.Time) EvidenceStatus {
 			Reason: fmt.Sprintf(
 				"provider %s contract evidence is incomplete (missing %s); record complete evidence",
 				e.Provider, strings.Join(missing, ", ")),
-		}
-	}
-	if now.After(e.ReviewBy) {
-		return EvidenceStatus{
-			State: EvidenceExpired,
-			Reason: fmt.Sprintf(
-				"provider %s contract evidence expired on %s; re-verify and update",
-				e.Provider, e.ReviewBy.Format("2006-01-02")),
 		}
 	}
 	return EvidenceStatus{State: EvidenceFresh}
@@ -208,7 +197,7 @@ func (r *EvidenceRegistry) Providers() []string {
 // --- Evidence gate integration -------------------------------------------
 
 // SupportFromEvidence maps an EvidenceStatus to a QuotaSource SupportStatus.
-// Fresh evidence → supported. Absent/expired/incomplete → unsupported with the
+// Complete evidence → supported. Absent/incomplete → unsupported with the
 // sanitized remediation reason from the EvidenceStatus (no request should be
 // made).
 func SupportFromEvidence(es EvidenceStatus) SupportStatus {
@@ -223,7 +212,7 @@ func SupportFromEvidence(es EvidenceStatus) SupportStatus {
 // ValidateRelease returns evaluated evidence statuses in configured-provider
 // order. Each configured Codex provider expands in contract order to usage then
 // reset credits; other providers contribute one status. A release is valid only
-// when every returned status is EvidenceFresh. Callers (the release test) assert that;
+// when every returned status is EvidenceFresh. ReviewBy does not impose a calendar deadline. Callers (the release test) assert that;
 // this function performs no assertions itself so it can be reused in doctor
 // diagnostics and dry runs.
 func ValidateRelease(registry *EvidenceRegistry, configured []string, now time.Time) []EvidenceStatus {

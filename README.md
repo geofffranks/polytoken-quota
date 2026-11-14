@@ -156,7 +156,7 @@ Fail-closed semantics:
 - A window without a parseable reset timestamp still decodes, without a reset time, and marks the snapshot `partial`. Reset times are never invented.
 - An exhausted window (`percent: 100`) is reported as unavailable and classed `exhausted` — not as an error.
 - `401` (missing or invalid key) and `403` (valid key with no OpenCode Go subscription) fail closed with distinct, sanitized diagnostics. `429` fails closed with a `Retry-After`-aware message and retries on the next scheduled check.
-- A check with absent, expired, or incomplete contract evidence — or with neither `OPENCODE_GO_API_KEY` nor a usable `auth.json` key — returns an error **without making any HTTP request**.
+- A check with absent or incomplete contract evidence — or with neither `OPENCODE_GO_API_KEY` nor a usable `auth.json` key — returns an error **without making any HTTP request**. Recorded review dates are metadata and do not impose a runtime calendar deadline.
 
 Not synthesized: the endpoint exposes no dollar amounts and no per-model breakdown, so the adapter reports no monetary budget and no per-model windows. Nothing is inferred from the provider's Zen credit balance. The `auth.json` fallback reads only the key field of those two entries, transiently, for the one request; the file's contents never reach an error, snapshot, or state.
 

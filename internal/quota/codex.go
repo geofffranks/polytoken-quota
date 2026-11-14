@@ -123,7 +123,7 @@ func (c *CodexSource) now() time.Time {
 }
 
 // Status reports whether this source is supported. It consults the evidence
-// registry and is fail-closed: absent, expired, or incomplete evidence yields an
+// registry and is fail-closed: absent or incomplete evidence yields an
 // unsupported status with a sanitized remediation reason.
 func (c *CodexSource) Status() SupportStatus {
 	return SupportFromEvidence(c.evidenceStatus())

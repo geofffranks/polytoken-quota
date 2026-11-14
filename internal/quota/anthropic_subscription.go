@@ -124,8 +124,8 @@ func (s *AnthropicSubscriptionSource) now() time.Time {
 	return time.Now()
 }
 
-// Status reports whether this source is supported, fail-closed on absent,
-// expired, or incomplete evidence.
+// Status reports whether this source is supported, fail-closed on absent
+// or incomplete evidence.
 func (s *AnthropicSubscriptionSource) Status() SupportStatus {
 	if s.Evidence == nil {
 		return SupportStatus{

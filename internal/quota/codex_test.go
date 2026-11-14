@@ -272,17 +272,40 @@ func TestCodexResponseBodiesClosedExactlyOnce(t *testing.T) {
 	})
 }
 
+func TestOptionalCodexResetReviewDateDoesNotBlockRequest(t *testing.T) {
+	for _, now := range []time.Time{codexTestNow, codexTestNow.AddDate(100, 0, 0)} {
+		t.Run(now.Format("2006"), func(t *testing.T) {
+			usage := CodexUsageEvidence(codexTestNow)
+			usage.ReviewBy = codexTestNow
+			reset := CodexResetCreditsEvidence(codexTestNow)
+			reset.ReviewBy = codexTestNow
+			doer := &sequenceDoer{responses: []*http.Response{
+				bodyResponse(http.StatusOK, []byte(codexMinimalBody)),
+				bodyResponse(http.StatusOK, []byte(`{"available_count":1,"credits":[{"status":"available"}]}`)),
+			}}
+			src := codexSourceWithEvidence(t, doer, usage, reset)
+			src.Now = func() time.Time { return now }
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != SourceFresh {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if len(doer.calls) != 2 {
+				t.Fatalf("request count=%d, want usage and optional reset requests", len(doer.calls))
+			}
+			if snap.ResetCredits == nil || snap.ResetCredits.Status != CreditAttemptSuccess || snap.ResetCredits.Inventory == nil || snap.ResetCredits.Inventory.UsableCount != 1 {
+				t.Fatalf("optional reset result=%+v", snap.ResetCredits)
+			}
+		})
+	}
+}
+
 func TestResetCreditEvidenceFailureDoesNotBlockUsage(t *testing.T) {
 	cases := []struct {
 		name  string
 		reset Evidence
 	}{
 		{name: "absent"},
-		{name: "stale", reset: func() Evidence {
-			e := CodexResetCreditsEvidence(codexTestNow)
-			e.ReviewBy = codexTestNow.Add(-time.Hour)
-			return e
-		}()},
+
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,10 +315,18 @@ func TestResetCreditEvidenceFailureDoesNotBlockUsage(t *testing.T) {
 			if err != nil || snap.Status == SourceFailed || snap.Availability != QuotaAvailable {
 				t.Fatalf("ordinary usage blocked by optional evidence: snap=%+v err=%v", snap, err)
 			}
-			if len(doer.calls) != 1 {
-				t.Fatalf("calls=%d want usage request only", len(doer.calls))
+			wantCalls := 1
+			if tc.name == "past review date" {
+				wantCalls = 2
 			}
-			if snap.ResetCredits == nil || snap.ResetCredits.Status != CreditAttemptSkipped || snap.ResetCredits.Error == "" {
+			if len(doer.calls) != wantCalls {
+				t.Fatalf("calls=%d want %d", len(doer.calls), wantCalls)
+			}
+			if tc.name == "past review date" {
+				if snap.ResetCredits == nil || snap.ResetCredits.Status != CreditAttemptSuccess || snap.ResetCredits.Inventory == nil {
+					t.Fatalf("past review date did not yield reset inventory: %+v", snap.ResetCredits)
+				}
+			} else if snap.ResetCredits == nil || snap.ResetCredits.Status != CreditAttemptSkipped || snap.ResetCredits.Error == "" {
 				t.Fatalf("missing sanitized skipped enrichment attempt: %+v", snap.ResetCredits)
 			}
 			if strings.Contains(snapshotSecretSurface(snap)+snap.ResetCredits.Error, codexTestAccount) {
@@ -571,12 +602,12 @@ func TestCodexStatusGatedByEvidence(t *testing.T) {
 		t.Fatal("absent evidence should be unsupported")
 	}
 
-	// Expired evidence → unsupported.
-	expired := CodexEvidence(codexTestNow)
-	expired.ReviewBy = codexTestNow.Add(-24 * time.Hour)
-	exp := codexTestSource(t, &recordingDoer{}, &fakeResolver{val: codexTestAuthJSON}, expired)
-	if exp.Status().Supported {
-		t.Fatal("expired evidence should be unsupported")
+	// A past review date is metadata and does not disable the source.
+	pastReview := CodexEvidence(codexTestNow)
+	pastReview.ReviewBy = codexTestNow.Add(-24 * time.Hour)
+	past := codexTestSource(t, &recordingDoer{}, &fakeResolver{val: codexTestAuthJSON}, pastReview)
+	if !past.Status().Supported {
+		t.Fatal("complete evidence with a past review date should be supported")
 	}
 }
 
@@ -596,21 +627,18 @@ func TestCodexEvidenceGateAbsentFailsClosed(t *testing.T) {
 	}
 }
 
-func TestCodexEvidenceGateExpiredFailsClosed(t *testing.T) {
+func TestCodexEvidenceWithPastReviewDateProceeds(t *testing.T) {
 	doer := &recordingDoer{resp: bodyResponse(200, []byte(codexProBody))}
-	expired := CodexEvidence(codexTestNow)
-	expired.ReviewBy = codexTestNow.Add(-24 * time.Hour)
-	src := codexTestSource(t, doer, &fakeResolver{val: codexTestAuthJSON}, expired)
+	evidence := CodexEvidence(codexTestNow)
+	evidence.ReviewBy = codexTestNow.Add(-24 * time.Hour)
+	src := codexTestSource(t, doer, &fakeResolver{val: codexTestAuthJSON}, evidence)
 
 	snap, err := src.Fetch(context.Background())
-	if err == nil {
-		t.Fatal("expected error for expired evidence")
+	if err != nil || snap.Status != SourceFresh {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
 	}
-	if snap.Status != SourceFailed {
-		t.Fatalf("status = %s, want failed", snap.Status)
-	}
-	if len(doer.calls) != 0 {
-		t.Fatalf("transport must not be called when evidence is expired; got %d calls", len(doer.calls))
+	if len(doer.calls) != 1 {
+		t.Fatalf("transport calls=%d, want 1", len(doer.calls))
 	}
 }
 

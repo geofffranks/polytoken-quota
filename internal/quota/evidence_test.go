@@ -43,21 +43,14 @@ func TestEvaluateEvidenceAbsent(t *testing.T) {
 	}
 }
 
-func TestEvaluateEvidenceExpired(t *testing.T) {
+func TestEvaluateEvidenceReviewByIsMetadataOnly(t *testing.T) {
 	e := freshEvidence("codex")
-	e.ReviewBy = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // well before fixedNow
-	st := EvaluateEvidence(&e, fixedNow)
-	if st.State != EvidenceExpired {
-		t.Fatalf("state = %s, want expired", st.State)
-	}
-	if !strings.Contains(st.Reason, "expired") {
-		t.Fatalf("reason should mention expired, got %q", st.Reason)
-	}
-	if !strings.Contains(st.Reason, "codex") {
-		t.Fatalf("reason should mention provider codex, got %q", st.Reason)
-	}
-	if !strings.Contains(st.Reason, "2026-01-01") {
-		t.Fatalf("reason should mention the review date, got %q", st.Reason)
+	e.ReviewBy = fixedNow
+	for _, now := range []time.Time{fixedNow, fixedNow.AddDate(100, 0, 0)} {
+		st := EvaluateEvidence(&e, now)
+		if st.State != EvidenceFresh || st.Reason != "" {
+			t.Fatalf("state at %s = %+v, want fresh with no reason", now, st)
+		}
 	}
 }
 
@@ -92,9 +85,7 @@ func TestEvaluateEvidenceIncomplete(t *testing.T) {
 	}
 }
 
-// A zero ReviewBy must classify as incomplete, not expired (the incomplete
-// check precedes the expiry check so a missing date is never mistaken for a
-// stale one).
+// A zero ReviewBy remains incomplete because it is a required evidence field.
 func TestEvaluateEvidenceZeroReviewByIsIncomplete(t *testing.T) {
 	e := freshEvidence("codex")
 	e.ReviewBy = time.Time{}
@@ -187,14 +178,14 @@ func TestEvidenceRegistryStatusFresh(t *testing.T) {
 	}
 }
 
-func TestEvidenceRegistryStatusExpired(t *testing.T) {
+func TestEvidenceRegistryStatusIgnoresPastReviewBy(t *testing.T) {
 	r := NewEvidenceRegistry()
 	e := freshEvidence("codex")
 	e.ReviewBy = fixedNow.Add(-24 * time.Hour)
 	r.Register(e)
 	st := r.Status("codex", fixedNow)
-	if st.State != EvidenceExpired {
-		t.Fatalf("state = %s, want expired", st.State)
+	if st.State != EvidenceFresh {
+		t.Fatalf("state = %s, want fresh", st.State)
 	}
 }
 
@@ -295,14 +286,14 @@ func TestValidateReleaseRejectsNonFreshCodexResetContract(t *testing.T) {
 			wantReasons: []string{"", "provider codex/reset_credits has no recorded contract evidence; record evidence before enabling"},
 		},
 		{
-			name: "reset evidence stale",
+			name: "reset review date does not block release",
 			evidence: []Evidence{usage, func() Evidence {
 				stale := reset
 				stale.ReviewBy = fixedNow.Add(-time.Hour)
 				return stale
 			}()},
-			wantStates:  []EvidenceState{EvidenceFresh, EvidenceExpired},
-			wantReasons: []string{"", "provider codex contract evidence expired on 2026-06-15; re-verify and update"},
+			wantStates:  []EvidenceState{EvidenceFresh, EvidenceFresh},
+			wantReasons: []string{"", ""},
 		},
 		{
 			name:       "legacy generic codex evidence only",
@@ -368,14 +359,14 @@ func TestCodexResetCreditsRequiresOwnFreshEvidence(t *testing.T) {
 		t.Fatalf("reset evidence overwritten by usage registration: %+v, %v", gotReset, ok)
 	}
 
-	// Reset-credit enrichment has its own freshness gate.
+	// Reset-credit evidence remains independent, but its review date is metadata.
 	reset.ReviewBy = fixedNow.Add(-time.Hour)
 	r.Register(reset)
 	if got := r.StatusContract("codex", CodexUsageContract, fixedNow); got.State != EvidenceFresh {
-		t.Fatalf("usage evidence changed with reset expiry: %s", got.State)
+		t.Fatalf("usage evidence changed with reset review date: %s", got.State)
 	}
-	if got := r.StatusContract("codex", CodexResetCreditsContract, fixedNow); got.State != EvidenceExpired {
-		t.Fatalf("reset evidence = %s, want expired", got.State)
+	if got := r.StatusContract("codex", CodexResetCreditsContract, fixedNow); got.State != EvidenceFresh {
+		t.Fatalf("reset evidence = %s, want fresh", got.State)
 	}
 }
 
@@ -386,11 +377,6 @@ func TestEvidenceReasonsAreSanitized(t *testing.T) {
 	r := NewEvidenceRegistry()
 	reasons = append(reasons, r.Status("codex", fixedNow).Reason)
 	reasons = append(reasons, r.Status("zai", fixedNow).Reason)
-
-	// Expired.
-	exp := freshEvidence("codex")
-	exp.ReviewBy = fixedNow.Add(-24 * time.Hour)
-	reasons = append(reasons, EvaluateEvidence(&exp, fixedNow).Reason)
 
 	// Incomplete — each missing required field.
 	mutators := []func(*Evidence){

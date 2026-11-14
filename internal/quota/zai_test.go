@@ -169,12 +169,12 @@ func TestZaiStatusGatedByEvidence(t *testing.T) {
 		t.Fatal("absent evidence should be unsupported")
 	}
 
-	// Expired evidence → unsupported.
-	expired := ZaiEvidence(zaiTestNow)
-	expired.ReviewBy = zaiTestNow.Add(-24 * time.Hour)
-	exp := zaiTestSource(t, &recordingDoer{}, &fakeResolver{val: zaiTestKey}, expired)
-	if exp.Status().Supported {
-		t.Fatal("expired evidence should be unsupported")
+	// Past review date metadata does not disable a complete source.
+	pastReview := ZaiEvidence(zaiTestNow)
+	pastReview.ReviewBy = zaiTestNow.Add(-24 * time.Hour)
+	past := zaiTestSource(t, &recordingDoer{}, &fakeResolver{val: zaiTestKey}, pastReview)
+	if !past.Status().Supported {
+		t.Fatal("complete evidence with past review date should be supported")
 	}
 }
 
@@ -194,21 +194,18 @@ func TestZaiEvidenceGateAbsentFailsClosed(t *testing.T) {
 	}
 }
 
-func TestZaiEvidenceGateExpiredFailsClosed(t *testing.T) {
+func TestZaiEvidenceWithPastReviewDateProceeds(t *testing.T) {
 	doer := &recordingDoer{resp: bodyResponse(200, []byte(zaiProBody))}
-	expired := ZaiEvidence(zaiTestNow)
-	expired.ReviewBy = zaiTestNow.Add(-24 * time.Hour)
-	src := zaiTestSource(t, doer, &fakeResolver{val: zaiTestKey}, expired)
+	evidence := ZaiEvidence(zaiTestNow)
+	evidence.ReviewBy = zaiTestNow.Add(-24 * time.Hour)
+	src := zaiTestSource(t, doer, &fakeResolver{val: zaiTestKey}, evidence)
 
 	snap, err := src.Fetch(context.Background())
-	if err == nil {
-		t.Fatal("expected error for expired evidence")
+	if err != nil || snap.Status != SourceFresh {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
 	}
-	if snap.Status != SourceFailed {
-		t.Fatalf("status = %s, want failed", snap.Status)
-	}
-	if len(doer.calls) != 0 {
-		t.Fatalf("transport must not be called when evidence is expired; got %d calls", len(doer.calls))
+	if len(doer.calls) != 1 {
+		t.Fatalf("transport calls=%d, want 1", len(doer.calls))
 	}
 }
 

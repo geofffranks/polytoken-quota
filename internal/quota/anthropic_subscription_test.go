@@ -222,6 +222,26 @@ func TestSubscriptionEvidenceGateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSubscriptionPastReviewDateProceeds(t *testing.T) {
+	for _, now := range []time.Time{time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC), time.Date(2126, 8, 22, 12, 0, 0, 0, time.UTC)} {
+		t.Run(now.Format("2006"), func(t *testing.T) {
+			tr := &subStubTransport{body: []byte(`{"five_hour":{"used_percentage":12}}`), code: http.StatusOK}
+			reg := NewEvidenceRegistry()
+			evidence := AnthropicSubscriptionEvidence(now)
+			evidence.ReviewBy = now
+			reg.Register(evidence)
+			src := NewAnthropicSubscriptionSource("anthropic", &BoundedClient{Transport: tr}, subLoader(subValidCreds, nil), reg, now)
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status == SourceFailed || len(snap.Windows) != 1 {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if tr.req == nil {
+				t.Fatal("provider request was not made")
+			}
+		})
+	}
+}
+
 // --- Credential loader -------------------------------------------------------
 
 func TestCredentialLoaderFileOrder(t *testing.T) {

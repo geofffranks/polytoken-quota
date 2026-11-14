@@ -39,8 +39,8 @@ func TestBuiltInAdapterRegistry(t *testing.T) {
 
 // TestBuiltInAdapterEvidenceDoesNotRenewOnConstruction verifies that every
 // built-in adapter returns release-owned fixed dates — the `now` parameter must
-// not slide the evidence window forward. All adapters share the same recording
-// date and derive their review-by per their own cadence.
+// not slide evidence metadata forward. ReviewBy is descriptive and does not
+// determine runtime support.
 func TestBuiltInAdapterEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 	for _, def := range AdapterDefinitions() {
 		t.Run(def.Name, func(t *testing.T) {
@@ -49,10 +49,10 @@ func TestBuiltInAdapterEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 			if !early.RecordedAt.Equal(late.RecordedAt) || !early.ReviewBy.Equal(late.ReviewBy) {
 				t.Fatalf("%s evidence dates changed with now: early=%+v late=%+v", def.Name, early, late)
 			}
-			// Evidence must genuinely expire after its review-by date.
-			status := EvaluateEvidence(&late, late.ReviewBy.Add(time.Minute))
-			if status.State != EvidenceExpired {
-				t.Fatalf("%s evidence should expire after ReviewBy: state=%s", def.Name, status.State)
+			// ReviewBy remains descriptive metadata even after the recorded date.
+			status := EvaluateEvidence(&late, late.ReviewBy.AddDate(100, 0, 0))
+			if status.State != EvidenceFresh {
+				t.Fatalf("%s evidence should remain complete after ReviewBy: state=%s", def.Name, status.State)
 			}
 		})
 	}
@@ -66,9 +66,9 @@ func TestCodexResetCreditsEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 	if !first.RecordedAt.Equal(later.RecordedAt) || !first.ReviewBy.Equal(later.ReviewBy) {
 		t.Fatalf("reset credits evidence dates changed: first=%+v later=%+v", first, later)
 	}
-	status := EvaluateEvidence(&later, later.ReviewBy.Add(time.Minute))
-	if status.State != EvidenceExpired {
-		t.Fatalf("stale evidence state=%s want expired", status.State)
+	status := EvaluateEvidence(&later, later.ReviewBy.AddDate(100, 0, 0))
+	if status.State != EvidenceFresh {
+		t.Fatalf("evidence with past review date state=%s want fresh", status.State)
 	}
 }
 
@@ -522,7 +522,7 @@ func TestSupportedSourceCallsTransport(t *testing.T) {
 
 func TestUnsupportedSourceFailsClosed(t *testing.T) {
 	doer := &recordingDoer{}
-	src := &unsupportedFakeSource{id: "zai-x", reason: "contract evidence expired", doer: doer}
+	src := &unsupportedFakeSource{id: "zai-x", reason: "contract evidence incomplete", doer: doer}
 	if src.Status().Supported {
 		t.Fatal("expected unsupported")
 	}

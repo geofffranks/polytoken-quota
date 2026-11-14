@@ -100,37 +100,45 @@ func TestOpenCodeGoEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 	if !first.RecordedAt.Equal(later.RecordedAt) || !first.ReviewBy.Equal(later.ReviewBy) {
 		t.Fatalf("evidence dates changed on construction: first=%+v later=%+v", first, later)
 	}
-	status := EvaluateEvidence(&later, later.ReviewBy.Add(time.Minute))
-	if status.State != EvidenceExpired {
-		t.Fatalf("stale evidence state=%s want expired", status.State)
+	status := EvaluateEvidence(&later, later.ReviewBy.AddDate(100, 0, 0))
+	if status.State != EvidenceFresh {
+		t.Fatalf("evidence with past review date state=%s want fresh", status.State)
 	}
 }
 
 // TestOpenCodeGoEvidenceGateFailsClosedWithoutRequest pins the fail-closed
-// guarantee: absent or expired evidence yields an error and zero HTTP calls.
+// guarantee: absent evidence yields an error and zero HTTP calls.
 func TestOpenCodeGoEvidenceGateFailsClosedWithoutRequest(t *testing.T) {
-	for name, evidence := range map[string]bool{
-		"absent":  false,
-		"expired": true,
-	} {
-		t.Run(name, func(t *testing.T) {
-			src, doer := opencodeGoTestSource(t, "{}", http.StatusOK, evidence)
-			if name == "expired" {
-				stale := OpenCodeGoEvidence(opencodeGoTestNow)
-				stale.ReviewBy = opencodeGoTestNow.AddDate(0, 0, -1)
-				reg := NewEvidenceRegistry()
-				reg.Register(stale)
-				src.Evidence = reg
-			}
-			if st := src.Status(); st.Supported {
-				t.Fatalf("%s evidence reported supported", name)
-			}
+	src, doer := opencodeGoTestSource(t, "{}", http.StatusOK, false)
+	if st := src.Status(); st.Supported {
+		t.Fatal("absent evidence reported supported")
+	}
+	snap, err := src.Fetch(context.Background())
+	if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown || snap.Error == "" {
+		t.Fatalf("snapshot=%+v err=%v", snap, err)
+	}
+	if len(doer.calls) != 0 {
+		t.Fatalf("fail-closed path made %d HTTP calls, want 0", len(doer.calls))
+	}
+}
+
+func TestOpenCodeGoPastReviewDateProceeds(t *testing.T) {
+	for _, now := range []time.Time{opencodeGoTestNow, opencodeGoTestNow.AddDate(100, 0, 0)} {
+		t.Run(now.Format("2006"), func(t *testing.T) {
+			body := `{"usage":{"rolling":{"status":"ok","percent":20}}}`
+			src, doer := opencodeGoTestSource(t, body, http.StatusOK, true)
+			evidence := OpenCodeGoEvidence(opencodeGoTestNow)
+			evidence.ReviewBy = opencodeGoTestNow
+			reg := NewEvidenceRegistry()
+			reg.Register(evidence)
+			src.Evidence = reg
+			src.Now = func() time.Time { return now }
 			snap, err := src.Fetch(context.Background())
-			if err == nil || snap.Status != SourceFailed || snap.Availability != QuotaUnknown || snap.Error == "" {
+			if err != nil || snap.Status == SourceFailed || len(snap.Windows) == 0 {
 				t.Fatalf("snapshot=%+v err=%v", snap, err)
 			}
-			if len(doer.calls) != 0 {
-				t.Fatalf("fail-closed path made %d HTTP calls, want 0", len(doer.calls))
+			if len(doer.calls) != 1 {
+				t.Fatalf("transport calls=%d, want 1", len(doer.calls))
 			}
 		})
 	}

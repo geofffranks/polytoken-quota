@@ -176,14 +176,13 @@ func TestQuotaPollerIsolationOneFailureDoesNotBlockAnother(t *testing.T) {
 // adapter source reports unsupported (absent evidence), pollOne returns a failed
 // snapshot without making any HTTP request. We construct an explicitly
 // unsupported source directly (a registry with no registered evidence).
-func TestQuotaPollerExpiredOrAbsentEvidenceNeverCallsTransport(t *testing.T) {
+func TestQuotaPollerAbsentEvidenceNeverCallsTransport(t *testing.T) {
 	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name     string
 		evidence *quota.Evidence
 	}{
 		{name: "absent"},
-		{name: "expired", evidence: func() *quota.Evidence { e := quota.CodexEvidence(now); e.ReviewBy = now.Add(-time.Minute); return &e }()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := quota.NewEvidenceRegistry()
@@ -203,8 +202,8 @@ func TestQuotaPollerExpiredOrAbsentEvidenceNeverCallsTransport(t *testing.T) {
 			if transport.called["chatgpt.com"] != 0 {
 				t.Fatalf("transport calls=%d", transport.called["chatgpt.com"])
 			}
-			if got := reg.Status("codex", now); got.State == quota.EvidenceFresh {
-				t.Fatal("poll refreshed release evidence")
+			if got := reg.Status("codex", now); got.State != quota.EvidenceAbsent {
+				t.Fatalf("poll changed absent evidence: %+v", got)
 			}
 		})
 	}
@@ -309,13 +308,13 @@ func TestQuotaDoctorUsesPollerEvidenceWithoutRefreshing(t *testing.T) {
 	if len(findings) != 2 || findings[0].Code != "quota-adapter-unsupported" || findings[1].Code != "quota-partial-unusable" {
 		t.Fatalf("absent evidence findings = %+v", findings)
 	}
-	// Expired and incomplete records must remain unsupported rather than being replaced.
-	expired := quota.CodexEvidence(now)
-	expired.ReviewBy = now.Add(-time.Hour)
-	reg.Register(expired)
+	// Complete evidence remains supported despite a past ReviewBy metadata date.
+	pastReview := quota.CodexEvidence(now)
+	pastReview.ReviewBy = now.Add(-time.Hour)
+	reg.Register(pastReview)
 	findings = doctorQuotaFindings(t, state.State{Providers: map[string]state.ProviderState{}}, desired, now, poller.Evidence)
-	if len(findings) != 2 || !strings.Contains(findings[0].Message, "expired") || findings[1].Code != "quota-partial-unusable" {
-		t.Fatalf("expired evidence findings = %+v", findings)
+	if len(findings) != 1 || findings[0].Code != "quota-partial-unusable" {
+		t.Fatalf("past-review evidence findings = %+v", findings)
 	}
 	incomplete := quota.CodexEvidence(now)
 	incomplete.Endpoint = ""

@@ -1,6 +1,6 @@
 // These tests prove the contract evidence gate's negative path: a provider
-// adapter whose evidence is absent, expired, or incomplete must be unsupported
-// and make NO provider request (fail closed). They are plain Go tests — no
+// adapter whose evidence is absent or incomplete must be unsupported and make
+// NO provider request (fail closed). They are plain Go tests — no
 // external binary or real network is required. A synthetic gated source mirrors
 // how Task 5 adapters will compose the evidence gate.
 //
@@ -103,7 +103,7 @@ func (g *gatedSource) Fetch(ctx context.Context) (quota.QuotaSnapshot, error) {
 	}, nil
 }
 
-// --- Negative gate: absent / expired / incomplete ------------------------
+// --- Negative gate: absent / incomplete ----------------------------------
 
 func TestEvidenceGateAbsentFailsClosed(t *testing.T) {
 	reg := quota.NewEvidenceRegistry() // no evidence registered for "codex"
@@ -125,27 +125,26 @@ func TestEvidenceGateAbsentFailsClosed(t *testing.T) {
 	}
 }
 
-func TestEvidenceGateExpiredFailsClosed(t *testing.T) {
-	reg := quota.NewEvidenceRegistry()
-	e := freshEvidence("codex")
-	e.ReviewBy = contractNow.Add(-24 * time.Hour) // expired yesterday
-	reg.Register(e)
-
-	rt := &recordingTransport{}
-	src := &gatedSource{provider: "codex", reg: reg, now: contractNow, transport: rt}
-
-	if src.Status().Supported {
-		t.Fatal("expected unsupported for expired evidence")
-	}
-	snap, err := src.Fetch(context.Background())
-	if err == nil {
-		t.Fatal("expected error for expired evidence")
-	}
-	if snap.Status != quota.SourceFailed {
-		t.Fatalf("snapshot status = %s, want failed", snap.Status)
-	}
-	if rt.calls != 0 {
-		t.Fatalf("transport must not be called when evidence is expired; got %d calls", rt.calls)
+func TestEvidenceGatePastReviewDateProceeds(t *testing.T) {
+	for _, now := range []time.Time{contractNow, contractNow.AddDate(100, 0, 0)} {
+		t.Run(now.Format("2006"), func(t *testing.T) {
+			reg := quota.NewEvidenceRegistry()
+			e := freshEvidence("codex")
+			e.ReviewBy = contractNow
+			reg.Register(e)
+			rt := &recordingTransport{}
+			src := &gatedSource{provider: "codex", reg: reg, now: now, transport: rt}
+			if !src.Status().Supported {
+				t.Fatal("complete evidence reported unsupported")
+			}
+			snap, err := src.Fetch(context.Background())
+			if err != nil || snap.Status != quota.SourceFresh {
+				t.Fatalf("snapshot=%+v err=%v", snap, err)
+			}
+			if rt.calls != 1 {
+				t.Fatalf("transport calls=%d, want 1", rt.calls)
+			}
+		})
 	}
 }
 
@@ -227,12 +226,6 @@ func TestEvidenceAndReasonsAreSecretFree(t *testing.T) {
 	reg := quota.NewEvidenceRegistry()
 	reasons = append(reasons, reg.Status("codex", contractNow).Reason) // absent
 	reasons = append(reasons, reg.Status("zai", contractNow).Reason)   // absent
-
-	exp := freshEvidence("codex")
-	exp.ReviewBy = contractNow.Add(-24 * time.Hour)
-	regExp := quota.NewEvidenceRegistry()
-	regExp.Register(exp)
-	reasons = append(reasons, regExp.Status("codex", contractNow).Reason) // expired
 
 	for _, m := range []func(*quota.Evidence){
 		func(e *quota.Evidence) { e.Endpoint = "" },
@@ -362,14 +355,13 @@ func TestReleaseEvidenceRejectsNonFreshCodexResetContract(t *testing.T) {
 			wantReason: "provider codex/reset_credits has no recorded contract evidence; record evidence before enabling",
 		},
 		{
-			name: "reset stale",
+			name: "reset past review date",
 			evidence: []quota.Evidence{usage, func() quota.Evidence {
 				stale := reset
 				stale.ReviewBy = now.Add(-time.Hour)
 				return stale
 			}()},
-			wantStates: []quota.EvidenceState{quota.EvidenceFresh, quota.EvidenceExpired},
-			wantReason: "provider codex contract evidence expired on 2026-06-15; re-verify and update",
+			wantStates: []quota.EvidenceState{quota.EvidenceFresh, quota.EvidenceFresh},
 		},
 		{
 			name:       "legacy generic only",
@@ -433,10 +425,10 @@ func TestReleaseEvidenceGate(t *testing.T) {
 	}
 }
 
-// TestBuiltInReleaseEvidenceIsFreshNow is an unconditional CI guard. Built-in
-// adapter evidence uses release-owned fixed dates; this test fails if any
-// adapter's ReviewBy date has passed, so stale evidence cannot ship unnoticed.
-func TestBuiltInReleaseEvidenceIsFreshNow(t *testing.T) {
+// TestBuiltInReleaseEvidenceIsCompleteNow is an unconditional CI guard. Built-in
+// adapter evidence uses release-owned fixed metadata; this test verifies each
+// configured contract remains complete and has its required release fixture.
+func TestBuiltInReleaseEvidenceIsCompleteNow(t *testing.T) {
 	reg := buildReleaseRegistry()
 	now := time.Now()
 	for _, def := range quota.AdapterDefinitions() {

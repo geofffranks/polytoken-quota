@@ -635,7 +635,7 @@ func TestQuotaFindingsUnsupportedAdapter(t *testing.T) {
 		Provider:       "zai",
 		HasQuotaConfig: true,
 		Supported:      false,
-		SupportReason:  "provider zai contract evidence expired; re-verify and update",
+		SupportReason:  "provider zai contract evidence is incomplete; record complete evidence",
 	}}
 	findings := QuotaFindings(probes, false, now)
 	if len(findings) != 1 || findings[0].Code != "quota-adapter-unsupported" || findings[0].Severity != Warning {

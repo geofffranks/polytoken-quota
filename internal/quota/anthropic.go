@@ -128,7 +128,7 @@ func (a *AnthropicSource) now() time.Time {
 }
 
 // Status reports whether this source is supported. It consults the evidence
-// registry and is fail-closed: absent, expired, or incomplete evidence yields
+// registry and is fail-closed: absent or incomplete evidence yields
 // an unsupported status with a sanitized remediation reason. A missing budget
 // is likewise unsupported: there is nothing to measure spend against.
 func (a *AnthropicSource) Status() SupportStatus {

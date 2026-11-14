@@ -66,9 +66,9 @@ func TestNeuralwattEvidenceDoesNotRenewOnConstruction(t *testing.T) {
 	if !first.RecordedAt.Equal(later.RecordedAt) || !first.ReviewBy.Equal(later.ReviewBy) {
 		t.Fatalf("evidence dates changed on construction: first=%+v later=%+v", first, later)
 	}
-	status := EvaluateEvidence(&later, later.ReviewBy.Add(time.Minute))
-	if status.State != EvidenceExpired {
-		t.Fatalf("stale evidence state=%s want expired", status.State)
+	status := EvaluateEvidence(&later, later.ReviewBy.AddDate(100, 0, 0))
+	if status.State != EvidenceFresh {
+		t.Fatalf("evidence with past review date state=%s want fresh", status.State)
 	}
 }
 
